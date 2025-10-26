@@ -9,4 +9,3 @@ class CoreConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "aivus_backend.core"
     verbose_name = "Core"
-

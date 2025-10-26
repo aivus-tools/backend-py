@@ -132,10 +132,10 @@ from aivus_backend.core.managers import JournalizeQuerySet
 class CustomManager(DjangoUserManager):
     def get_queryset(self):
         return JournalizeQuerySet(self.model, using=self._db).filter(deleted_at__isnull=True)
-    
+
     def all_with_deleted(self):
         return JournalizeQuerySet(self.model, using=self._db)
-    
+
     def deleted_only(self):
         return JournalizeQuerySet(self.model, using=self._db).filter(deleted_at__isnull=False)
 ```
@@ -166,4 +166,3 @@ class Order(JournalizeModel):
     # id теперь UUID автоматически
     pass
 ```
-

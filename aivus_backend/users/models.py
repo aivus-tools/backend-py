@@ -13,20 +13,20 @@ from .managers import UserManager
 class User(AbstractUser):
     """
     Custom user model for Aivus-Backend with UUID primary key and soft delete.
-    
+
     Features:
     - UUID as primary key instead of integer for security
     - Email-based authentication (no username)
     - Soft delete functionality (deleted_at field)
     - Timestamps for creation and updates
-    
+
     If adding fields that need to be filled at user signup,
     check forms.SignupForm and forms.SocialSignupForms accordingly.
     """
 
     # Override id with UUID
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    
+
     # Soft delete and timestamps
     created_at = models.DateTimeField(null=True, auto_now_add=True)
     updated_at = models.DateTimeField(null=True, auto_now=True)
@@ -53,12 +53,12 @@ class User(AbstractUser):
         """
         return reverse("users:detail", kwargs={"pk": self.id})
 
-    def delete(self, using=None, keep_parents=False):
+    def delete(self, using=None, keep_parents=False):  # noqa: FBT002
         """Soft delete the user by setting deleted_at timestamp."""
         self.deleted_at = timezone.now()
         self.save(update_fields=("deleted_at",))
 
-    def hard_delete(self, using=None, keep_parents=False):
+    def hard_delete(self, using=None, keep_parents=False):  # noqa: FBT002
         """Permanently delete the user from the database."""
         super().delete(using=using, keep_parents=keep_parents)
 

@@ -29,7 +29,9 @@ class JournalizeManager(models.Manager):
 
     def get_queryset(self):
         """Return queryset excluding soft-deleted records."""
-        return JournalizeQuerySet(self.model, using=self._db).filter(deleted_at__isnull=True)
+        return JournalizeQuerySet(self.model, using=self._db).filter(
+            deleted_at__isnull=True,
+        )
 
     def all_with_deleted(self):
         """Return all records including soft-deleted ones."""
@@ -37,5 +39,6 @@ class JournalizeManager(models.Manager):
 
     def deleted_only(self):
         """Return only soft-deleted records."""
-        return JournalizeQuerySet(self.model, using=self._db).filter(deleted_at__isnull=False)
-
+        return JournalizeQuerySet(self.model, using=self._db).filter(
+            deleted_at__isnull=False,
+        )

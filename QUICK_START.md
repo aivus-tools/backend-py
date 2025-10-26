@@ -1,132 +1,130 @@
-# 🚀 Быстрый старт - Aivus Backend
+# 🚀 Quick Start - Aivus Backend
 
-## ✅ Проект запущен и работает!
+## ✅ Project is up and running!
 
-### 🌐 Открыть в браузере:
+### 🌐 Open in browser:
 
-#### Django Admin (главная админка)
+#### Django Admin (main admin panel)
 ```
 http://localhost:8000/admin/
 
-Логин:    admin@aivus.com
-Пароль:   admin123
+Email:    admin@aivus.com
+Password: admin123
 ```
 
-#### Mailpit (просмотр email)
+#### Mailpit (email viewer)
 ```
 http://localhost:8025
 
-Здесь будут все отправленные письма
+All sent emails will appear here
 ```
 
-#### Flower (мониторинг Celery задач)
+#### Flower (Celery task monitoring)
 ```
 http://localhost:5555
 
-Логин:    admin
-Пароль:   admin123
+User:     admin
+Password: admin123
 ```
 
 ---
 
-## 🐳 Управление Docker
+## 🐳 Docker Management
 
-### Основные команды:
+### Basic commands:
 
 ```bash
-# Перейти в директорию проекта
+# Navigate to project directory
 cd /Users/ipolotsky/Develop/Aivus/Backend/aivus_backend
 
-# Посмотреть статус
+# Check status
 docker compose -f docker-compose.local.yml ps
 
-# Посмотреть логи
+# View logs
 docker compose -f docker-compose.local.yml logs -f django
 
-# Перезапустить
+# Restart
 docker compose -f docker-compose.local.yml restart
 
-# Остановить
+# Stop
 docker compose -f docker-compose.local.yml down
 
-# Запустить снова
+# Start again
 docker compose -f docker-compose.local.yml up -d
 ```
 
 ---
 
-## 🛠️ Django команды
+## 🛠️ Django Commands
 
-Все Django команды выполняются так:
+All Django commands are executed like this:
 ```bash
-docker compose -f docker-compose.local.yml exec django python manage.py <команда>
+docker compose -f docker-compose.local.yml exec django python manage.py <command>
 ```
 
-### Примеры:
+### Examples:
 
 ```bash
 # Django shell
 docker compose -f docker-compose.local.yml exec django python manage.py shell
 
-# Создать миграции
+# Create migrations
 docker compose -f docker-compose.local.yml exec django python manage.py makemigrations
 
-# Применить миграции
+# Apply migrations
 docker compose -f docker-compose.local.yml exec django python manage.py migrate
 
-# Создать суперпользователя
+# Create superuser
 docker compose -f docker-compose.local.yml exec django python manage.py createsuperuser
 
-# Запустить тесты
+# Run tests
 docker compose -f docker-compose.local.yml exec django pytest
 ```
 
 ---
 
-## 📝 Что уже работает
+## 📝 What's Already Working
 
-✅ **PostgreSQL** с UUID и soft delete  
-✅ **Django Admin** готов к использованию  
-✅ **Celery** для фоновых задач  
-✅ **Redis** для кэша и очередей  
-✅ **Mailpit** для тестирования email  
-✅ **Базовые модели** (JournalizeModel)  
-✅ **Hot-reload** при изменении кода  
-
----
-
-## 🎯 Следующие шаги
-
-1. **Откройте админку**: http://localhost:8000/admin/
-2. **Создайте модели** для остальных сущностей
-3. **Настройте DRF** для API
-4. **Мигрируйте логику** из NestJS
+✅ **PostgreSQL** with UUID and soft delete
+✅ **Django Admin** ready to use
+✅ **Celery** for background tasks
+✅ **Redis** for cache and queues
+✅ **Mailpit** for email testing
+✅ **Base models** (JournalizeModel)
+✅ **Hot-reload** on code changes
 
 ---
 
-## 📚 Документация
+## 🎯 Next Steps
 
-- **`PROJECT_STATUS.md`** - Текущий статус проекта
-- **`DOCKER_SETUP.md`** - Подробная документация по Docker
-- **`IMPLEMENTATION_SUMMARY.md`** - Техническая документация
-- **`aivus_backend/core/README.md`** - Документация по базовым моделям
+1. **Open admin panel**: http://localhost:8000/admin/
+2. **Create models** for remaining entities
+3. **Set up DRF** for API
+4. **Migrate logic** from NestJS
 
 ---
 
-## 🆘 Если что-то не работает
+## 📚 Documentation
 
-### Перезапустить все:
+- **`PROJECT_STATUS.md`** - Current project status
+- **`aivus_backend/core/README.md`** - Base models documentation
+
+---
+
+## 🆘 If Something Doesn't Work
+
+### Restart everything:
 ```bash
 cd /Users/ipolotsky/Develop/Aivus/Backend/aivus_backend
 docker compose -f docker-compose.local.yml restart
 ```
 
-### Посмотреть логи ошибок:
+### View error logs:
 ```bash
 docker compose -f docker-compose.local.yml logs django
 ```
 
-### Полная перезагрузка:
+### Complete reload:
 ```bash
 docker compose -f docker-compose.local.yml down
 docker compose -f docker-compose.local.yml up -d
@@ -134,29 +132,28 @@ docker compose -f docker-compose.local.yml up -d
 
 ---
 
-## 💡 Полезная информация
+## 💡 Useful Information
 
-### UUID используется везде:
+### UUID is used everywhere:
 ```python
-# Все ID теперь UUID, не числа
+# All IDs are now UUIDs, not integers
 user.id  # 16811946-8818-4ed4-b4b0-4cfe6eaf8c8f
 ```
 
-### Soft Delete активирован:
+### Soft Delete is active:
 ```python
-# Удаление не удаляет, а помечает
-user.delete()  # Ставит deleted_at
-user.restore()  # Восстанавливает
+# Deletion doesn't delete, it marks
+user.delete()   # Sets deleted_at
+user.restore()  # Restores
 ```
 
-### Менеджер фильтрует удаленные:
+### Manager filters deleted records:
 ```python
-User.objects.all()              # Только активные
-User.objects.all_with_deleted() # Все, включая удаленные
-User.objects.deleted_only()     # Только удаленные
+User.objects.all()              # Only active
+User.objects.all_with_deleted() # All, including deleted
+User.objects.deleted_only()     # Only deleted
 ```
 
 ---
 
-**Проект готов! Приятной разработки! 🚀**
-
+**Project is ready! Happy coding! 🚀**

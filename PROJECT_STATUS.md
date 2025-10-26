@@ -1,47 +1,47 @@
-# 🎉 Статус проекта Aivus Backend
+# 🎉 Aivus Backend Project Status
 
-**Дата:** 21 октября 2025  
-**Статус:** ✅ Запущен и работает в Docker
+**Date:** October 21, 2025
+**Status:** ✅ Running in Docker
 
 ---
 
-## 📦 Что развернуто
+## 📦 What's Deployed
 
-### ✅ Инфраструктура (Docker)
+### ✅ Infrastructure (Docker)
 
 ```
 ✓ Django 5.2.7           → http://localhost:8000
-✓ PostgreSQL 17          → :5432 (внутри Docker)
-✓ Redis 7.2              → :6379 (внутри Docker)
+✓ PostgreSQL 17          → :5432 (inside Docker)
+✓ Redis 7.2              → :6379 (inside Docker)
 ✓ Mailpit                → http://localhost:8025
 ✓ Flower                 → http://localhost:5555
-✓ Celery Worker          → Запущен
-✓ Celery Beat            → Запущен
+✓ Celery Worker          → Running
+✓ Celery Beat            → Running
 ```
 
-### ✅ Базовая архитектура
+### ✅ Base Architecture
 
-#### 1. Core приложение (`aivus_backend/core/`)
-- ✅ `JournalizeModel` - базовая модель с UUID и soft delete
-- ✅ `JournalizeManager` - менеджер с фильтрацией удаленных записей
-- ✅ `JournalizeQuerySet` - QuerySet с поддержкой soft delete
-- ✅ Документация в `core/README.md`
+#### 1. Core Application (`aivus_backend/core/`)
+- ✅ `JournalizeModel` - base model with UUID and soft delete
+- ✅ `JournalizeManager` - manager with soft-deleted records filtering
+- ✅ `JournalizeQuerySet` - QuerySet with soft delete support
+- ✅ Documentation in `core/README.md`
 
-#### 2. Users приложение (обновлено)
-- ✅ UUID primary key вместо integer
-- ✅ Soft delete функционал
-- ✅ Email-based аутентификация
-- ✅ Интеграция с Django Admin и Allauth
+#### 2. Users Application (updated)
+- ✅ UUID primary key instead of integer
+- ✅ Soft delete functionality
+- ✅ Email-based authentication
+- ✅ Integration with Django Admin and Allauth
 
-#### 3. База данных
-- ✅ PostgreSQL настроен и работает
-- ✅ Все миграции применены
-- ✅ UUID работает корректно
-- ✅ Soft delete протестирован
+#### 3. Database
+- ✅ PostgreSQL configured and running
+- ✅ All migrations applied
+- ✅ UUID working correctly
+- ✅ Soft delete tested
 
 ---
 
-## 🔐 Учетные данные
+## 🔐 Credentials
 
 ### Django Admin
 ```
@@ -53,7 +53,7 @@ User ID:  16811946-8818-4ed4-b4b0-4cfe6eaf8c8f (UUID)
 
 ### PostgreSQL
 ```
-Host:     postgres (внутри Docker) / localhost:5432 (снаружи)
+Host:     postgres (inside Docker) / localhost:5432 (from host)
 Database: aivus_backend
 User:     postgres
 Password: postgres
@@ -68,243 +68,236 @@ Password: admin123
 
 ---
 
-## 🎯 Реализованные фичи
+## 🎯 Implemented Features
 
 ### 1. UUID Primary Keys ✅
 ```python
-# Все модели используют UUID вместо integer ID
+# All models use UUID instead of integer ID
 user = User.objects.first()
 print(user.id)  # 16811946-8818-4ed4-b4b0-4cfe6eaf8c8f
 ```
 
-**Преимущества:**
-- 🔒 Невозможно перебрать ID
-- 🔒 Нет предсказуемой последовательности
-- 🔒 Безопасно использовать в URL
-- 🔒 Можно генерировать на клиенте
+**Benefits:**
+- 🔒 Impossible to enumerate IDs
+- 🔒 No predictable sequence
+- 🔒 Safe to use in URLs
+- 🔒 Can be generated on client-side
 
 ### 2. Soft Delete ✅
 ```python
-# Удаление не удаляет из БД, а ставит deleted_at
+# Deletion doesn't remove from DB, sets deleted_at instead
 user.delete()
 
-# Не появляется в обычных запросах
-User.objects.all()  # Только активные
+# Doesn't appear in normal queries
+User.objects.all()  # Only active records
 
-# Но можно получить через специальный метод
-User.objects.all_with_deleted()  # Все, включая удаленные
-User.objects.deleted_only()      # Только удаленные
+# But can be accessed through special method
+User.objects.all_with_deleted()  # All, including deleted
+User.objects.deleted_only()      # Only deleted
 
-# Можно восстановить
+# Can be restored
 user.restore()
 ```
 
-**Преимущества:**
-- 💾 История сохраняется
-- ♻️ Возможность восстановления
-- 📊 Аудит изменений
-- ⚖️ Соответствие GDPR
+**Benefits:**
+- 💾 History preserved
+- ♻️ Restore capability
+- 📊 Audit trail
+- ⚖️ GDPR compliance
 
-### 3. Автоматические Timestamps ✅
+### 3. Automatic Timestamps ✅
 ```python
-# Каждая модель автоматически получает:
-created_at  # Дата создания
-updated_at  # Дата обновления
-deleted_at  # Дата удаления (или null)
+# Each model automatically gets:
+created_at  # Creation date
+updated_at  # Last update date
+deleted_at  # Deletion date (or null)
 ```
 
-### 4. Умный Manager ✅
+### 4. Smart Manager ✅
 ```python
-# По умолчанию исключает удаленные записи
-Category.objects.all()  # Только активные
+# By default excludes soft-deleted records
+Category.objects.all()  # Only active
 
-# Специальные методы для работы с удаленными
-Category.objects.all_with_deleted()  # Все
-Category.objects.deleted_only()       # Только удаленные
+# Special methods for working with deleted records
+Category.objects.all_with_deleted()  # All records
+Category.objects.deleted_only()       # Only deleted
 
-# Bulk операции тоже поддерживают soft delete
+# Bulk operations also support soft delete
 Category.objects.filter(name__startswith='Test').delete()
 ```
 
 ---
 
-## 📂 Структура проекта
+## 📂 Project Structure
 
 ```
 Backend/aivus_backend/
 ├── .envs/
 │   └── .local/
-│       ├── .django      # ✅ Настройки Django
-│       └── .postgres    # ✅ Настройки PostgreSQL
+│       ├── .django      # ✅ Django settings
+│       └── .postgres    # ✅ PostgreSQL settings
 ├── aivus_backend/
-│   ├── core/            # ✅ НОВОЕ - Базовые модели
+│   ├── core/            # ✅ NEW - Base models
 │   │   ├── __init__.py
 │   │   ├── apps.py
 │   │   ├── models.py    # JournalizeModel
 │   │   ├── managers.py  # JournalizeManager
-│   │   └── README.md    # Документация
-│   └── users/           # ✅ ОБНОВЛЕНО
-│       ├── models.py    # User с UUID + soft delete
-│       ├── managers.py  # UserManager с фильтрацией
+│   │   └── README.md    # Documentation
+│   └── users/           # ✅ UPDATED
+│       ├── models.py    # User with UUID + soft delete
+│       ├── managers.py  # UserManager with filtering
 │       └── ...
-├── compose/             # Docker файлы
+├── compose/             # Docker files
 ├── config/
 │   └── settings/
-│       ├── base.py      # ✅ + core в INSTALLED_APPS
-│       └── local.py     # ✅ + defaults для env vars
-├── docker-compose.local.yml  # ✅ Docker Compose конфиг
-├── DOCKER_SETUP.md           # ✅ Инструкции по Docker
-├── IMPLEMENTATION_SUMMARY.md # ✅ Документация реализации
-└── PROJECT_STATUS.md         # ✅ Этот файл
+│       ├── base.py      # ✅ + core in INSTALLED_APPS
+│       └── local.py     # ✅ + defaults for env vars
+├── docker-compose.local.yml  # ✅ Docker Compose config
+└── PROJECT_STATUS.md         # ✅ This file
 ```
 
 ---
 
-## 🧪 Тестирование
+## 🧪 Testing
 
-### Проведено:
-✅ Создание пользователя с UUID  
-✅ Soft delete работает  
-✅ Менеджер фильтрует удаленных  
-✅ Restore восстанавливает записи  
-✅ PostgreSQL работает в Docker  
-✅ Celery запущен  
-✅ Redis работает  
+### Performed:
+✅ User creation with UUID
+✅ Soft delete works
+✅ Manager filters deleted records
+✅ Restore functionality works
+✅ PostgreSQL running in Docker
+✅ Celery running
+✅ Redis working
 
-### Результаты:
+### Results:
 ```
-📊 Статистика:
-  Всего пользователей: 1
-  UUID ID админа: 16811946-8818-4ed4-b4b0-4cfe6eaf8c8f
-  Тип ID: UUID
+📊 Statistics:
+  Total users: 1
+  Admin UUID ID: 16811946-8818-4ed4-b4b0-4cfe6eaf8c8f
+  ID Type: UUID
 
-🧪 Тест soft delete:
-  Создан: test@example.com (ID: f24b403e-be0e-4fc4-a8d8-6e78f083579b)
+🧪 Soft delete test:
+  Created: test@example.com (ID: f24b403e-be0e-4fc4-a8d8-6e78f083579b)
   Soft deleted (deleted_at: 2025-10-21 12:29:43.758227+00:00)
-  Активных пользователей: 1
-  Всего (с удаленными): 2
-  Восстановлен! Активных: 2
+  Active users: 1
+  Total (with deleted): 2
+  Restored! Active: 2
 ```
 
-**Все тесты пройдены успешно! ✅**
+**All tests passed successfully! ✅**
 
 ---
 
-## 📝 Документация
+## 📝 Documentation
 
-### Созданные документы:
+### Created documents:
 
 1. **`aivus_backend/core/README.md`**
-   - Подробное описание JournalizeModel
-   - Примеры использования
+   - Detailed JournalizeModel description
+   - Usage examples
    - Best practices
 
-2. **`IMPLEMENTATION_SUMMARY.md`**
-   - Что было реализовано
-   - Технические детали
-   - Примеры кода
+2. **`PROJECT_STATUS.md`** (this file)
+   - Current project status
+   - What's working
+   - Next steps
 
-3. **`DOCKER_SETUP.md`**
-   - Инструкции по работе с Docker
-   - Все команды управления
-   - Отладка и troubleshooting
-
-4. **`PROJECT_STATUS.md`** (этот файл)
-   - Текущий статус проекта
-   - Что работает
-   - Следующие шаги
+3. **`QUICK_START.md`**
+   - Quick start guide
+   - Essential commands
+   - URLs and credentials
 
 ---
 
-## 🚀 Быстрый старт
+## 🚀 Quick Start
 
-### Запустить проект:
+### Start the project:
 ```bash
 cd /Users/ipolotsky/Develop/Aivus/Backend/aivus_backend
 docker compose -f docker-compose.local.yml up -d
 ```
 
-### Открыть админку:
+### Open admin panel:
 ```
 http://localhost:8000/admin/
 Email: admin@aivus.com
 Password: admin123
 ```
 
-### Посмотреть email (Mailpit):
+### Check emails (Mailpit):
 ```
 http://localhost:8025
 ```
 
-### Мониторинг Celery (Flower):
+### Monitor Celery (Flower):
 ```
 http://localhost:5555
 User: admin / Password: admin123
 ```
 
-### Остановить проект:
+### Stop the project:
 ```bash
 docker compose -f docker-compose.local.yml down
 ```
 
 ---
 
-## 🎯 Следующие шаги
+## 🎯 Next Steps
 
-### 1. Создать остальные модели ⏳
-Используя `JournalizeModel` как базу:
+### 1. Create remaining models ⏳
+Using `JournalizeModel` as base:
 - [ ] Client
-- [ ] Vendor  
+- [ ] Vendor
 - [ ] Team
 - [ ] Brief
 - [ ] Offer
 - [ ] Entry
 - [ ] Rate
 - [ ] Category
-- [ ] И другие из Prisma schema
+- [ ] Other models from Prisma schema
 
-### 2. Настроить Django REST Framework ⏳
-- [ ] Установить и настроить DRF
-- [ ] Создать serializers
-- [ ] Создать viewsets
-- [ ] Настроить роутинг
-- [ ] Swagger/OpenAPI документация
+### 2. Set up Django REST Framework ⏳
+- [ ] Install and configure DRF
+- [ ] Create serializers
+- [ ] Create viewsets
+- [ ] Set up routing
+- [ ] Swagger/OpenAPI documentation
 
-### 3. Миграция бизнес-логики ⏳
-Из NestJS в Django:
-- [ ] HMAC аутентификация
-- [ ] API Key аутентификация  
-- [ ] Groups Guard (роли)
+### 3. Migrate business logic ⏳
+From NestJS to Django:
+- [ ] HMAC authentication
+- [ ] API Key authentication
+- [ ] Groups Guard (roles)
 - [ ] Rate calculation logic
 - [ ] Email confirmation
 - [ ] Password reset
-- [ ] И другие сервисы
+- [ ] Other services
 
-### 4. Установить Unfold Admin ⏳
+### 4. Install Unfold Admin ⏳
 ```bash
 docker compose -f docker-compose.local.yml exec django pip install django-unfold
 ```
 
-### 5. Настроить тесты ⏳
-- [ ] Тесты для моделей
-- [ ] Тесты для API
-- [ ] E2E тесты
+### 5. Set up tests ⏳
+- [ ] Model tests
+- [ ] API tests
+- [ ] E2E tests
 - [ ] Coverage > 80%
 
-### 6. Production готовность ⏳
-- [ ] Docker для production
+### 6. Production readiness ⏳
+- [ ] Production Docker setup
 - [ ] Environment variables
-- [ ] Sentry для мониторинга
-- [ ] Логирование
-- [ ] Backup стратегия
+- [ ] Sentry for monitoring
+- [ ] Logging
+- [ ] Backup strategy
 
 ---
 
-## 📊 Технологический стек
+## 📊 Technology Stack
 
 ### Backend:
 - ✅ Django 5.2.7
-- ✅ Django REST Framework (готов к установке)
+- ✅ Django REST Framework (ready to install)
 - ✅ PostgreSQL 17
 - ✅ Redis 7.2
 - ✅ Celery 5.5.3
@@ -318,92 +311,91 @@ docker compose -f docker-compose.local.yml exec django pip install django-unfold
 
 ### Deployment:
 - ✅ Docker Compose
-- 🔄 Traefik (в процессе)
+- 🔄 Traefik (in progress)
 - 🔄 Production ready config
 
 ---
 
-## ⚡ Производительность
+## ⚡ Performance
 
-### Текущие показатели:
-- Старт всех сервисов: ~15 секунд
-- Применение миграций: ~2 секунды
-- Создание пользователя: ~50ms
-- Hot reload: <1 секунда
+### Current metrics:
+- All services startup: ~15 seconds
+- Migrations apply: ~2 seconds
+- User creation: ~50ms
+- Hot reload: <1 second
 
 ---
 
-## 🐛 Известные проблемы
+## 🐛 Known Issues
 
-### Решено ✅:
-- ✅ SQLite → PostgreSQL миграция
-- ✅ Sites миграция для SQLite (добавлена проверка vendor)
-- ✅ UUID в User модели
-- ✅ Soft delete с Manager
-- ✅ Docker окружение
+### Resolved ✅:
+- ✅ SQLite → PostgreSQL migration
+- ✅ Sites migration for SQLite (added vendor check)
+- ✅ UUID in User model
+- ✅ Soft delete with Manager
+- ✅ Docker environment
 
-### Текущие:
-Нет критических проблем! 🎉
+### Current:
+No critical issues! 🎉
 
 ---
 
 ## 💡 Best Practices
 
-### При создании новых моделей:
+### When creating new models:
 ```python
 from aivus_backend.core.models import JournalizeModel
 
 class MyModel(JournalizeModel):
-    # Автоматически получает:
+    # Automatically includes:
     # - id (UUID)
     # - created_at, updated_at, deleted_at
     # - delete(), restore(), hard_delete()
     # - objects (JournalizeManager)
-    
+
     name = models.CharField(max_length=255)
-    # ... ваши поля
+    # ... your fields
 ```
 
-### При работе с данными:
+### When working with data:
 ```python
-# Используйте стандартные методы - они учитывают soft delete
+# Use standard methods - they handle soft delete
 MyModel.objects.filter(name="Test")
 
-# Если нужны удаленные - явно укажите
+# If you need deleted records - explicitly specify
 MyModel.objects.all_with_deleted()
 
-# Для восстановления
+# To restore
 instance.restore()
 
-# Для физического удаления (осторожно!)
+# For physical deletion (careful!)
 instance.hard_delete()
 ```
 
 ---
 
-## 📞 Контакты и ссылки
+## 📞 Contacts and Links
 
-- GitHub: (добавить позже)
-- Documentation: См. `aivus_backend/core/README.md`
-- Issue Tracker: (добавить позже)
-
----
-
-## 🎊 Итоги
-
-### Что достигнуто:
-✅ **Рабочий Django проект в Docker**  
-✅ **PostgreSQL с UUID и soft delete**  
-✅ **Базовая архитектура готова**  
-✅ **Документация создана**  
-✅ **Тесты пройдены**  
-
-### Готовность к разработке:
-🟢 **100%** - Можно начинать создавать модели и API!
+- GitHub: (add later)
+- Documentation: See `aivus_backend/core/README.md`
+- Issue Tracker: (add later)
 
 ---
 
-**Проект готов к активной разработке!** 🚀
+## 🎊 Summary
 
-*Last updated: 21 октября 2025, 15:30*
+### What's achieved:
+✅ **Working Django project in Docker**
+✅ **PostgreSQL with UUID and soft delete**
+✅ **Base architecture ready**
+✅ **Documentation created**
+✅ **Tests passed**
 
+### Development readiness:
+🟢 **100%** - Ready to start creating models and APIs!
+
+---
+
+**Project is ready for active development!** 🚀
+
+*Last updated: October 21, 2025, 15:30*
