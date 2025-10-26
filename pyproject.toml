@@ -182,6 +182,6 @@ dependencies = [
     "pillow==12.0.0",
     "psycopg[c]==3.2.11",
     "python-slugify==8.0.4",
-    "redis==6.4.0",
+    "redis==7.0.0",
     "sentry-sdk==2.42.1",
 ]
