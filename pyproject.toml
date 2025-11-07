@@ -120,6 +120,10 @@ ignore = [
     "S101", # Use of assert detected https://docs.astral.sh/ruff/rules/assert/
     "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
     "SIM102", # sometimes it's better to nest
+    "BLE001", # Blind exception catching - acceptable in API views
+    "PLR0911", # Too many return statements - acceptable in API views
+    "TRY300", # Consider moving statement to else block - preference
+    "COM812", # Conflicts with formatter
     # of types for comparison.
     # Deactivated because it can make the code slow:
     # https://github.com/astral-sh/ruff/issues/7871

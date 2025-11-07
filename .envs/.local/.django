@@ -12,3 +12,8 @@ REDIS_URL=redis://redis:6379/0
 # Flower
 CELERY_FLOWER_USER=admin
 CELERY_FLOWER_PASSWORD=admin123
+
+# Aivus Authentication
+# ------------------------------------------------------------------------------
+HMAC_SECRET=local-hmac-secret-for-development
+API_KEY=local-api-key-for-development

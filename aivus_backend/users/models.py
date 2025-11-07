@@ -1,11 +1,16 @@
 import uuid
 from typing import ClassVar
 
+from django.contrib.auth.hashers import check_password as django_check_password
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+
+from aivus_backend.core.enums import AuthType
+from aivus_backend.core.enums import TeamRole
+from aivus_backend.core.enums import UserGroup
 
 from .managers import UserManager
 
@@ -39,10 +44,28 @@ class User(AbstractUser):
     email = models.EmailField(_("email address"), unique=True)
     username = None  # type: ignore[assignment]
 
+    # Additional fields for Aivus
+    group = models.CharField(
+        max_length=20,
+        choices=UserGroup.choices,
+        default=UserGroup.UNCONFIRMED,
+        db_index=True,
+    )
+    position = models.CharField(max_length=255, blank=True, default="")
+    auth_type = models.CharField(
+        max_length=20,
+        choices=AuthType.choices,
+        default=AuthType.CREDENTIALS,
+    )
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 
     objects: ClassVar[UserManager] = UserManager()
+
+    class Meta:
+        db_table = "user"
+        ordering = ["-created_at"]
 
     def get_absolute_url(self) -> str:
         """Get URL for user's detail view.
@@ -71,3 +94,106 @@ class User(AbstractUser):
     def is_deleted(self):
         """Check if the user is soft-deleted."""
         return self.deleted_at is not None
+
+    def check_plain_password(self, raw_password: str) -> bool:
+        """Check password without Django auth system."""
+        if not self.password:
+            return False
+        return django_check_password(raw_password, self.password)
+
+
+class Client(models.Model):
+    """Client company model."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ein = models.CharField(max_length=255)  # Employer Identification Number
+    name = models.CharField(max_length=255)
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="clients",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "client"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class Vendor(models.Model):
+    """Vendor/Agency company model."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="agencies",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "vendor"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class Team(models.Model):
+    """Team model for brief collaboration."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "team"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class UserTeam(models.Model):
+    """Many-to-many relationship between User and Team with role."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="user_teams",
+    )
+    team = models.ForeignKey(
+        Team,
+        on_delete=models.CASCADE,
+        related_name="user_teams",
+    )
+    role = models.CharField(max_length=20, choices=TeamRole.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "user_team"
+        unique_together = [["user", "team"]]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.name} - {self.team.name} ({self.role})"
+
+
+# Import AuthToken to make it visible to Django migrations
+from .tokens import AuthToken  # noqa: E402
+from .tokens import TokenType  # noqa: E402
+
+__all__ = ["AuthToken", "Client", "Team", "TokenType", "User", "UserTeam", "Vendor"]

@@ -6,6 +6,8 @@ from django.urls import path
 from django.views import defaults as default_views
 from django.views.generic import TemplateView
 
+from aivus_backend.users.api import user_views
+
 urlpatterns = [
     path("", TemplateView.as_view(template_name="pages/home.html"), name="home"),
     path(
@@ -18,6 +20,15 @@ urlpatterns = [
     # User management
     path("users/", include("aivus_backend.users.urls", namespace="users")),
     path("accounts/", include("allauth.urls")),
+    # API endpoints
+    path("api/v1/auth/", include("aivus_backend.users.api.urls", namespace="auth_api")),
+    path("api/v1/users/me", user_views.user_me, name="user-me"),
+    path(
+        "api/v1/users/<uuid:user_id>/change-group",
+        user_views.change_user_group,
+        name="change-user-group",
+    ),
+    path("api/v1/users", user_views.get_users, name="get-users"),
     # Your stuff: custom urls includes go here
     # ...
     # Media files

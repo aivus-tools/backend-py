@@ -51,6 +51,11 @@ DATABASES["default"]["ATOMIC_REQUESTS"] = True
 # https://docs.djangoproject.com/en/stable/ref/settings/#std:setting-DEFAULT_AUTO_FIELD
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# AIVUS AUTHENTICATION
+# ------------------------------------------------------------------------------
+HMAC_SECRET = env("HMAC_SECRET", default="change-me-in-production")
+API_KEY = env("API_KEY", default="change-me-in-production")
+
 # URLS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#root-urlconf
@@ -84,6 +89,8 @@ THIRD_PARTY_APPS = [
 LOCAL_APPS = [
     "aivus_backend.core",
     "aivus_backend.users",
+    "aivus_backend.catalog",
+    "aivus_backend.projects",
     # Your stuff: custom apps go here
 ]
 # https://docs.djangoproject.com/en/dev/ref/settings/#installed-apps
@@ -141,7 +148,12 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "aivus_backend.core.middleware.HMACAuthenticationMiddleware",
 ]
+
+# Exempt API endpoints from CSRF validation (using HMAC instead)
+CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]
+CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read CSRF cookie for API
 
 # STATIC
 # ------------------------------------------------------------------------------

@@ -1,29 +1,28 @@
-from allauth.account.decorators import secure_admin_login
-from django.conf import settings
+"""Django admin configuration for users app."""
+
 from django.contrib import admin
 from django.contrib.auth import admin as auth_admin
-from django.utils.translation import gettext_lazy as _
 
 from .forms import UserAdminChangeForm
 from .forms import UserAdminCreationForm
+from .models import Client
+from .models import Team
 from .models import User
-
-if settings.DJANGO_ADMIN_FORCE_ALLAUTH:
-    # Force the `admin` sign in process to go through the `django-allauth` workflow:
-    # https://docs.allauth.org/en/latest/common/admin.html#admin
-    admin.autodiscover()
-    admin.site.login = secure_admin_login(admin.site.login)  # type: ignore[method-assign]
+from .models import UserTeam
+from .models import Vendor
 
 
 @admin.register(User)
 class UserAdmin(auth_admin.UserAdmin):
+    """User admin configuration."""
+
     form = UserAdminChangeForm
     add_form = UserAdminCreationForm
     fieldsets = (
         (None, {"fields": ("email", "password")}),
-        (_("Personal info"), {"fields": ("name",)}),
+        ("Personal info", {"fields": ("name", "position")}),
         (
-            _("Permissions"),
+            "Permissions",
             {
                 "fields": (
                     "is_active",
@@ -34,17 +33,66 @@ class UserAdmin(auth_admin.UserAdmin):
                 ),
             },
         ),
-        (_("Important dates"), {"fields": ("last_login", "date_joined")}),
-    )
-    list_display = ["email", "name", "is_superuser"]
-    search_fields = ["name"]
-    ordering = ["id"]
-    add_fieldsets = (
         (
-            None,
+            "Important dates",
             {
-                "classes": ("wide",),
-                "fields": ("email", "password1", "password2"),
+                "fields": (
+                    "last_login",
+                    "date_joined",
+                    "created_at",
+                    "updated_at",
+                    "deleted_at",
+                ),
             },
         ),
+        ("Aivus", {"fields": ("group", "auth_type")}),
     )
+    list_display = ["email", "name", "group", "is_superuser", "created_at"]
+    search_fields = ["name", "email"]
+    ordering = ["-created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    list_filter = ["group", "auth_type", "is_staff", "is_superuser", "is_active"]
+
+
+@admin.register(Client)
+class ClientAdmin(admin.ModelAdmin):
+    """Client admin configuration."""
+
+    list_display = ["name", "ein", "owner", "created_at"]
+    search_fields = ["name", "ein", "owner__email", "owner__name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(Vendor)
+class VendorAdmin(admin.ModelAdmin):
+    """Vendor admin configuration."""
+
+    list_display = ["name", "owner", "created_at"]
+    search_fields = ["name", "owner__email", "owner__name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(Team)
+class TeamAdmin(admin.ModelAdmin):
+    """Team admin configuration."""
+
+    list_display = ["name", "created_at"]
+    search_fields = ["name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(UserTeam)
+class UserTeamAdmin(admin.ModelAdmin):
+    """UserTeam admin configuration."""
+
+    list_display = ["user", "team", "role", "created_at"]
+    search_fields = ["user__name", "user__email", "team__name"]
+    list_filter = ["role", "created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
