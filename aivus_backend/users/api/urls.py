@@ -11,6 +11,11 @@ urlpatterns = [
     path("register", auth_views.register, name="register"),
     path("login", auth_views.login, name="login"),
     path("confirm-email", auth_views.confirm_email, name="confirm-email"),
+    path(
+        "resend-confirmation",
+        auth_views.resend_confirmation,
+        name="resend-confirmation",
+    ),
     path("check-email", auth_views.check_email, name="check-email"),
     path("forgot-password", auth_views.forgot_password, name="forgot-password"),
     path("reset-password", auth_views.reset_password, name="reset-password"),

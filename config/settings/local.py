@@ -31,6 +31,10 @@ CACHES = {
 EMAIL_HOST = env("EMAIL_HOST", default="mailpit")
 # https://docs.djangoproject.com/en/dev/ref/settings/#email-port
 EMAIL_PORT = 1025
+# https://docs.djangoproject.com/en/dev/ref/settings/#default-from-email
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="noreply@aivus.local")
+# Frontend URL for email links
+FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
 
 # django-debug-toolbar
 # ------------------------------------------------------------------------------

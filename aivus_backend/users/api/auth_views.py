@@ -9,6 +9,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import public_endpoint
+from aivus_backend.users.emails import send_confirmation_email
+from aivus_backend.users.emails import send_password_reset_email
 from aivus_backend.users.models import User
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
@@ -52,12 +54,19 @@ def register(request):
         # Send confirmation email for CREDENTIALS users
         if auth_type == "CREDENTIALS":
             token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
-            # TODO: Send email via Celery task
+
+            # Send confirmation email
+            email_sent = send_confirmation_email(user, token_obj.token)
+
+            if email_sent:
+                logger.info("Confirmation email sent to %s", user.email)
+            else:
+                logger.error("Failed to send confirmation email to %s", user.email)
+
             return JsonResponse(
                 {
                     "message": "User registered. Check your email to confirm account.",
                     "id": str(user.id),
-                    "confirmToken": token_obj.token,  # For testing
                 },
                 status=201,
             )
@@ -279,12 +288,75 @@ def forgot_password(request):
 
         token_obj = AuthToken.create_token(user, TokenType.PASSWORD_RESET)
 
-        # TODO: Send email via Celery task
+        # Send password reset email
+        email_sent = send_password_reset_email(user, token_obj.token)
+
+        if email_sent:
+            logger.info("Password reset email sent to %s", user.email)
+        else:
+            logger.error("Failed to send password reset email to %s", user.email)
 
         return JsonResponse(
             {
                 "message": "Password reset link sent to your email.",
-                "resetToken": token_obj.token,  # For testing
+            },
+            status=200,
+        )
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+def resend_confirmation(request):
+    """
+    Resend email confirmation link.
+
+    POST /api/v1/auth/resend-confirmation
+    Body: {"email": "..."}
+    """
+    try:
+        data = json.loads(request.body)
+        email = data.get("email")
+
+        if not email:
+            return JsonResponse({"error": "Email is required"}, status=400)
+
+        user = User.objects.filter(email=email).first()
+
+        if not user:
+            return JsonResponse({"error": "User not found"}, status=404)
+
+        if user.group != "UNCONFIRMED":
+            return JsonResponse(
+                {"error": "User is already confirmed"},
+                status=400,
+            )
+
+        # Delete old confirmation tokens
+        AuthToken.objects.filter(
+            user=user,
+            token_type=TokenType.EMAIL_CONFIRMATION,
+        ).delete()
+
+        # Create new token
+        token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
+
+        # Send confirmation email
+        email_sent = send_confirmation_email(user, token_obj.token)
+
+        if email_sent:
+            logger.info("Confirmation email resent to %s", user.email)
+        else:
+            logger.error("Failed to resend confirmation email to %s", user.email)
+
+        return JsonResponse(
+            {
+                "message": "Confirmation email has been resent.",
             },
             status=200,
         )
