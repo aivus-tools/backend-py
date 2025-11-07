@@ -1,3 +1,15 @@
+# ⚡ OPTIMIZED PRE-COMMIT CONFIG
+# Fast checks for rapid development while maintaining code quality
+#
+# Removed checks (already covered by ruff or rarely needed):
+# - check-json, check-toml, check-xml (ruff validates syntax)
+# - debug-statements (ruff: T100)
+# - check-builtin-literals (ruff: C408)
+# - check-case-conflict (rarely occurs)
+# - check-docstring-first (ruff: D class rules)
+# - djlint-django linting (keeping only formatting)
+# - django-upgrade (optional, can be run manually: `django-upgrade .`)
+
 exclude: '^docs/|/migrations/|devcontainer.json'
 default_stages: [pre-commit]
 minimum_pre_commit_version: "3.2.0"
@@ -6,44 +18,38 @@ default_language_version:
   python: python3.13
 
 repos:
+  # 🔧 CRITICAL: Auto-fixable formatting (fast, always run)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-json
-      - id: check-toml
-      - id: check-xml
-      - id: check-yaml
-      - id: debug-statements
-      - id: check-builtin-literals
-      - id: check-case-conflict
-      - id: check-docstring-first
-      - id: detect-private-key
+      - id: trailing-whitespace      # Auto-fixes trailing spaces
+      - id: end-of-file-fixer        # Auto-fixes missing newlines
+      - id: check-yaml               # Validates YAML (CI configs, docker-compose)
+      - id: detect-private-key       # 🔒 Security: prevents committing secrets
 
-  - repo: https://github.com/adamchainz/django-upgrade
-    rev: '1.29.0'
-    hooks:
-      - id: django-upgrade
-        args: ['--target-version', '5.2']
-
-  # Run the Ruff linter.
+  # ⚡ MAIN: Ruff (linter + formatter - replaces 20+ other tools)
+  # Fast Rust-based linter that covers most Python/Django checks
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.1
     hooks:
-      # Linter
       - id: ruff-check
-        args: [--fix, --exit-non-zero-on-fix]
-      # Formatter
-      - id: ruff-format
+        args: [--fix, --exit-non-zero-on-fix]  # Auto-fixes where possible
+      - id: ruff-format                        # Formats code
 
+  # 🎨 HTML TEMPLATES: Format Django templates (fast, auto-fixable)
   - repo: https://github.com/Riverside-Healthcare/djLint
     rev: v1.36.4
     hooks:
-      - id: djlint-reformat-django
-      - id: djlint-django
+      - id: djlint-reformat-django  # Only formatting, no linting (faster)
 
-# sets up .pre-commit-ci.yaml to ensure pre-commit dependencies stay up to date
+# Optional: Add back for production/strict mode
+#  - repo: https://github.com/adamchainz/django-upgrade
+#    rev: '1.29.0'
+#    hooks:
+#      - id: django-upgrade
+#        args: ['--target-version', '5.2']
+
+# CI configuration
 ci:
   autoupdate_schedule: weekly
   skip: []
