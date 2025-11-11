@@ -59,7 +59,7 @@ def user_me(request):
 
 @csrf_exempt
 @require_http_methods(["PATCH"])
-@require_groups("VENDOR", "CLIENT", "SYSTEM")
+@require_groups("VENDOR", "CLIENT", "SYSTEM", "CONFIRMED")
 def change_user_group(request, user_id):
     """
     Change user group.
@@ -68,8 +68,10 @@ def change_user_group(request, user_id):
     Body: {"group": "VENDOR"}
     """
     try:
-        data = json.loads(request.body)
-        new_group = data.get("group")
+        body = request.body.decode() if isinstance(request.body, (bytes, bytearray)) else request.body
+        data = json.loads(body or "{}")
+        # Поддерживаем оба варианта: новый backend (group) и старый (newGroup)
+        new_group = data.get("group") or data.get("newGroup")
 
         if not new_group:
             return JsonResponse({"error": "Group is required"}, status=400)
