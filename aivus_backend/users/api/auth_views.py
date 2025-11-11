@@ -186,6 +186,7 @@ def login(request):
         return JsonResponse({"error": str(e)}, status=500)
 
 
+@csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
 def confirm_email(request):
@@ -195,6 +196,7 @@ def confirm_email(request):
     GET /api/v1/auth/confirm-email?token=...
     """
     token = request.GET.get("token")
+    logger.debug("Confirming email with token: %s", token)
 
     if not token:
         return JsonResponse({"error": "Token is required"}, status=400)
@@ -206,6 +208,7 @@ def confirm_email(request):
         ).first()
 
         if not token_obj or not token_obj.is_valid():
+            logger.warning("Invalid or expired token: %s", token)
             return JsonResponse(
                 {"error": "Invalid or expired confirmation token"},
                 status=400,
@@ -214,6 +217,7 @@ def confirm_email(request):
         user = token_obj.user
         user.group = "CONFIRMED"
         user.save()
+        logger.info("Email confirmed for user: %s", user.email)
 
         token_obj.delete()
 

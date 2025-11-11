@@ -1,6 +1,7 @@
 """Email sending utilities."""
 
 import logging
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.mail import send_mail
@@ -25,7 +26,9 @@ def send_confirmation_email(user, token: str) -> bool:
         # Build confirmation URL
         # In production this would be your frontend URL
         frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
-        confirmation_url = f"{frontend_url}/auth/confirm-email?token={token}"
+        # Properly encode token for URL
+        query_params = urlencode({"token": token})
+        confirmation_url = f"{frontend_url}/auth/confirm-email?{query_params}"
 
         # Email subject
         subject = "Confirm your email - Aivus"
@@ -75,7 +78,9 @@ def send_password_reset_email(user, token: str) -> bool:
     try:
         # Build reset URL
         frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
-        reset_url = f"{frontend_url}/auth/reset-password?token={token}"
+        # Properly encode token for URL
+        query_params = urlencode({"token": token})
+        reset_url = f"{frontend_url}/auth/reset-password?{query_params}"
 
         # Email subject
         subject = "Reset your password - Aivus"
