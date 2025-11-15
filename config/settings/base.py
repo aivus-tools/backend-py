@@ -76,6 +76,10 @@ DJANGO_APPS = [
     "django.contrib.admin",
     "django.forms",
 ]
+UNFOLD_APPS = [
+    # Needs to be loaded before django.contrib.admin
+    "unfold",
+]
 THIRD_PARTY_APPS = [
     "crispy_forms",
     "crispy_bootstrap5",
@@ -94,7 +98,7 @@ LOCAL_APPS = [
     # Your stuff: custom apps go here
 ]
 # https://docs.djangoproject.com/en/dev/ref/settings/#installed-apps
-INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+INSTALLED_APPS = UNFOLD_APPS + DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 # MIGRATIONS
 # ------------------------------------------------------------------------------
@@ -246,6 +250,11 @@ MANAGERS = ADMINS
 # https://cookiecutter-django.readthedocs.io/en/latest/settings.html#other-environment-settings
 # Force the `admin` sign in process to go through the `django-allauth` workflow
 DJANGO_ADMIN_FORCE_ALLAUTH = env.bool("DJANGO_ADMIN_FORCE_ALLAUTH", default=False)
+UNFOLD = {
+    "SITE_TITLE": "Aivus Admin",
+    "SITE_HEADER": "Aivus Admin",
+    "SITE_LOGO": "images/favicons/favicon.ico",
+}
 
 # LOGGING
 # ------------------------------------------------------------------------------

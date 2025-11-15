@@ -2,6 +2,7 @@
 
 from django.contrib import admin
 from django.contrib.auth import admin as auth_admin
+from unfold.admin import ModelAdmin
 
 from .forms import UserAdminChangeForm
 from .forms import UserAdminCreationForm
@@ -13,7 +14,7 @@ from .models import Vendor
 
 
 @admin.register(User)
-class UserAdmin(auth_admin.UserAdmin):
+class UserAdmin(ModelAdmin, auth_admin.UserAdmin):
     """User admin configuration."""
 
     form = UserAdminChangeForm
@@ -55,7 +56,7 @@ class UserAdmin(auth_admin.UserAdmin):
 
 
 @admin.register(Client)
-class ClientAdmin(admin.ModelAdmin):
+class ClientAdmin(ModelAdmin):
     """Client admin configuration."""
 
     list_display = ["name", "ein", "owner", "created_at"]
@@ -66,7 +67,7 @@ class ClientAdmin(admin.ModelAdmin):
 
 
 @admin.register(Vendor)
-class VendorAdmin(admin.ModelAdmin):
+class VendorAdmin(ModelAdmin):
     """Vendor admin configuration."""
 
     list_display = ["name", "owner", "created_at"]
@@ -77,7 +78,7 @@ class VendorAdmin(admin.ModelAdmin):
 
 
 @admin.register(Team)
-class TeamAdmin(admin.ModelAdmin):
+class TeamAdmin(ModelAdmin):
     """Team admin configuration."""
 
     list_display = ["name", "created_at"]
@@ -88,7 +89,7 @@ class TeamAdmin(admin.ModelAdmin):
 
 
 @admin.register(UserTeam)
-class UserTeamAdmin(admin.ModelAdmin):
+class UserTeamAdmin(ModelAdmin):
     """UserTeam admin configuration."""
 
     list_display = ["user", "team", "role", "created_at"]
