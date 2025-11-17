@@ -28,7 +28,6 @@ class Brief(models.Model):
         blank=True,
         related_name="briefs",
     )
-    team = models.ForeignKey(Team, on_delete=models.PROTECT, related_name="briefs")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -39,6 +38,43 @@ class Brief(models.Model):
 
     def __str__(self):
         return f"Brief {self.id} - {self.status}"
+
+
+class Project(models.Model):
+    """Project model - vendor's work on a brief."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    vendor = models.ForeignKey(
+        Vendor,
+        on_delete=models.PROTECT,
+        related_name="projects",
+    )
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="projects",
+    )
+    team = models.ForeignKey(
+        Team,
+        on_delete=models.PROTECT,
+        related_name="projects",
+        null=True,
+        blank=True,
+    )
+    status = models.CharField(max_length=20, choices=ProjectStatus.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "project"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.vendor.name})"
 
 
 class SimpleRate(models.Model):
@@ -133,14 +169,13 @@ class Offer(models.Model):
         blank=True,
         related_name="child_offers",
     )
-    brief = models.ForeignKey(
-        Brief,
-        on_delete=models.SET_NULL,
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="offers",
         null=True,
         blank=True,
-        related_name="offers",
     )
-    vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, related_name="offers")
     status = models.CharField(max_length=20, choices=ProjectStatus.choices)
     cost = models.IntegerField(null=True, blank=True)
     profit = models.IntegerField(null=True, blank=True)

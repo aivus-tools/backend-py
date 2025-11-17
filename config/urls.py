@@ -29,6 +29,10 @@ urlpatterns = [
         name="change-user-group",
     ),
     path("api/v1/users", user_views.get_users, name="get-users"),
+    # Catalog API
+    path("api/v1/", include("aivus_backend.catalog.api.urls", namespace="catalog_api")),
+    # Projects API (briefs, projects, offers)
+    path("api/v1/", include("aivus_backend.projects.api.urls", namespace="projects_api")),
     # Your stuff: custom urls includes go here
     # ...
     # Media files

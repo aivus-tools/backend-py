@@ -79,7 +79,12 @@ class HMACAuthenticationMiddleware(MiddlewareMixin):
 
     def _verify_hmac(self, request, timestamp, user_id, user_group, signature):
         """Verify HMAC signature."""
-        message = f"{request.method}:{request.path}:{timestamp}:{user_id}:{user_group}"
+        # Include query string in path for HMAC calculation
+        path_with_query = request.path
+        if request.META.get("QUERY_STRING"):
+            path_with_query = f"{request.path}?{request.META['QUERY_STRING']}"
+
+        message = f"{request.method}:{path_with_query}:{timestamp}:{user_id}:{user_group}"
         expected_signature = hmac.new(
             settings.HMAC_SECRET.encode(),
             message.encode(),
