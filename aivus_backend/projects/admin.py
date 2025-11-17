@@ -1,6 +1,7 @@
 """Django admin configuration for projects app."""
 
 from django.contrib import admin
+from unfold.admin import ModelAdmin
 
 from .models import Brief
 from .models import Offer
@@ -13,7 +14,7 @@ from .models import SimpleRate
 
 
 @admin.register(Brief)
-class BriefAdmin(admin.ModelAdmin):
+class BriefAdmin(ModelAdmin):
     """Brief admin configuration."""
 
     list_display = ["id", "status", "client", "created_at"]
@@ -35,7 +36,7 @@ class ProjectAdmin(admin.ModelAdmin):
 
 
 @admin.register(SimpleRate)
-class SimpleRateAdmin(admin.ModelAdmin):
+class SimpleRateAdmin(ModelAdmin):
     """SimpleRate admin configuration."""
 
     list_display = ["vendor", "entry", "value", "created_at"]
@@ -46,7 +47,7 @@ class SimpleRateAdmin(admin.ModelAdmin):
 
 
 @admin.register(Rate)
-class RateAdmin(admin.ModelAdmin):
+class RateAdmin(ModelAdmin):
     """Rate admin configuration."""
 
     list_display = [
@@ -64,7 +65,7 @@ class RateAdmin(admin.ModelAdmin):
 
 
 @admin.register(Offer)
-class OfferAdmin(admin.ModelAdmin):
+class OfferAdmin(ModelAdmin):
     """Offer admin configuration."""
 
     list_display = [
@@ -82,7 +83,7 @@ class OfferAdmin(admin.ModelAdmin):
 
 
 @admin.register(OfferEntry)
-class OfferEntryAdmin(admin.ModelAdmin):
+class OfferEntryAdmin(ModelAdmin):
     """OfferEntry admin configuration."""
 
     list_display = ["offer", "entry", "base_price", "total_price", "created_at"]
@@ -93,7 +94,7 @@ class OfferEntryAdmin(admin.ModelAdmin):
 
 
 @admin.register(OfferRate)
-class OfferRateAdmin(admin.ModelAdmin):
+class OfferRateAdmin(ModelAdmin):
     """OfferRate admin configuration."""
 
     list_display = [
@@ -111,7 +112,7 @@ class OfferRateAdmin(admin.ModelAdmin):
 
 
 @admin.register(Share)
-class ShareAdmin(admin.ModelAdmin):
+class ShareAdmin(ModelAdmin):
     """Share admin configuration."""
 
     list_display = ["offer", "type", "status", "created_at"]
