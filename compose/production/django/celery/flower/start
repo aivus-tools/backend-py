@@ -15,5 +15,4 @@ echo 'Starting flower'
 exec celery \
     -A config.celery_app \
     -b "${REDIS_URL}" \
-    flower \
-    --basic_auth="${CELERY_FLOWER_USER}:${CELERY_FLOWER_PASSWORD}"
+    flower
