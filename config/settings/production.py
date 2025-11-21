@@ -139,6 +139,7 @@ EMAIL_PORT = 1025
 # https://docs.djangoproject.com/en/dev/ref/settings/#default-from-email
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="noreply@aivus.local")
 # Frontend URL for email links
+FRONTEND_URL = env("FRONTEND_URL", default="https://go.aivus.co")
 
 
 # Collectfasta
@@ -154,10 +155,14 @@ INSTALLED_APPS = ["collectfasta", *INSTALLED_APPS]
 
 LOGGING = {
     "version": 1,
-    "disable_existing_loggers": True,
+    "disable_existing_loggers": False,  # Keep existing loggers
     "formatters": {
         "verbose": {
-            "format": "%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d %(message)s",
+            "format": "[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+        "simple": {
+            "format": "%(levelname)s %(message)s",
         },
     },
     "handlers": {
@@ -167,16 +172,55 @@ LOGGING = {
             "formatter": "verbose",
         },
     },
-    "root": {"level": "INFO", "handlers": ["console"]},
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"],
+    },
     "loggers": {
-        "django.db.backends": {
-            "level": "ERROR",
+        # Django core
+        "django": {
+            "level": "INFO",
             "handlers": ["console"],
             "propagate": False,
         },
-        # Errors logged by the SDK itself
-        "sentry_sdk": {"level": "ERROR", "handlers": ["console"], "propagate": False},
-        "django.security.DisallowedHost": {
+        "django.request": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "django.db.backends": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "django.security": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        # Application loggers
+        "aivus_backend": {
+            "level": "DEBUG",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        # Third-party
+        "gunicorn.error": {
+            "level": "DEBUG",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "gunicorn.access": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "celery": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "sentry_sdk": {
             "level": "ERROR",
             "handlers": ["console"],
             "propagate": False,
