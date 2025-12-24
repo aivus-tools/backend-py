@@ -64,6 +64,54 @@ def send_confirmation_email(user, token: str) -> bool:
         return False
 
 
+def send_google_welcome_email(user, temporary_password: str) -> bool:
+    """
+    Send welcome email with temporary password to Google OAuth user.
+
+    Args:
+        user: User instance
+        temporary_password: Generated temporary password
+
+    Returns:
+        bool: True if email sent successfully
+    """
+    try:
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
+
+        # Email subject
+        subject = "Welcome to Aivus - Your temporary password"
+
+        # HTML email body
+        html_message = render_to_string(
+            "emails/google_welcome.html",
+            {
+                "user": user,
+                "temporary_password": temporary_password,
+                "frontend_url": frontend_url,
+            },
+        )
+
+        # Plain text fallback
+        plain_message = strip_tags(html_message)
+
+        # Send email
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+
+        logger.info("Google welcome email sent to %s", user.email)
+        return True
+
+    except Exception:
+        logger.exception("Failed to send Google welcome email to %s", user.email)
+        return False
+
+
 def send_password_reset_email(user, token: str) -> bool:
     """
     Send password reset link to user.

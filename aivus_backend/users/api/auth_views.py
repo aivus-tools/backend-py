@@ -2,6 +2,8 @@
 
 import json
 import logging
+import secrets
+import string
 
 from django.contrib.auth.hashers import make_password
 from django.http import JsonResponse
@@ -10,10 +12,17 @@ from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.users.emails import send_confirmation_email
+from aivus_backend.users.emails import send_google_welcome_email
 from aivus_backend.users.emails import send_password_reset_email
 from aivus_backend.users.models import User
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
+
+
+def generate_temporary_password(length: int = 12) -> str:
+    """Generate a secure temporary password."""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +51,19 @@ def register(request):
         if User.objects.filter(email=email).exists():
             return JsonResponse({"error": "Email already exists"}, status=400)
 
+        # For Google users, generate a temporary password
+        if auth_type == "GOOGLE":
+            temporary_password = generate_temporary_password()
+            hashed_password = make_password(temporary_password)
+        else:
+            temporary_password = None
+            hashed_password = make_password(password) if password else make_password("")
+
         # Create user
         user = User.objects.create(
             email=email,
             name=name,
-            password=make_password(password) if password else None,
+            password=hashed_password,
             auth_type=auth_type,
             group="CONFIRMED" if auth_type == "GOOGLE" else "UNCONFIRMED",
         )
@@ -71,11 +88,18 @@ def register(request):
                 status=201,
             )
 
-        # Google users are confirmed immediately
+        # Google users - send welcome email with temporary password
+        email_sent = send_google_welcome_email(user, temporary_password)
+        if email_sent:
+            logger.info("Google welcome email sent to %s", user.email)
+        else:
+            logger.warning("Failed to send Google welcome email to %s", user.email)
+
         return JsonResponse(
             {
-                "message": "User registered successfully via Google.",
+                "message": "User registered successfully via Google. Check your email for temporary password.",
                 "id": str(user.id),
+                "group": user.group,
             },
             status=201,
         )
@@ -83,6 +107,7 @@ def register(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
+        logger.exception("Register error: %s", e)
         return JsonResponse({"error": str(e)}, status=500)
 
 
@@ -94,16 +119,15 @@ def login(request):
     Login user.
 
     POST /api/v1/auth/login
-    Body: {"email": "...", "password": "...", "name": "...", "googleToken": "..."}
+    Body: {"email": "...", "password": "...", "authType": "CREDENTIALS|GOOGLE"}
     """
     try:
         data = json.loads(request.body)
         email = data.get("email")
         password = data.get("password")
-        name = data.get("name")
-        google_token = data.get("googleToken")
+        auth_type = data.get("authType", "CREDENTIALS")
 
-        logger.debug("Login attempt: email=%s, has_password=%s", email, bool(password))
+        logger.debug("Login attempt: email=%s, authType=%s", email, auth_type)
 
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
@@ -111,41 +135,18 @@ def login(request):
         user = User.objects.filter(email=email).first()
 
         logger.debug(
-            "User lookup: found=%s, auth_type=%s",
+            "User lookup: found=%s, user_auth_type=%s",
             bool(user),
             user.auth_type if user else None,
         )
-
-        # If user doesn't exist and we have Google data, create new user
-        if not user and name and google_token:
-            # TODO: Verify Google token
-            user = User.objects.create(
-                email=email,
-                name=name,
-                auth_type="GOOGLE",
-                group="CONFIRMED",
-            )
-            return JsonResponse(
-                {
-                    "id": str(user.id),
-                    "email": user.email,
-                    "name": user.name,
-                    "group": user.group,
-                },
-                status=200,
-            )
 
         # If user doesn't exist, invalid credentials
         if not user:
             return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-        # Handle Google users
-        if user.auth_type == "GOOGLE":
-            # TODO: Verify Google token
-            if name and user.name != name:
-                user.name = name
-                user.save()
-
+        # Handle Google login - allow for any user
+        if auth_type == "GOOGLE":
+            # Google OAuth verified by NextAuth, just return user data
             return JsonResponse(
                 {
                     "id": str(user.id),
@@ -156,11 +157,11 @@ def login(request):
                 status=200,
             )
 
-        # Handle credential users
+        # Handle credential login - require password
         if not password:
-            logger.debug("No password provided for credential user")
+            logger.debug("No password provided for credential login")
             return JsonResponse(
-                {"error": "Password is required for credential-based users"},
+                {"error": "Password is required"},
                 status=400,
             )
 
