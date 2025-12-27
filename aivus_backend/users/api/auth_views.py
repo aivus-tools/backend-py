@@ -14,7 +14,7 @@ from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.users.emails import send_confirmation_email
 from aivus_backend.users.emails import send_google_welcome_email
 from aivus_backend.users.emails import send_password_reset_email
-from aivus_backend.users.models import User
+from aivus_backend.users.models import User, Vendor, Client
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
 
@@ -146,40 +146,43 @@ def login(request):
 
         # Handle Google login - allow for any user
         if auth_type == "GOOGLE":
-            # Google OAuth verified by NextAuth, just return user data
-            return JsonResponse(
-                {
-                    "id": str(user.id),
-                    "email": user.email,
-                    "name": user.name,
-                    "group": user.group,
-                },
-                status=200,
-            )
+            # Google OAuth verified by NextAuth, prepare response data below
+            pass
+        else:
+            # Handle credential login - require password
+            if not password:
+                logger.debug("No password provided for credential login")
+                return JsonResponse(
+                    {"error": "Password is required"},
+                    status=400,
+                )
+            logger.debug("Checking password for user: %s", user.email)
 
-        # Handle credential login - require password
-        if not password:
-            logger.debug("No password provided for credential login")
-            return JsonResponse(
-                {"error": "Password is required"},
-                status=400,
-            )
+            password_valid = user.check_plain_password(password)
+            logger.debug("Password validation result: %s", password_valid)
 
-        password_valid = user.check_plain_password(password)
-        logger.debug("Password validation result: %s", password_valid)
+            if not password_valid:
+                return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-        if not password_valid:
-            return JsonResponse({"error": "Invalid credentials"}, status=401)
+        # Prepare common response data
+        response_data = {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.name,
+            "group": user.group,
+        }
 
-        return JsonResponse(
-            {
-                "id": str(user.id),
-                "email": user.email,
-                "name": user.name,
-                "group": user.group,
-            },
-            status=200,
-        )
+        # Add vendor_id or client_id if applicable
+        if user.group == "VENDOR":
+            vendor = Vendor.objects.filter(owner=user).first()
+            if vendor:
+                response_data["vendorId"] = str(vendor.id)
+        elif user.group == "CLIENT":
+            client = Client.objects.filter(owner=user).first()
+            if client:
+                response_data["clientId"] = str(client.id)
+
+        return JsonResponse(response_data, status=200)
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)

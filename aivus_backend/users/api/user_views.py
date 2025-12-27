@@ -94,15 +94,25 @@ def change_user_group(request, user_id):
                 owner=user,
             )
 
-        return JsonResponse(
-            {
-                "id": str(user.id),
-                "email": user.email,
-                "name": user.name,
-                "group": user.group,
-            },
-            status=200,
-        )
+        response_data = {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.name,
+            "group": user.group,
+        }
+
+        # Add vendor_id or client_id if applicable
+        if user.group == "VENDOR":
+            vendor = Vendor.objects.filter(owner=user).first()
+            if vendor:
+                response_data["vendorId"] = str(vendor.id)
+
+        if user.group == "CLIENT":
+            client = Client.objects.filter(owner=user).first()
+            if client:
+                response_data["clientId"] = str(client.id)
+
+        return JsonResponse(response_data, status=200)
 
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)

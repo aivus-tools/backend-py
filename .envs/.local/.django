@@ -17,3 +17,6 @@ CELERY_FLOWER_PASSWORD=admin123
 # ------------------------------------------------------------------------------
 HMAC_SECRET=local-hmac-secret-for-development
 API_KEY=local-api-key-for-development
+
+DJANGO_DEBUG=True
+DEBUG=True
