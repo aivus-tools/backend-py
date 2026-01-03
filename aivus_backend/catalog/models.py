@@ -58,7 +58,9 @@ class Unit(models.Model):
         ordering = ["name"]
 
     def __str__(self):
-        return f"{self.name} ({self.symbol})"
+        if self.name in ["Flat", "Each"]:
+            return f"{self.name}"
+        return f"{self.name} (s)"
 
 
 class Entry(models.Model):

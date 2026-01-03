@@ -1,6 +1,8 @@
 """Django admin configuration for projects app."""
 
 from django.contrib import admin
+from django.utils.safestring import mark_safe
+import json
 from unfold.admin import ModelAdmin
 
 from .models import Brief
@@ -78,8 +80,25 @@ class OfferAdmin(ModelAdmin):
     ]
     search_fields = ["project_name", "project__name", "project__vendor__name"]
     list_filter = ["status", "source", "is_locked", "created_at"]
-    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    readonly_fields = ["pretty_details", "created_at", "updated_at", "deleted_at"]
+    fields = [
+        "project_name",
+        "project",
+        "status",
+        "deadline",
+        "source",
+        "is_locked",
+        "pretty_details",
+    ]
     ordering = ["-created_at"]
+
+    @admin.display(description="Details")
+    def pretty_details(self, instance):
+        return mark_safe(
+            f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
+            f'{json.dumps(instance.details, indent=4, ensure_ascii=False)}'
+            f'</pre>'
+        )
 
 
 @admin.register(OfferEntry)
