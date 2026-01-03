@@ -11,6 +11,17 @@ def serialize_category(category):
     }
 
 
+def serialize_unit(unit):
+    """Serialize Unit model to dict."""
+    return {
+        "id": str(unit.id),
+        "name": unit.name,
+        "symbol": unit.symbol,
+        "dimension": unit.dimension,
+        "isDefault": unit.is_default,
+    }
+
+
 def serialize_entry_unit(entry_unit):
     """Serialize EntryUnit with unit details."""
     return {

@@ -49,6 +49,7 @@ class Unit(models.Model):
     name = models.CharField(max_length=255)
     symbol = models.CharField(max_length=50)
     dimension = models.CharField(max_length=20, choices=UnitDimension.choices)
+    is_default = models.BooleanField(default=False, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -61,6 +62,12 @@ class Unit(models.Model):
         if self.name in ["Flat", "Each"]:
             return f"{self.name}"
         return f"{self.name} (s)"
+
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            # Set all other units' is_default to False
+            Unit.objects.exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
 
 
 class Entry(models.Model):
@@ -111,6 +118,14 @@ class EntryUnit(models.Model):
         db_table = "entry_unit"
         unique_together = [["entry", "unit"]]
         ordering = ["-is_default", "unit__name"]
+
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            # Set all other entry units for this entry to is_default=False
+            EntryUnit.objects.filter(entry=self.entry).exclude(pk=self.pk).update(
+                is_default=False
+            )
+        super().save(*args, **kwargs)
 
     def __str__(self):
         default = " (default)" if self.is_default else ""

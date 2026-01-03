@@ -24,9 +24,9 @@ class CategoryAdmin(ModelAdmin):
 class UnitAdmin(ModelAdmin):
     """Unit admin configuration."""
 
-    list_display = ["name", "symbol", "dimension", "created_at"]
+    list_display = ["name", "symbol", "dimension", "is_default", "created_at"]
     search_fields = ["name", "symbol"]
-    list_filter = ["dimension", "created_at"]
+    list_filter = ["dimension", "is_default", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["name"]
 

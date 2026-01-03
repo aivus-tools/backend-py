@@ -5,10 +5,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.catalog.models import Category
-from aivus_backend.catalog.models import Entry
+from aivus_backend.catalog.models import Entry, Unit
 from aivus_backend.core.decorators import require_groups
 
-from .serializers import serialize_category
+from .serializers import serialize_category, serialize_unit
 from .serializers import serialize_entry
 
 
@@ -74,6 +74,23 @@ def get_entry(request, entry_id):
 
     except Entry.DoesNotExist:
         return JsonResponse({"error": "Entry not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "CLIENT", "SYSTEM")
+def get_units(request):
+    """
+    Get all units.
+
+    GET /api/v1/units
+    """
+    try:
+        units = Unit.objects.all().order_by("name")
+        data = [serialize_unit(unit) for unit in units]
+        return JsonResponse({"units": data}, status=200)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
