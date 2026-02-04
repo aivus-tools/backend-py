@@ -75,6 +75,7 @@ class Entry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
+    short_description = models.CharField(max_length=500, blank=True, default="")
     description = models.TextField(blank=True, default="")
     is_approved = models.BooleanField(default=False)
     category = models.ForeignKey(

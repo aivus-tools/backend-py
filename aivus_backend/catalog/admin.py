@@ -1,12 +1,27 @@
 """Django admin configuration for catalog app."""
 
+from django import forms
 from django.contrib import admin
+from tinymce.widgets import TinyMCE
 from unfold.admin import ModelAdmin
 
 from .models import Category
 from .models import Entry
 from .models import EntryUnit
 from .models import Unit
+
+
+class EntryAdminForm(forms.ModelForm):
+    """Custom form for Entry with TinyMCE WYSIWYG editor."""
+
+    description = forms.CharField(
+        widget=TinyMCE(attrs={"cols": 80, "rows": 20}),
+        required=False,
+    )
+
+    class Meta:
+        model = Entry
+        fields = "__all__"
 
 
 @admin.register(Category)
@@ -35,11 +50,13 @@ class UnitAdmin(ModelAdmin):
 class EntryAdmin(ModelAdmin):
     """Entry admin configuration."""
 
-    list_display = ["name", "category", "is_approved", "created_at"]
-    search_fields = ["name", "description"]
+    form = EntryAdminForm
+    list_display = ["name", "short_description", "category", "is_approved", "created_at"]
+    search_fields = ["name", "short_description", "description"]
     list_filter = ["is_approved", "category", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["-created_at"]
+    fields = ["name", "category", "short_description", "description", "is_approved"]
 
 
 @admin.register(EntryUnit)

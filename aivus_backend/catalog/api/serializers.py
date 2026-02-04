@@ -38,6 +38,7 @@ def serialize_entry(entry, include_units=True):
     data = {
         "id": str(entry.id),
         "name": entry.name,
+        "shortDescription": entry.short_description,
         "categoryId": str(entry.category_id),
     }
 
