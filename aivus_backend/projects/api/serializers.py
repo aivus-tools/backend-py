@@ -1,8 +1,10 @@
 """Serializers for projects API."""
 
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import Project
+from aivus_backend.projects.models import ProjectCollaborator
 
 
 def serialize_brief(brief: Brief) -> dict:
@@ -18,18 +20,56 @@ def serialize_brief(brief: Brief) -> dict:
     }
 
 
-def serialize_project(project: Project) -> dict:
-    """Serialize Project model to dict."""
+def serialize_collaborator(collaborator: ProjectCollaborator) -> dict:
+    """Serialize ProjectCollaborator model to dict."""
     return {
+        "id": str(collaborator.id),
+        "userId": str(collaborator.user_id) if collaborator.user_id else None,
+        "name": collaborator.name,
+        "email": collaborator.email,
+        "role": collaborator.role,
+    }
+
+
+def serialize_client_manager(manager: ClientManager) -> dict:
+    """Serialize ClientManager model to dict."""
+    return {
+        "id": str(manager.id),
+        "name": manager.name,
+        "position": manager.position,
+    }
+
+
+def serialize_project(project: Project, include_relations: bool = True) -> dict:
+    """Serialize Project model to dict."""
+    result = {
         "id": str(project.id),
         "name": project.name,
         "vendorId": str(project.vendor_id),
         "briefId": str(project.brief_id) if project.brief_id else None,
         "teamId": str(project.team_id) if project.team_id else None,
         "status": project.status,
+        # New fields
+        "crmId": project.crm_id,
+        "description": project.description,
+        "clientId": str(project.client_id) if project.client_id else None,
+        "clientName": project.client_name or (project.client.name if project.client else None),
+        "irsEin": project.irs_ein,
+        "brandName": project.brand_name,
+        "thumbnailUrl": project.thumbnail.url if project.thumbnail else None,
         "createdAt": project.created_at.isoformat() if project.created_at else None,
         "updatedAt": project.updated_at.isoformat() if project.updated_at else None,
     }
+
+    if include_relations:
+        result["collaborators"] = [
+            serialize_collaborator(c) for c in project.collaborators.all()
+        ]
+        result["clientManagers"] = [
+            serialize_client_manager(m) for m in project.client_managers.all()
+        ]
+
+    return result
 
 
 def serialize_offer(offer: Offer) -> dict:

@@ -20,3 +20,8 @@ API_KEY=local-api-key-for-development
 
 DJANGO_DEBUG=True
 DEBUG=True
+
+# GCP Storage (optional - if empty, local filesystem will be used)
+# ------------------------------------------------------------------------------
+GOOGLE_APPLICATION_CREDENTIALS=/app/gcs-credentials.json
+DJANGO_GCP_STORAGE_BUCKET_NAME=aivus-production-media

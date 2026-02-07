@@ -278,3 +278,5 @@ aivus_backend/media/
 !.envs/.local/
 
 .idea
+
+gcs-credentials.json

@@ -17,6 +17,7 @@ services:
     volumes:
       - /app/.venv
       - .:/app:z
+      - ./gcs-credentials.json:/app/gcs-credentials.json:ro
     env_file:
       - ./.envs/.local/.django
       - ./.envs/.local/.postgres

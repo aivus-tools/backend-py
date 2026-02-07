@@ -14,9 +14,13 @@ from aivus_backend.projects.api.serializers import serialize_brief
 from aivus_backend.projects.api.serializers import serialize_offer
 from aivus_backend.projects.api.serializers import serialize_project
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import Project
+from aivus_backend.projects.models import ProjectCollaborator
+from aivus_backend.users.models import Client
 from aivus_backend.users.models import Team
+from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
 
 logger = logging.getLogger(__name__)
@@ -48,6 +52,16 @@ def projects_list(request):
             name = data.get("name")
             status = data.get("status", "DRAFT")
 
+            # New fields
+            crm_id = data.get("crmId", "")
+            description = data.get("description", "")
+            client_id = data.get("clientId")
+            client_name = data.get("clientName", "")
+            irs_ein = data.get("irsEin", "")
+            brand_name = data.get("brandName", "")
+            collaborators = data.get("collaborators", [])
+            client_managers = data.get("clientManagers", [])
+
             if not vendor_id or not name:
                 return JsonResponse(
                     {"error": "vendorId and name are required"},
@@ -76,13 +90,53 @@ def projects_list(request):
                 except Brief.DoesNotExist:
                     return JsonResponse({"error": "Brief not found"}, status=404)
 
+            # Verify client exists if provided
+            client = None
+            if client_id:
+                try:
+                    client = Client.objects.get(id=client_id)
+                except Client.DoesNotExist:
+                    return JsonResponse({"error": "Client not found"}, status=404)
+
             project = Project.objects.create(
                 name=name,
                 vendor=vendor,
                 brief=brief,
                 team=team,
                 status=status,
+                crm_id=crm_id,
+                description=description,
+                client=client,
+                client_name=client_name,
+                irs_ein=irs_ein,
+                brand_name=brand_name,
             )
+
+            # Create collaborators
+            for collab in collaborators:
+                user = None
+                user_id = collab.get("userId")
+                if user_id:
+                    try:
+                        user = User.objects.get(id=user_id)
+                    except User.DoesNotExist:
+                        pass  # Allow creating collaborator without user link
+
+                ProjectCollaborator.objects.create(
+                    project=project,
+                    user=user,
+                    name=collab.get("name", ""),
+                    email=collab.get("email", ""),
+                    role=collab.get("role", "internal_user"),
+                )
+
+            # Create client managers
+            for manager in client_managers:
+                ClientManager.objects.create(
+                    project=project,
+                    name=manager.get("name", ""),
+                    position=manager.get("position", ""),
+                )
 
             return JsonResponse(serialize_project(project), status=201)
 
@@ -126,11 +180,67 @@ def project_detail(request, project_id):
                 else:
                     project.brief = None
             if "teamId" in data:
-                try:
-                    team = Team.objects.get(id=data["teamId"])
-                    project.team = team
-                except Team.DoesNotExist:
-                    return JsonResponse({"error": "Team not found"}, status=404)
+                if data["teamId"]:
+                    try:
+                        team = Team.objects.get(id=data["teamId"])
+                        project.team = team
+                    except Team.DoesNotExist:
+                        return JsonResponse({"error": "Team not found"}, status=404)
+                else:
+                    project.team = None
+
+            # New fields
+            if "crmId" in data:
+                project.crm_id = data["crmId"]
+            if "description" in data:
+                project.description = data["description"]
+            if "clientId" in data:
+                if data["clientId"]:
+                    try:
+                        client = Client.objects.get(id=data["clientId"])
+                        project.client = client
+                    except Client.DoesNotExist:
+                        return JsonResponse({"error": "Client not found"}, status=404)
+                else:
+                    project.client = None
+            if "clientName" in data:
+                project.client_name = data["clientName"]
+            if "irsEin" in data:
+                project.irs_ein = data["irsEin"]
+            if "brandName" in data:
+                project.brand_name = data["brandName"]
+
+            # Update collaborators if provided
+            if "collaborators" in data:
+                # Delete existing and recreate
+                project.collaborators.all().delete()
+                for collab in data["collaborators"]:
+                    user = None
+                    user_id = collab.get("userId")
+                    if user_id:
+                        try:
+                            user = User.objects.get(id=user_id)
+                        except User.DoesNotExist:
+                            pass
+
+                    ProjectCollaborator.objects.create(
+                        project=project,
+                        user=user,
+                        name=collab.get("name", ""),
+                        email=collab.get("email", ""),
+                        role=collab.get("role", "internal_user"),
+                    )
+
+            # Update client managers if provided
+            if "clientManagers" in data:
+                # Delete existing and recreate
+                project.client_managers.all().delete()
+                for manager in data["clientManagers"]:
+                    ClientManager.objects.create(
+                        project=project,
+                        name=manager.get("name", ""),
+                        position=manager.get("position", ""),
+                    )
 
             project.save()
             return JsonResponse(serialize_project(project))
@@ -147,6 +257,27 @@ def project_detail(request, project_id):
         return JsonResponse({"message": "Project deleted"}, status=200)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def project_thumbnail(request, project_id):
+    """Upload project thumbnail image."""
+    try:
+        project = Project.objects.get(id=project_id, deleted_at__isnull=True)
+    except Project.DoesNotExist:
+        return JsonResponse({"error": "Project not found"}, status=404)
+
+    if "thumbnail" not in request.FILES:
+        return JsonResponse({"error": "No file provided"}, status=400)
+
+    project.thumbnail = request.FILES["thumbnail"]
+    project.save()
+
+    return JsonResponse({
+        "thumbnailUrl": project.thumbnail.url if project.thumbnail else None,
+    })
 
 
 # ==================== Briefs API ====================

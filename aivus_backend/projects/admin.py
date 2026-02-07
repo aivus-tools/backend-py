@@ -6,10 +6,12 @@ import json
 from unfold.admin import ModelAdmin
 
 from .models import Brief
+from .models import ClientManager
 from .models import Offer
 from .models import OfferEntry
 from .models import OfferRate
 from .models import Project
+from .models import ProjectCollaborator
 from .models import Rate
 from .models import Share
 from .models import SimpleRate
@@ -26,14 +28,82 @@ class BriefAdmin(ModelAdmin):
     ordering = ["-created_at"]
 
 
+class ProjectCollaboratorInline(admin.TabularInline):
+    """Inline for ProjectCollaborator in Project admin."""
+
+    model = ProjectCollaborator
+    extra = 0
+    readonly_fields = ["created_at"]
+    fields = ["user", "name", "email", "role", "created_at"]
+
+
+class ClientManagerInline(admin.TabularInline):
+    """Inline for ClientManager in Project admin."""
+
+    model = ClientManager
+    extra = 0
+    readonly_fields = ["created_at"]
+    fields = ["name", "position", "created_at"]
+
+
 @admin.register(Project)
-class ProjectAdmin(admin.ModelAdmin):
+class ProjectAdmin(ModelAdmin):
     """Project admin configuration."""
 
-    list_display = ["name", "vendor", "brief", "team", "status", "created_at"]
-    search_fields = ["name", "vendor__name", "team__name"]
-    list_filter = ["status", "created_at"]
+    list_display = [
+        "name",
+        "vendor",
+        "client",
+        "brand_name",
+        "status",
+        "created_at",
+    ]
+    search_fields = ["name", "vendor__name", "client__name", "brand_name", "crm_id"]
+    list_filter = ["status", "vendor", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+    fieldsets = (
+        ("Basic Info", {
+            "fields": ("name", "vendor", "status", "crm_id", "description"),
+        }),
+        ("Client Info", {
+            "fields": ("client", "irs_ein", "brand_name"),
+        }),
+        ("Media", {
+            "fields": ("thumbnail",),
+        }),
+        ("Relations", {
+            "fields": ("brief", "team"),
+        }),
+        ("Timestamps", {
+            "fields": ("created_at", "updated_at", "deleted_at"),
+            "classes": ("collapse",),
+        }),
+    )
+
+    inlines = [ProjectCollaboratorInline, ClientManagerInline]
+
+
+@admin.register(ProjectCollaborator)
+class ProjectCollaboratorAdmin(ModelAdmin):
+    """ProjectCollaborator admin configuration."""
+
+    list_display = ["project", "user", "name", "email", "role", "created_at"]
+    search_fields = ["project__name", "user__name", "name", "email"]
+    list_filter = ["role", "created_at"]
+    readonly_fields = ["created_at", "updated_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(ClientManager)
+class ClientManagerAdmin(ModelAdmin):
+    """ClientManager admin configuration."""
+
+    list_display = ["project", "name", "position", "created_at"]
+    search_fields = ["project__name", "name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at"]
     ordering = ["-created_at"]
 
 
