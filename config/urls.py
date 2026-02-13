@@ -23,6 +23,13 @@ urlpatterns = [
     # API endpoints
     path("api/v1/auth/", include("aivus_backend.users.api.urls", namespace="auth_api")),
     path("api/v1/users/me", user_views.user_me, name="user-me"),
+    path("api/v1/users/profile", user_views.user_profile, name="user-profile"),
+    path("api/v1/users/settings", user_views.user_settings, name="user-settings"),
+    path(
+        "api/v1/users/change-password",
+        user_views.change_password,
+        name="change-password",
+    ),
     path(
         "api/v1/users/<uuid:user_id>/change-group",
         user_views.change_user_group,

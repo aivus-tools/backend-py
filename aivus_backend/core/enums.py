@@ -45,6 +45,14 @@ class OfferSource(models.TextChoices):
     UPLOAD = "UPLOAD", "Uploaded"
 
 
+class OfferStatus(models.TextChoices):
+    """Offer status choices."""
+
+    DRAFT = "DRAFT", "Draft"
+    PUBLISHED = "PUBLISHED", "Published"
+    ARCHIVED = "ARCHIVED", "Archived"
+
+
 class ShareType(models.TextChoices):
     """Share type choices."""
 

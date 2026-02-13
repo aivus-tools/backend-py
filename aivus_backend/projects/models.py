@@ -1,12 +1,15 @@
-"""Projects models: Brief, Offer, Rate, Share and related models."""
+"""Projects models: Brief, Offer, Rate, Share, BriefOffer and related models."""
 
+import secrets
 import uuid
 from decimal import Decimal
 
 from django.db import models
 
+from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.core.enums import OfferSource
+from aivus_backend.core.enums import OfferStatus
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.core.enums import ShareStatus
 from aivus_backend.core.enums import ShareType
@@ -254,10 +257,16 @@ class Offer(models.Model):
         null=True,
         blank=True,
     )
-    status = models.CharField(max_length=20, choices=ProjectStatus.choices)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=OfferStatus.choices,
+        default=OfferStatus.DRAFT,
+    )
     cost = models.IntegerField(null=True, blank=True)
     profit = models.IntegerField(null=True, blank=True)
     details = models.JSONField(default=dict)
+    metadata = models.JSONField(default=dict, blank=True)
     deadline = models.DateTimeField()
     source = models.CharField(max_length=20, choices=OfferSource.choices)
     is_locked = models.BooleanField(default=False)
@@ -274,7 +283,7 @@ class Offer(models.Model):
 
 
 class OfferEntry(models.Model):
-    """Many-to-many relationship between Offer and Entry."""
+    """Parsed line item from Offer.details JSON."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     offer = models.ForeignKey(
@@ -282,25 +291,44 @@ class OfferEntry(models.Model):
         on_delete=models.CASCADE,
         related_name="offer_entries",
     )
+    frontend_id = models.CharField(max_length=255, blank=True, default="")
+    item_name = models.CharField(max_length=500, blank=True, default="")
     entry = models.ForeignKey(
         Entry,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="offer_entries",
     )
-    total_price = models.DecimalField(max_digits=10, decimal_places=2)
-    base_price = models.DecimalField(max_digits=10, decimal_places=2)
-    details = models.JSONField(default=dict)
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="offer_entries",
+    )
+    price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    client_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    client_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    surcharge = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    tax_rate = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    tax_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    show_tax = models.BooleanField(default=False)
+    is_linked_surcharge = models.BooleanField(default=True)
+    market_range = models.CharField(max_length=50, blank=True, default="")
+    item_data = models.JSONField(default=dict, blank=True)
+    sort_order = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "offer_entry"
-        unique_together = [["offer", "entry"]]
-        ordering = ["-created_at"]
+        ordering = ["sort_order", "-created_at"]
 
     def __str__(self):
-        return f"{self.offer.project_name} - {self.entry.name}"
+        return f"{self.offer.project_name} - {self.item_name or self.frontend_id}"
 
 
 class OfferRate(models.Model):
@@ -340,13 +368,23 @@ class OfferRate(models.Model):
 
 
 class Share(models.Model):
-    """Export/sharing of offers."""
+    """Share link for offers — allows public access via unique token."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     offer = models.ForeignKey(Offer, on_delete=models.CASCADE, related_name="shares")
-    type = models.CharField(max_length=10, choices=ShareType.choices)
-    link = models.CharField(max_length=500)
-    status = models.CharField(max_length=20, choices=ShareStatus.choices)
+    token = models.CharField(max_length=64, unique=True, db_index=True, default=secrets.token_urlsafe)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_shares",
+    )
+    # Keep legacy fields for backward compatibility with existing data
+    type = models.CharField(max_length=10, choices=ShareType.choices, blank=True, default="")
+    link = models.CharField(max_length=500, blank=True, default="")
+    status = models.CharField(max_length=20, choices=ShareStatus.choices, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -356,4 +394,169 @@ class Share(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"{self.offer.project_name} - {self.type} ({self.status})"
+        return f"{self.offer.project_name} - token:{self.token[:8]}... ({'active' if self.is_active else 'inactive'})"
+
+    def save(self, *args, **kwargs):  # noqa: DJ012
+        """Generate token if not set."""
+        if not self.token:
+            self.token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+
+
+class BriefOffer(models.Model):
+    """Links a shared offer to a client's brief."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.CASCADE,
+        related_name="brief_offers",
+    )
+    offer = models.ForeignKey(
+        Offer,
+        on_delete=models.CASCADE,
+        related_name="brief_offers",
+    )
+    linked_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_brief_offers",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_offer"
+        unique_together = [["brief", "offer"]]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Brief {self.brief_id} <-> Offer {self.offer.project_name}"
+
+
+class Template(models.Model):
+    """Template model — full snapshot of an offer for reuse."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    vendor = models.ForeignKey(
+        Vendor,
+        on_delete=models.CASCADE,
+        related_name="templates",
+    )
+    source_offer = models.ForeignKey(
+        Offer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="templates",
+    )
+    details = models.JSONField(default=dict)  # Full snapshot of offer details
+    description = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)  # e.g. categories, totals
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "template"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.vendor.name})"
+
+
+class RateCard(models.Model):
+    """Rate card — a named collection of standard prices for a vendor."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.ForeignKey(
+        Vendor,
+        on_delete=models.CASCADE,
+        related_name="rate_cards",
+    )
+    name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "rate_card_v2"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.vendor.name})"
+
+
+class ChatMessage(models.Model):
+    """Chat message for AI-assisted brief creation."""
+
+    ROLE_CHOICES = [
+        ("user", "User"),
+        ("assistant", "Assistant"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+        null=True,
+        blank=True,
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    content = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "chat_message"
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.role}: {self.content[:50]}..."
+
+
+class RateCardItem(models.Model):
+    """Individual rate item within a rate card."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rate_card = models.ForeignKey(
+        RateCard,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    entry = models.ForeignKey(
+        Entry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rate_card_items",
+    )
+    item_name = models.CharField(max_length=255)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    unit = models.ForeignKey(
+        "catalog.Unit",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rate_card_items",
+    )
+    unit_label = models.CharField(max_length=50, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "rate_card_item"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.item_name} - ${self.price}"

@@ -6,6 +6,8 @@ import json
 from unfold.admin import ModelAdmin
 
 from .models import Brief
+from .models import BriefOffer
+from .models import ChatMessage
 from .models import ClientManager
 from .models import Offer
 from .models import OfferEntry
@@ -13,8 +15,11 @@ from .models import OfferRate
 from .models import Project
 from .models import ProjectCollaborator
 from .models import Rate
+from .models import RateCard
+from .models import RateCardItem
 from .models import Share
 from .models import SimpleRate
+from .models import Template
 
 
 @admin.register(Brief)
@@ -175,11 +180,11 @@ class OfferAdmin(ModelAdmin):
 class OfferEntryAdmin(ModelAdmin):
     """OfferEntry admin configuration."""
 
-    list_display = ["offer", "entry", "base_price", "total_price", "created_at"]
-    search_fields = ["offer__project_name", "entry__name"]
-    list_filter = ["created_at"]
+    list_display = ["offer", "item_name", "entry", "price", "cost", "sort_order", "created_at"]
+    search_fields = ["offer__project_name", "item_name", "frontend_id"]
+    list_filter = ["show_tax", "is_linked_surcharge", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
-    ordering = ["-created_at"]
+    ordering = ["sort_order", "-created_at"]
 
 
 @admin.register(OfferRate)
@@ -204,8 +209,103 @@ class OfferRateAdmin(ModelAdmin):
 class ShareAdmin(ModelAdmin):
     """Share admin configuration."""
 
-    list_display = ["offer", "type", "status", "created_at"]
-    search_fields = ["offer__project_name", "link"]
-    list_filter = ["type", "status", "created_at"]
+    list_display = ["offer", "token_short", "is_active", "created_by", "created_at"]
+    search_fields = ["offer__project_name", "token"]
+    list_filter = ["is_active", "created_at"]
+    readonly_fields = ["token", "created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Token")
+    def token_short(self, instance):
+        return f"{instance.token[:12]}..." if instance.token else ""
+
+
+@admin.register(BriefOffer)
+class BriefOfferAdmin(ModelAdmin):
+    """BriefOffer admin configuration."""
+
+    list_display = ["brief", "offer", "linked_by", "created_at"]
+    search_fields = ["brief__id", "offer__project_name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(Template)
+class TemplateAdmin(ModelAdmin):
+    """Template admin configuration."""
+
+    list_display = ["name", "vendor", "source_offer", "created_at"]
+    search_fields = ["name", "vendor__name"]
+    list_filter = ["vendor", "created_at"]
+    readonly_fields = ["pretty_details", "created_at", "updated_at", "deleted_at"]
+    fields = [
+        "name",
+        "vendor",
+        "source_offer",
+        "description",
+        "pretty_details",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    ]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Details")
+    def pretty_details(self, instance):
+        return mark_safe(
+            f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
+            f'{json.dumps(instance.details, indent=4, ensure_ascii=False)}'
+            f'</pre>'
+        )
+
+
+class RateCardItemInline(admin.TabularInline):
+    """Inline for RateCardItem in RateCard admin."""
+
+    model = RateCardItem
+    extra = 0
+    readonly_fields = ["created_at"]
+    fields = ["item_name", "entry", "price", "unit", "unit_label", "created_at"]
+
+
+@admin.register(RateCard)
+class RateCardAdmin(ModelAdmin):
+    """RateCard admin configuration."""
+
+    list_display = ["name", "vendor", "items_count", "created_at"]
+    search_fields = ["name", "vendor__name"]
+    list_filter = ["vendor", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["-created_at"]
+    inlines = [RateCardItemInline]
+
+    @admin.display(description="Items")
+    def items_count(self, instance):
+        return instance.items.filter(deleted_at__isnull=True).count()
+
+
+@admin.register(RateCardItem)
+class RateCardItemAdmin(ModelAdmin):
+    """RateCardItem admin configuration."""
+
+    list_display = ["rate_card", "item_name", "entry", "price", "unit", "created_at"]
+    search_fields = ["rate_card__name", "item_name", "entry__name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+
+@admin.register(ChatMessage)
+class ChatMessageAdmin(ModelAdmin):
+    """ChatMessage admin configuration."""
+
+    list_display = ["brief", "user", "role", "content_short", "created_at"]
+    search_fields = ["content", "user__email", "brief__id"]
+    list_filter = ["role", "created_at"]
+    readonly_fields = ["created_at"]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Content")
+    def content_short(self, instance):
+        return instance.content[:80] + "..." if len(instance.content) > 80 else instance.content

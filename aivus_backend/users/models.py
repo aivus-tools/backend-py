@@ -192,8 +192,40 @@ class UserTeam(models.Model):
         return f"{self.user.name} - {self.team.name} ({self.role})"
 
 
+class UserSettings(models.Model):
+    """User settings for preferences and notifications."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="settings",
+    )
+    language = models.CharField(max_length=5, default="en")
+    nda_accepted = models.BooleanField(default=False)
+    notification_email = models.BooleanField(default=True)
+    notification_browser = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_settings"
+
+    def __str__(self):
+        return f"Settings for {self.user.email}"
+
+
 # Import AuthToken to make it visible to Django migrations
 from .tokens import AuthToken  # noqa: E402
 from .tokens import TokenType  # noqa: E402
 
-__all__ = ["AuthToken", "Client", "Team", "TokenType", "User", "UserTeam", "Vendor"]
+__all__ = [
+    "AuthToken",
+    "Client",
+    "Team",
+    "TokenType",
+    "User",
+    "UserSettings",
+    "UserTeam",
+    "Vendor",
+]

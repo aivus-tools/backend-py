@@ -2,22 +2,53 @@
 
 import json
 import logging
+import uuid as uuid_module
+from collections import defaultdict
 from datetime import datetime
 from datetime import timezone
+from decimal import Decimal
 
+import openpyxl
+from django.db import IntegrityError
+from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from aivus_backend.catalog.models import Entry
+from aivus_backend.catalog.models import Unit
+from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import OfferSource
+from aivus_backend.core.enums import OfferStatus
+from aivus_backend.projects.ai_brief import analyze_brief
+from aivus_backend.projects.ai_brief import analyze_comparison
+from aivus_backend.projects.ai_brief import process_chat_message
 from aivus_backend.projects.api.serializers import serialize_brief
+from aivus_backend.projects.api.serializers import serialize_brief_detail
+from aivus_backend.projects.api.serializers import serialize_brief_offer
+from aivus_backend.projects.api.serializers import serialize_brief_with_offers
 from aivus_backend.projects.api.serializers import serialize_offer
 from aivus_backend.projects.api.serializers import serialize_project
+from aivus_backend.projects.api.serializers import serialize_rate_card
+from aivus_backend.projects.api.serializers import serialize_rate_card_item
+from aivus_backend.projects.api.serializers import serialize_share
+from aivus_backend.projects.api.serializers import serialize_share_public
+from aivus_backend.projects.api.serializers import serialize_template
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefOffer
+from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
+from aivus_backend.projects.models import OfferEntry
 from aivus_backend.projects.models import Project
 from aivus_backend.projects.models import ProjectCollaborator
+from aivus_backend.projects.models import RateCard
+from aivus_backend.projects.models import RateCardItem
+from aivus_backend.projects.models import Share
+from aivus_backend.projects.models import Template
+from aivus_backend.projects.services import parse_offer_details_to_entries
+from aivus_backend.projects.services import reconstruct_details_from_entries
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import Team
 from aivus_backend.users.models import User
@@ -74,13 +105,13 @@ def projects_list(request):
             except Vendor.DoesNotExist:
                 return JsonResponse({"error": "Vendor not found"}, status=404)
 
-            # Verify team exists if provided
+            # Verify team exists if provided (non-fatal if not found)
             team = None
             if team_id:
                 try:
                     team = Team.objects.get(id=team_id)
                 except Team.DoesNotExist:
-                    return JsonResponse({"error": "Team not found"}, status=404)
+                    logger.warning("Team %s not found, creating project without team", team_id)
 
             # Verify brief exists if provided
             brief = None
@@ -385,6 +416,7 @@ def offers_list(request):
             project_name = data.get("projectName")
             status = data.get("status", "DRAFT")
             details = data.get("details", {})
+            description = data.get("description", "")
             deadline = data.get("deadline")
             source = data.get("source", "PLATFORM")
             is_locked = data.get("isLocked", False)
@@ -412,6 +444,7 @@ def offers_list(request):
             offer = Offer.objects.create(
                 project=project,
                 project_name=project_name,
+                description=description,
                 status=status,
                 details=details,
                 deadline=deadline_dt,
@@ -420,6 +453,13 @@ def offers_list(request):
                 cost=cost,
                 profit=profit,
             )
+
+            # Parse details JSON into OfferEntry records
+            if details:
+                try:
+                    parse_offer_details_to_entries(offer, details)
+                except Exception:
+                    logger.exception("Error parsing offer details to entries for offer %s", offer.id)
 
             return JsonResponse(serialize_offer(offer), status=201)
 
@@ -451,10 +491,10 @@ def offer_detail(request, offer_id):
 
             if "projectName" in data:
                 offer.project_name = data["projectName"]
+            if "description" in data:
+                offer.description = data["description"]
             if "status" in data:
                 offer.status = data["status"]
-            if "details" in data:
-                offer.details = data["details"]
             if "deadline" in data:
                 try:
                     deadline_dt = datetime.fromisoformat(
@@ -475,7 +515,17 @@ def offer_detail(request, offer_id):
             if "profit" in data:
                 offer.profit = data["profit"]
 
-            offer.save()
+            # Handle details: save raw JSON and parse into OfferEntry records
+            if "details" in data:
+                offer.details = data["details"]
+                offer.save()
+                try:
+                    parse_offer_details_to_entries(offer, data["details"])
+                except Exception:
+                    logger.exception("Error parsing offer details to entries for offer %s", offer.id)
+            else:
+                offer.save()
+
             return JsonResponse(serialize_offer(offer))
 
         except json.JSONDecodeError:
@@ -504,4 +554,1273 @@ def offers_by_project(request, project_id):
 
     offers = Offer.objects.filter(project=project, deleted_at__isnull=True)
     return JsonResponse([serialize_offer(o) for o in offers], safe=False)
+
+
+# ==================== Shares API ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def shares_create(request):
+    """Create a share link for an offer.
+
+    Body: {"offerId": "uuid"}
+    Returns the share with token.
+    Auto-publishes the offer if it is in DRAFT status.
+    Reuses existing active share if one already exists.
+    """
+    try:
+        data = json.loads(request.body)
+        offer_id = data.get("offerId")
+
+        if not offer_id:
+            return JsonResponse({"error": "offerId is required"}, status=400)
+
+        try:
+            offer = Offer.objects.select_related("project", "project__vendor").get(
+                id=offer_id,
+                deleted_at__isnull=True,
+            )
+        except Offer.DoesNotExist:
+            return JsonResponse({"error": "Offer not found"}, status=404)
+
+        # Verify the requesting user owns the offer (via vendor)
+        user_vendor_id = request.user_data.get("vendor_id")
+        if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+            return JsonResponse({"error": "Access denied"}, status=403)
+
+        # Auto-publish offer if it's still DRAFT
+        if offer.status == OfferStatus.DRAFT:
+            offer.status = OfferStatus.PUBLISHED
+            offer.save(update_fields=["status", "updated_at"])
+
+        # Check for existing active share — reuse it
+        existing_share = Share.objects.filter(offer=offer, is_active=True).first()
+        if existing_share:
+            return JsonResponse(serialize_share(existing_share), status=200)
+
+        # Get creating user
+        user_id = request.user_data.get("id")
+        user = None
+        if user_id:
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                pass
+
+        # Create new share
+        share = Share.objects.create(
+            offer=offer,
+            created_by=user,
+        )
+
+        return JsonResponse(serialize_share(share), status=201)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error creating share")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+def share_get_public(request, token):
+    """Get offer data by share token. NO AUTH REQUIRED (public endpoint).
+
+    Returns full offer details via reconstruct_details_from_entries() plus vendor info.
+    """
+    try:
+        share = Share.objects.select_related(
+            "offer",
+            "offer__project",
+            "offer__project__vendor",
+        ).get(token=token)
+    except Share.DoesNotExist:
+        return JsonResponse({"error": "Share not found"}, status=404)
+
+    if not share.is_active:
+        return JsonResponse({"error": "Share link is no longer active"}, status=410)
+
+    return JsonResponse(serialize_share_public(share))
+
+
+@csrf_exempt
+@require_http_methods(["PATCH", "DELETE"])
+@require_groups("VENDOR", "SYSTEM")
+def share_manage(request, token):
+    """Manage share: toggle active/inactive (PATCH) or deactivate (DELETE).
+
+    Requires vendor auth (must be offer owner).
+    """
+    try:
+        share = Share.objects.select_related(
+            "offer",
+            "offer__project",
+        ).get(token=token)
+    except Share.DoesNotExist:
+        return JsonResponse({"error": "Share not found"}, status=404)
+
+    # Verify ownership
+    user_vendor_id = request.user_data.get("vendor_id")
+    if share.offer.project and user_vendor_id and str(share.offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    # PATCH — toggle active/inactive
+    if request.method == "PATCH":
+        try:
+            data = json.loads(request.body)
+            if "isActive" in data:
+                share.is_active = bool(data["isActive"])
+            else:
+                share.is_active = not share.is_active
+            share.save(update_fields=["is_active", "updated_at"])
+            return JsonResponse(serialize_share(share))
+        except json.JSONDecodeError:
+            share.is_active = not share.is_active
+            share.save(update_fields=["is_active", "updated_at"])
+            return JsonResponse(serialize_share(share))
+        except Exception as e:
+            logger.exception("Error toggling share")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    # DELETE — deactivate
+    if request.method == "DELETE":
+        share.is_active = False
+        share.save(update_fields=["is_active", "updated_at"])
+        return JsonResponse({"message": "Share deactivated"})
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+# ==================== Share Link to Brief ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT", "SYSTEM")
+def share_link_to_brief(request, token):
+    """Link a shared offer to a client's brief.
+
+    Body: {"briefId": "uuid"}
+    Creates BriefOffer association.
+    """
+    try:
+        share = Share.objects.select_related("offer").get(token=token)
+    except Share.DoesNotExist:
+        return JsonResponse({"error": "Share not found"}, status=404)
+
+    if not share.is_active:
+        return JsonResponse({"error": "Share link is no longer active"}, status=410)
+
+    try:
+        data = json.loads(request.body)
+        brief_id = data.get("briefId")
+
+        if not brief_id:
+            return JsonResponse({"error": "briefId is required"}, status=400)
+
+        try:
+            brief = Brief.objects.get(id=brief_id, deleted_at__isnull=True)
+        except Brief.DoesNotExist:
+            return JsonResponse({"error": "Brief not found"}, status=404)
+
+        # Verify the client owns the brief
+        user_client_id = request.user_data.get("client_id")
+        if brief.client_id and user_client_id and str(brief.client_id) != user_client_id:
+            return JsonResponse({"error": "Access denied"}, status=403)
+
+        # Get linking user
+        user_id = request.user_data.get("id")
+        user = None
+        if user_id:
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                pass
+
+        # Create BriefOffer association (or return existing)
+        try:
+            with transaction.atomic():
+                brief_offer = BriefOffer.objects.create(
+                    brief=brief,
+                    offer=share.offer,
+                    linked_by=user,
+                )
+            return JsonResponse(serialize_brief_offer(brief_offer), status=201)
+        except IntegrityError:
+            # Already linked
+            brief_offer = BriefOffer.objects.get(brief=brief, offer=share.offer)
+            return JsonResponse(serialize_brief_offer(brief_offer), status=200)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error linking share to brief")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== Offer Status ====================
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+@require_groups("VENDOR", "SYSTEM")
+def offer_status_update(request, offer_id):
+    """Change offer status. Only the offer owner can change status.
+
+    Body: {"status": "PUBLISHED"}
+    Valid statuses: DRAFT, PUBLISHED, ARCHIVED.
+    """
+    try:
+        offer = Offer.objects.select_related("project").get(
+            id=offer_id,
+            deleted_at__isnull=True,
+        )
+    except Offer.DoesNotExist:
+        return JsonResponse({"error": "Offer not found"}, status=404)
+
+    # Verify ownership
+    user_vendor_id = request.user_data.get("vendor_id")
+    if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    try:
+        data = json.loads(request.body)
+        new_status = data.get("status")
+
+        if not new_status:
+            return JsonResponse({"error": "status is required"}, status=400)
+
+        valid_statuses = [s.value for s in OfferStatus]
+        if new_status not in valid_statuses:
+            return JsonResponse(
+                {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                status=400,
+            )
+
+        offer.status = new_status
+        offer.save(update_fields=["status", "updated_at"])
+        return JsonResponse(serialize_offer(offer))
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error updating offer status")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== Copy Offer ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def offer_copy(request, offer_id):
+    """Create a deep copy of an offer (including all OfferEntry records).
+
+    New offer gets status=DRAFT, appends "(Copy)" to project_name.
+    """
+    try:
+        offer = Offer.objects.select_related("project").get(
+            id=offer_id,
+            deleted_at__isnull=True,
+        )
+    except Offer.DoesNotExist:
+        return JsonResponse({"error": "Offer not found"}, status=404)
+
+    # Verify ownership
+    user_vendor_id = request.user_data.get("vendor_id")
+    if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    try:
+        # Get all offer entries before creating the copy
+        original_entries = list(
+            OfferEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order")
+        )
+
+        # Create the copy
+        new_offer = Offer.objects.create(
+            project_name=f"{offer.project_name} (Copy)",
+            project=offer.project,
+            parent_offer=offer,
+            description=offer.description,
+            status=OfferStatus.DRAFT,
+            cost=offer.cost,
+            profit=offer.profit,
+            details=offer.details,
+            metadata=offer.metadata,
+            deadline=offer.deadline,
+            source=offer.source,
+            is_locked=False,
+        )
+
+        # Deep copy OfferEntry records
+        for entry in original_entries:
+            OfferEntry.objects.create(
+                offer=new_offer,
+                frontend_id=entry.frontend_id,
+                item_name=entry.item_name,
+                entry=entry.entry,
+                category=entry.category,
+                price=entry.price,
+                cost=entry.cost,
+                client_price=entry.client_price,
+                client_cost=entry.client_cost,
+                surcharge=entry.surcharge,
+                tax_rate=entry.tax_rate,
+                tax_price=entry.tax_price,
+                show_tax=entry.show_tax,
+                is_linked_surcharge=entry.is_linked_surcharge,
+                market_range=entry.market_range,
+                item_data=entry.item_data,
+                sort_order=entry.sort_order,
+            )
+
+        return JsonResponse(serialize_offer(new_offer), status=201)
+
+    except Exception as e:
+        logger.exception("Error copying offer")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== Templates API ====================
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_groups("VENDOR", "SYSTEM")
+def templates_list(request):
+    """List vendor's templates or create a new one from an offer."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    if request.method == "GET":
+        templates = Template.objects.filter(
+            vendor_id=vendor_id,
+            deleted_at__isnull=True,
+        )
+        return JsonResponse(
+            [serialize_template(t) for t in templates],
+            safe=False,
+        )
+
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            offer_id = data.get("offerId")
+            name = data.get("name")
+
+            if not offer_id or not name:
+                return JsonResponse(
+                    {"error": "offerId and name are required"},
+                    status=400,
+                )
+
+            # Verify the offer exists and belongs to this vendor
+            try:
+                offer = Offer.objects.select_related("project").get(
+                    id=offer_id,
+                    deleted_at__isnull=True,
+                )
+            except Offer.DoesNotExist:
+                return JsonResponse({"error": "Offer not found"}, status=404)
+
+            if offer.project and str(offer.project.vendor_id) != vendor_id:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+            # Snapshot the full offer details (reconstructed from OfferEntry)
+            details = reconstruct_details_from_entries(offer)
+
+            # Snapshot OfferEntry data into the template for completeness
+            entries_snapshot = []
+            offer_entries = OfferEntry.objects.filter(
+                offer=offer,
+                deleted_at__isnull=True,
+            ).order_by("sort_order")
+
+            for entry in offer_entries:
+                entries_snapshot.append({
+                    "frontendId": entry.frontend_id,
+                    "itemName": entry.item_name,
+                    "entryId": str(entry.entry_id) if entry.entry_id else None,
+                    "categoryId": str(entry.category_id) if entry.category_id else None,
+                    "price": str(entry.price) if entry.price is not None else None,
+                    "cost": str(entry.cost) if entry.cost is not None else None,
+                    "clientPrice": str(entry.client_price) if entry.client_price is not None else None,
+                    "clientCost": str(entry.client_cost) if entry.client_cost is not None else None,
+                    "surcharge": str(entry.surcharge) if entry.surcharge is not None else None,
+                    "taxRate": str(entry.tax_rate),
+                    "taxPrice": str(entry.tax_price) if entry.tax_price is not None else None,
+                    "showTax": entry.show_tax,
+                    "isLinkedSurcharge": entry.is_linked_surcharge,
+                    "marketRange": entry.market_range,
+                    "itemData": entry.item_data,
+                    "sortOrder": entry.sort_order,
+                })
+
+            metadata = {
+                "sourceOfferName": offer.project_name,
+                "sourceProjectId": str(offer.project_id) if offer.project_id else None,
+                "entriesSnapshot": entries_snapshot,
+                "offerMetadata": offer.metadata,
+            }
+
+            template = Template.objects.create(
+                name=name,
+                vendor_id=vendor_id,
+                source_offer=offer,
+                details=details,
+                description=offer.description,
+                metadata=metadata,
+            )
+
+            return JsonResponse(serialize_template(template), status=201)
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logger.exception("Error creating template")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "DELETE"])
+@require_groups("VENDOR", "SYSTEM")
+def template_detail(request, template_id):
+    """Get or delete a specific template."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    try:
+        template = Template.objects.get(
+            id=template_id,
+            vendor_id=vendor_id,
+            deleted_at__isnull=True,
+        )
+    except Template.DoesNotExist:
+        return JsonResponse({"error": "Template not found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(serialize_template(template))
+
+    if request.method == "DELETE":
+        template.deleted_at = datetime.now(timezone.utc)
+        template.save()
+        return JsonResponse({"message": "Template deleted"}, status=200)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def template_apply(request, template_id):
+    """Create a new offer from a template.
+
+    Body: {"projectId": "uuid"}
+    Creates Offer + OfferEntry records from template snapshot.
+    """
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    try:
+        template = Template.objects.get(
+            id=template_id,
+            vendor_id=vendor_id,
+            deleted_at__isnull=True,
+        )
+    except Template.DoesNotExist:
+        return JsonResponse({"error": "Template not found"}, status=404)
+
+    try:
+        data = json.loads(request.body)
+        project_id = data.get("projectId")
+
+        if not project_id:
+            return JsonResponse({"error": "projectId is required"}, status=400)
+
+        try:
+            project = Project.objects.get(
+                id=project_id,
+                vendor_id=vendor_id,
+                deleted_at__isnull=True,
+            )
+        except Project.DoesNotExist:
+            return JsonResponse({"error": "Project not found"}, status=404)
+
+        with transaction.atomic():
+            # Create the offer from template
+            offer = Offer.objects.create(
+                project=project,
+                project_name=project.name,
+                description=template.description,
+                status=OfferStatus.DRAFT,
+                details=template.details,
+                metadata=template.metadata.get("offerMetadata", {}),
+                deadline=datetime.now(timezone.utc),
+                source=OfferSource.PLATFORM,
+                is_locked=False,
+            )
+
+            # Create OfferEntry records from entries snapshot
+            entries_snapshot = template.metadata.get("entriesSnapshot", [])
+            for entry_data in entries_snapshot:
+                entry_ref = None
+                if entry_data.get("entryId"):
+                    try:
+                        entry_ref = Entry.objects.get(id=entry_data["entryId"])
+                    except Entry.DoesNotExist:
+                        pass
+
+                category_ref = None
+                if entry_data.get("categoryId"):
+                    try:
+                        from aivus_backend.catalog.models import Category
+                        category_ref = Category.objects.get(id=entry_data["categoryId"])
+                    except Category.DoesNotExist:
+                        pass
+
+                OfferEntry.objects.create(
+                    offer=offer,
+                    frontend_id=entry_data.get("frontendId", ""),
+                    item_name=entry_data.get("itemName", ""),
+                    entry=entry_ref,
+                    category=category_ref,
+                    price=entry_data.get("price"),
+                    cost=entry_data.get("cost"),
+                    client_price=entry_data.get("clientPrice"),
+                    client_cost=entry_data.get("clientCost"),
+                    surcharge=entry_data.get("surcharge"),
+                    tax_rate=entry_data.get("taxRate", 0),
+                    tax_price=entry_data.get("taxPrice"),
+                    show_tax=entry_data.get("showTax", False),
+                    is_linked_surcharge=entry_data.get("isLinkedSurcharge", True),
+                    market_range=entry_data.get("marketRange", ""),
+                    item_data=entry_data.get("itemData", {}),
+                    sort_order=entry_data.get("sortOrder", 0),
+                )
+
+        return JsonResponse(serialize_offer(offer), status=201)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error applying template")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== Rate Cards API ====================
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_groups("VENDOR", "SYSTEM")
+def rate_cards_list(request):
+    """List vendor's rate cards or create a new one."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    if request.method == "GET":
+        rate_cards = RateCard.objects.filter(
+            vendor_id=vendor_id,
+            deleted_at__isnull=True,
+        )
+        return JsonResponse(
+            [serialize_rate_card(rc) for rc in rate_cards],
+            safe=False,
+        )
+
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            name = data.get("name")
+            items = data.get("items", [])
+
+            if not name:
+                return JsonResponse({"error": "name is required"}, status=400)
+
+            with transaction.atomic():
+                rate_card = RateCard.objects.create(
+                    vendor_id=vendor_id,
+                    name=name,
+                )
+
+                for item_data in items:
+                    item_name = item_data.get("itemName", "")
+                    price = item_data.get("price", 0)
+                    entry_id = item_data.get("entryId")
+                    unit_id = item_data.get("unitId")
+                    unit_label = item_data.get("unitLabel", "")
+
+                    entry_ref = None
+                    if entry_id:
+                        try:
+                            entry_ref = Entry.objects.get(id=entry_id)
+                        except Entry.DoesNotExist:
+                            pass
+
+                    unit_ref = None
+                    if unit_id:
+                        try:
+                            unit_ref = Unit.objects.get(id=unit_id)
+                        except Unit.DoesNotExist:
+                            pass
+
+                    RateCardItem.objects.create(
+                        rate_card=rate_card,
+                        entry=entry_ref,
+                        item_name=item_name,
+                        price=price,
+                        unit=unit_ref,
+                        unit_label=unit_label,
+                    )
+
+            return JsonResponse(serialize_rate_card(rate_card), status=201)
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logger.exception("Error creating rate card")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH", "DELETE"])
+@require_groups("VENDOR", "SYSTEM")
+def rate_card_detail(request, rate_card_id):
+    """Get, update, or delete a specific rate card."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    try:
+        rate_card = RateCard.objects.get(
+            id=rate_card_id,
+            vendor_id=vendor_id,
+            deleted_at__isnull=True,
+        )
+    except RateCard.DoesNotExist:
+        return JsonResponse({"error": "Rate card not found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(serialize_rate_card(rate_card))
+
+    if request.method == "PATCH":
+        try:
+            data = json.loads(request.body)
+
+            if "name" in data:
+                rate_card.name = data["name"]
+                rate_card.save()
+
+            # Replace items if provided
+            if "items" in data:
+                with transaction.atomic():
+                    # Hard delete existing items and recreate
+                    rate_card.items.all().delete()
+                    for item_data in data["items"]:
+                        item_name = item_data.get("itemName", "")
+                        price = item_data.get("price", 0)
+                        entry_id = item_data.get("entryId")
+                        unit_id = item_data.get("unitId")
+                        unit_label = item_data.get("unitLabel", "")
+
+                        entry_ref = None
+                        if entry_id:
+                            try:
+                                entry_ref = Entry.objects.get(id=entry_id)
+                            except Entry.DoesNotExist:
+                                pass
+
+                        unit_ref = None
+                        if unit_id:
+                            try:
+                                unit_ref = Unit.objects.get(id=unit_id)
+                            except Unit.DoesNotExist:
+                                pass
+
+                        RateCardItem.objects.create(
+                            rate_card=rate_card,
+                            entry=entry_ref,
+                            item_name=item_name,
+                            price=price,
+                            unit=unit_ref,
+                            unit_label=unit_label,
+                        )
+
+            return JsonResponse(serialize_rate_card(rate_card))
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logger.exception("Error updating rate card")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    if request.method == "DELETE":
+        rate_card.deleted_at = datetime.now(timezone.utc)
+        rate_card.save()
+        # Also soft-delete items
+        rate_card.items.filter(deleted_at__isnull=True).update(
+            deleted_at=datetime.now(timezone.utc)
+        )
+        return JsonResponse({"message": "Rate card deleted"}, status=200)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def rate_card_lookup(request):
+    """Lookup rate for an entry across vendor's rate cards.
+
+    Query params: entryId=uuid
+    Returns matching rate card items for the given entry.
+    """
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor context required"}, status=400)
+
+    entry_id = request.GET.get("entryId")
+    if not entry_id:
+        return JsonResponse({"error": "entryId query parameter is required"}, status=400)
+
+    items = RateCardItem.objects.filter(
+        rate_card__vendor_id=vendor_id,
+        rate_card__deleted_at__isnull=True,
+        entry_id=entry_id,
+        deleted_at__isnull=True,
+    ).select_related("rate_card")
+
+    results = []
+    for item in items:
+        item_data = serialize_rate_card_item(item)
+        item_data["rateCardName"] = item.rate_card.name
+        results.append(item_data)
+
+    return JsonResponse(results, safe=False)
+
+
+# ==================== Client Briefs API ====================
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_groups("CLIENT", "SYSTEM")
+def client_briefs_list(request):
+    """List client's briefs with offers count, or create a new one."""
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse({"error": "Client context required"}, status=400)
+
+    if request.method == "GET":
+        briefs = Brief.objects.filter(
+            client_id=client_id,
+            deleted_at__isnull=True,
+        )
+        return JsonResponse(
+            [serialize_brief_with_offers(b) for b in briefs],
+            safe=False,
+        )
+
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            name = data.get("name", "")
+            details = data.get("details", {})
+            status = data.get("status", "DRAFT")
+
+            # Store name inside details if provided
+            if name and isinstance(details, dict):
+                details["name"] = name
+
+            brief = Brief.objects.create(
+                status=status,
+                details=details,
+                client_id=client_id,
+            )
+
+            return JsonResponse(serialize_brief_with_offers(brief), status=201)
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logger.exception("Error creating brief")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH", "DELETE"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_detail(request, brief_id):
+    """Get, update, or delete a specific client brief."""
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse({"error": "Client context required"}, status=400)
+
+    try:
+        brief = Brief.objects.get(
+            id=brief_id,
+            client_id=client_id,
+            deleted_at__isnull=True,
+        )
+    except Brief.DoesNotExist:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(serialize_brief_detail(brief))
+
+    if request.method == "PATCH":
+        try:
+            data = json.loads(request.body)
+
+            if "name" in data:
+                if isinstance(brief.details, dict):
+                    brief.details["name"] = data["name"]
+                else:
+                    brief.details = {"name": data["name"]}
+            if "details" in data:
+                brief.details = data["details"]
+            if "status" in data:
+                brief.status = data["status"]
+
+            brief.save()
+            return JsonResponse(serialize_brief_detail(brief))
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logger.exception("Error updating brief")
+            return JsonResponse({"error": str(e)}, status=500)
+
+    if request.method == "DELETE":
+        brief.deleted_at = datetime.now(timezone.utc)
+        brief.save()
+        return JsonResponse({"message": "Brief deleted"}, status=200)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_offers(request, brief_id):
+    """Get all offers linked to a brief (via BriefOffer model)."""
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse({"error": "Client context required"}, status=400)
+
+    try:
+        brief = Brief.objects.get(
+            id=brief_id,
+            client_id=client_id,
+            deleted_at__isnull=True,
+        )
+    except Brief.DoesNotExist:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    brief_offers = BriefOffer.objects.filter(
+        brief=brief,
+    ).select_related(
+        "offer",
+        "offer__project",
+        "offer__project__vendor",
+    )
+
+    offers = []
+    for bo in brief_offers:
+        offer = bo.offer
+        offer_data = serialize_offer(offer)
+        offer_data["linkedAt"] = bo.created_at.isoformat() if bo.created_at else None
+        offer_data["linkedBy"] = str(bo.linked_by_id) if bo.linked_by_id else None
+        if offer.project and offer.project.vendor:
+            offer_data["vendor"] = {
+                "id": str(offer.project.vendor.id),
+                "name": offer.project.vendor.name,
+            }
+        else:
+            offer_data["vendor"] = None
+        offers.append(offer_data)
+
+    return JsonResponse(offers, safe=False)
+
+
+# ==================== AI Brief Chat API ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_chat(request):
+    """AI-powered chat for brief creation.
+
+    Body: {"message": "...", "history": [...], "brief_id": null|"uuid", "extracted_fields": {}}
+    Returns: {"reply": "...", "brief_data": null|{...}, "is_complete": false|true, "extracted_fields": {...}}
+    """
+    try:
+        data = json.loads(request.body)
+        user_message = data.get("message", "")
+        history = data.get("history", [])
+        brief_id = data.get("brief_id")
+        extracted_fields = data.get("extracted_fields", {})
+
+        if not user_message:
+            return JsonResponse({"error": "message is required"}, status=400)
+
+        # Get user for storing chat messages
+        user_id = request.user_data.get("id")
+        user = None
+        if user_id:
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                pass
+
+        # Get brief if provided
+        brief = None
+        if brief_id:
+            try:
+                brief = Brief.objects.get(id=brief_id, deleted_at__isnull=True)
+            except Brief.DoesNotExist:
+                pass
+
+        # Store user message
+        if user:
+            ChatMessage.objects.create(
+                brief=brief,
+                user=user,
+                role="user",
+                content=user_message,
+                metadata={"extracted_fields_before": extracted_fields},
+            )
+
+        # Process through LangGraph
+        result = process_chat_message(user_message, history, extracted_fields)
+
+        # Store assistant reply
+        if user:
+            ChatMessage.objects.create(
+                brief=brief,
+                user=user,
+                role="assistant",
+                content=result["reply"],
+                metadata={
+                    "extracted_fields": result.get("extracted_fields", {}),
+                    "is_complete": result.get("is_complete", False),
+                },
+            )
+
+        return JsonResponse(result)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error in brief chat")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_chat_analyze(request):
+    """Analyze a brief and provide suggestions.
+
+    Body: {"brief_data": {...}}
+    Returns: {"suggestions": [...], "summary": "..."}
+    """
+    try:
+        data = json.loads(request.body)
+        brief_data = data.get("brief_data", {})
+
+        if not brief_data:
+            return JsonResponse({"error": "brief_data is required"}, status=400)
+
+        result = analyze_brief(brief_data)
+        return JsonResponse(result)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.exception("Error analyzing brief")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+# ==================== Comparison API ====================
+
+
+def _build_comparison_data(brief):
+    """Build comparison data from all offers linked to a brief.
+
+    Returns structured data with vendors, categories, items, and totals.
+    """
+    brief_offers = BriefOffer.objects.filter(
+        brief=brief,
+    ).select_related(
+        "offer",
+        "offer__project",
+        "offer__project__vendor",
+    )
+
+    if not brief_offers.exists():
+        return {
+            "brief": serialize_brief(brief),
+            "vendors": [],
+            "categories": [],
+            "grand_totals": [],
+        }
+
+    # Collect vendor info and their offer entries
+    vendors = []
+    vendor_entries = {}  # vendor_id -> list of OfferEntry
+
+    for bo in brief_offers:
+        offer = bo.offer
+        vendor_id = None
+        vendor_name = "Unknown Vendor"
+
+        if offer.project and offer.project.vendor:
+            vendor_id = str(offer.project.vendor.id)
+            vendor_name = offer.project.vendor.name
+        else:
+            vendor_id = str(offer.id)  # Use offer ID as fallback
+            vendor_name = offer.project_name
+
+        # Get offer entries
+        entries = OfferEntry.objects.filter(
+            offer=offer,
+            deleted_at__isnull=True,
+        ).select_related("category", "entry").order_by("sort_order")
+
+        vendor_total = sum(
+            (e.client_price or e.price or Decimal("0")) for e in entries
+        )
+
+        vendors.append({
+            "id": vendor_id,
+            "name": vendor_name,
+            "offerId": str(offer.id),
+            "total": float(vendor_total),
+        })
+
+        vendor_entries[vendor_id] = list(entries)
+
+    # Build categories with items and per-vendor values
+    # Collect all unique categories across all vendors
+    all_categories = {}  # category_id -> category_name
+    category_items = defaultdict(dict)  # category_id -> {item_name -> {vendor_id -> entry_data}}
+
+    for vendor_id, entries in vendor_entries.items():
+        for entry in entries:
+            cat_id = str(entry.category_id) if entry.category_id else "uncategorized"
+            cat_name = entry.category.name if entry.category else "Uncategorized"
+            all_categories[cat_id] = cat_name
+
+            item_name = entry.item_name or (entry.entry.name if entry.entry else f"Item {entry.sort_order}")
+            if item_name not in category_items[cat_id]:
+                category_items[cat_id][item_name] = {}
+
+            category_items[cat_id][item_name][vendor_id] = {
+                "vendor_id": vendor_id,
+                "price": float(entry.client_price or entry.price or 0),
+                "cost": float(entry.client_cost or entry.cost or 0),
+            }
+
+    # Build structured categories response
+    categories = []
+    grand_totals = {v["id"]: 0.0 for v in vendors}
+
+    for cat_id, cat_name in all_categories.items():
+        items_data = []
+        subtotals = {v["id"]: 0.0 for v in vendors}
+
+        for item_name, vendor_values in category_items[cat_id].items():
+            values = []
+            for v in vendors:
+                v_data = vendor_values.get(v["id"], {"vendor_id": v["id"], "price": 0, "cost": 0})
+                values.append(v_data)
+                subtotals[v["id"]] += v_data.get("price", 0)
+
+            items_data.append({
+                "name": item_name,
+                "values": values,
+            })
+
+        # Add subtotals to grand totals
+        for v_id, subtotal in subtotals.items():
+            grand_totals[v_id] += subtotal
+
+        categories.append({
+            "id": cat_id,
+            "name": cat_name,
+            "items": items_data,
+            "subtotals": [
+                {"vendor_id": v["id"], "total": subtotals[v["id"]]}
+                for v in vendors
+            ],
+        })
+
+    return {
+        "brief": serialize_brief(brief),
+        "vendors": vendors,
+        "categories": categories,
+        "grand_totals": [
+            {"vendor_id": v["id"], "total": grand_totals[v["id"]]}
+            for v in vendors
+        ],
+    }
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_comparison(request, brief_id):
+    """Get comparison data for all offers linked to a brief.
+
+    Returns aggregated data from all offers grouped by category and item.
+    """
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse({"error": "Client context required"}, status=400)
+
+    try:
+        brief = Brief.objects.get(
+            id=brief_id,
+            client_id=client_id,
+            deleted_at__isnull=True,
+        )
+    except Brief.DoesNotExist:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    comparison_data = _build_comparison_data(brief)
+    return JsonResponse(comparison_data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT", "SYSTEM")
+def client_brief_comparison_analyze(request, brief_id):
+    """AI analysis of comparison data for a brief's offers.
+
+    Body: {"question": "..."} (optional - for follow-up questions)
+    Returns: {"analysis": "...", "highlights": [...]}
+    """
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse({"error": "Client context required"}, status=400)
+
+    try:
+        brief = Brief.objects.get(
+            id=brief_id,
+            client_id=client_id,
+            deleted_at__isnull=True,
+        )
+    except Brief.DoesNotExist:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        data = {}
+
+    question = data.get("question")
+
+    # Build comparison data
+    comparison_data = _build_comparison_data(brief)
+
+    if not comparison_data.get("vendors"):
+        return JsonResponse({
+            "analysis": "No vendor offers are linked to this brief yet. Link some offers first to get a comparison analysis.",
+            "highlights": [],
+        })
+
+    # Use AI to analyze
+    result = analyze_comparison(
+        brief_data=brief.details,
+        comparison_data=comparison_data,
+        question=question,
+    )
+
+    return JsonResponse(result)
+
+
+# ==================== XLSX Upload API ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT", "SYSTEM")
+def client_xlsx_upload(request):
+    """Upload XLSX file, find offer_id cell, return share info.
+
+    Scans all cells in all sheets for a value that looks like a UUID.
+    If the UUID matches an existing Offer, returns share information.
+    """
+    file = request.FILES.get("file")
+    if not file:
+        return JsonResponse({"error": "No file provided"}, status=400)
+
+    try:
+        wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
+    except Exception:
+        logger.exception("Error reading XLSX file")
+        return JsonResponse({"error": "Invalid or corrupted XLSX file"}, status=400)
+
+    offer_id = None
+    offer = None
+    try:
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            for row in ws.iter_rows():
+                for cell in row:
+                    value = str(cell.value or "").strip()
+                    # Check if it looks like a UUID
+                    try:
+                        parsed = uuid_module.UUID(value)
+                        # Check if this UUID is an offer
+                        found_offer = Offer.objects.filter(
+                            id=parsed,
+                            deleted_at__isnull=True,
+                        ).first()
+                        if found_offer:
+                            offer_id = str(found_offer.id)
+                            offer = found_offer
+                            break
+                    except (ValueError, AttributeError):
+                        continue
+                if offer_id:
+                    break
+            if offer_id:
+                break
+    finally:
+        wb.close()
+
+    if not offer_id or not offer:
+        return JsonResponse(
+            {"error": "No valid offer ID found in the file"},
+            status=404,
+        )
+
+    # Find share for this offer
+    share = Share.objects.filter(offer_id=offer_id, is_active=True).first()
+
+    return JsonResponse({
+        "offer_id": offer_id,
+        "offer_name": offer.project_name,
+        "share_token": share.token if share else None,
+        "has_share": share is not None,
+    })
 
