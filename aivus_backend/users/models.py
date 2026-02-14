@@ -52,6 +52,7 @@ class User(AbstractUser):
         db_index=True,
     )
     position = models.CharField(max_length=255, blank=True, default="")
+    avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
     auth_type = models.CharField(
         max_length=20,
         choices=AuthType.choices,

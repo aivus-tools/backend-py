@@ -248,6 +248,7 @@ def _build_profile_response(user):
         "group": user.group,
         "position": user.position,
         "authType": user.auth_type,
+        "avatar_url": user.avatar.url if user.avatar else None,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -389,3 +390,37 @@ def change_password(request):
     except Exception:
         logger.exception("Error changing password")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
+
+
+# ==================== Avatar Upload API ====================
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "CLIENT", "SYSTEM")
+def user_profile_avatar(request):
+    """Upload user avatar.
+
+    POST /api/v1/users/profile/avatar
+    Expects multipart/form-data with 'avatar' file field.
+    """
+    user_data = request.user_data
+    user_id = user_data.get("id")
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    avatar_file = request.FILES.get("avatar")
+    if not avatar_file:
+        return JsonResponse({"error": "No avatar file provided"}, status=400)
+
+    # Delete old avatar if exists
+    if user.avatar:
+        user.avatar.delete(save=False)
+
+    user.avatar = avatar_file
+    user.save(update_fields=["avatar"])
+
+    return JsonResponse({"avatar_url": user.avatar.url})

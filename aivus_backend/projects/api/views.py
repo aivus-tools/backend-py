@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timezone
 from decimal import Decimal
 
+from django.db.models import Sum
 import openpyxl
 from django.db import IntegrityError
 from django.db import transaction
@@ -755,6 +756,18 @@ def offer_detail(request, offer_id):
                     logger.exception("Error parsing offer details to entries for offer %s", offer.id)
                     # Fallback: save offer if parsing failed
                     offer.save()
+
+                # Recompute offer-level cost and profit from entries
+                entries_agg = OfferEntry.objects.filter(
+                    offer=offer, deleted_at__isnull=True
+                ).aggregate(
+                    total_cost=Sum('cost'),
+                    total_client_cost=Sum('client_cost'),
+                )
+                offer.cost = entries_agg['total_cost'] or Decimal('0')
+                client_total = entries_agg['total_client_cost'] or Decimal('0')
+                offer.profit = client_total - offer.cost
+                offer.save(update_fields=['cost', 'profit', 'updated_at'])
             else:
                 offer.save()
 
@@ -812,16 +825,36 @@ def offers_by_project(request, project_id):
 
 
 @csrf_exempt
-@require_http_methods(["POST"])
+@require_http_methods(["GET", "POST"])
 @require_groups("VENDOR", "SYSTEM")
 def shares_create(request):
-    """Create a share link for an offer.
+    """Create a share link for an offer, or find existing share by offerId.
 
+    GET /api/v1/shares?offerId=uuid — find existing share for an offer
+    POST /api/v1/shares — create a new share
     Body: {"offerId": "uuid"}
     Returns the share with token.
     Auto-publishes the offer if it is in DRAFT status.
     Reuses existing active share if one already exists.
     """
+    if request.method == "GET":
+        offer_id = request.GET.get("offerId")
+        if not offer_id:
+            return JsonResponse({"error": "offerId query parameter is required"}, status=400)
+        try:
+            _validate_uuid(offer_id, "offerId")
+        except ValueError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+        # Verify the offer belongs to this vendor
+        user_vendor_id = request.user_data.get("vendor_id")
+        share = Share.objects.filter(
+            offer_id=offer_id,
+            offer__project__vendor_id=user_vendor_id,
+        ).select_related("offer", "offer__project").first()
+        if not share:
+            return JsonResponse({"error": "Share not found"}, status=404)
+        return JsonResponse(serialize_share(share))
+
     try:
         data = json.loads(request.body)
         offer_id = data.get("offerId")
@@ -1208,35 +1241,42 @@ def templates_list(request):
             if not offer.project or str(offer.project.vendor_id) != vendor_id:
                 return JsonResponse({"error": "Access denied"}, status=403)
 
-            # Snapshot the full offer details (reconstructed from OfferEntry)
-            details = reconstruct_details_from_entries(offer)
-
-            # Snapshot OfferEntry data into the template for completeness
-            entries_snapshot = []
-            offer_entries = OfferEntry.objects.filter(
+            # Snapshot the full offer details and OfferEntry data
+            entries_qs = OfferEntry.objects.filter(
                 offer=offer,
                 deleted_at__isnull=True,
             ).order_by("sort_order")
+            entries_count = entries_qs.count()
 
-            for entry in offer_entries:
-                entries_snapshot.append({
-                    "frontendId": entry.frontend_id,
-                    "itemName": entry.item_name,
-                    "entryId": str(entry.entry_id) if entry.entry_id else None,
-                    "categoryId": str(entry.category_id) if entry.category_id else None,
-                    "price": str(entry.price) if entry.price is not None else None,
-                    "cost": str(entry.cost) if entry.cost is not None else None,
-                    "clientPrice": str(entry.client_price) if entry.client_price is not None else None,
-                    "clientCost": str(entry.client_cost) if entry.client_cost is not None else None,
-                    "surcharge": str(entry.surcharge) if entry.surcharge is not None else None,
-                    "taxRate": str(entry.tax_rate),
-                    "taxPrice": str(entry.tax_price) if entry.tax_price is not None else None,
-                    "showTax": entry.show_tax,
-                    "isLinkedSurcharge": entry.is_linked_surcharge,
-                    "marketRange": entry.market_range,
-                    "itemData": entry.item_data,
-                    "sortOrder": entry.sort_order,
-                })
+            if entries_count > 0:
+                # Reconstruct details from OfferEntry records
+                details = reconstruct_details_from_entries(offer)
+
+                # Snapshot OfferEntry data into the template for completeness
+                entries_snapshot = []
+                for entry in entries_qs:
+                    entries_snapshot.append({
+                        "frontendId": entry.frontend_id,
+                        "itemName": entry.item_name,
+                        "entryId": str(entry.entry_id) if entry.entry_id else None,
+                        "categoryId": str(entry.category_id) if entry.category_id else None,
+                        "price": str(entry.price) if entry.price is not None else None,
+                        "cost": str(entry.cost) if entry.cost is not None else None,
+                        "clientPrice": str(entry.client_price) if entry.client_price is not None else None,
+                        "clientCost": str(entry.client_cost) if entry.client_cost is not None else None,
+                        "surcharge": str(entry.surcharge) if entry.surcharge is not None else None,
+                        "taxRate": str(entry.tax_rate),
+                        "taxPrice": str(entry.tax_price) if entry.tax_price is not None else None,
+                        "showTax": entry.show_tax,
+                        "isLinkedSurcharge": entry.is_linked_surcharge,
+                        "marketRange": entry.market_range,
+                        "itemData": entry.item_data,
+                        "sortOrder": entry.sort_order,
+                    })
+            else:
+                # Fallback: use raw offer.details if no OfferEntry records exist
+                details = offer.details if offer.details else {}
+                entries_snapshot = []
 
             metadata = {
                 "sourceOfferName": offer.project_name,
