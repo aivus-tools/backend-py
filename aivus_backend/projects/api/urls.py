@@ -9,7 +9,9 @@ app_name = "projects_api"
 urlpatterns = [
     # Projects
     path("projects", views.projects_list, name="projects_list"),
+    path("projects/archived", views.projects_archived, name="projects_archived"),
     path("projects/<uuid:project_id>", views.project_detail, name="project_detail"),
+    path("projects/<uuid:project_id>/restore", views.project_restore, name="project_restore"),
     path(
         "projects/<uuid:project_id>/thumbnail",
         views.project_thumbnail,

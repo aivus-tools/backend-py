@@ -237,6 +237,39 @@ def projects_list(request):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def projects_archived(request):
+    """List all archived (soft-deleted) projects for the authenticated vendor."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor ID required"}, status=400)
+
+    projects = Project.objects.all_with_deleted().filter(
+        vendor_id=vendor_id, deleted_at__isnull=False,
+    ).select_related("client").prefetch_related("collaborators", "client_managers")
+    return JsonResponse([serialize_project(p) for p in projects], safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def project_restore(request, project_id):
+    """Restore an archived project."""
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id:
+        return JsonResponse({"error": "Vendor ID required"}, status=400)
+    try:
+        project = Project.objects.all_with_deleted().get(
+            id=project_id, vendor_id=vendor_id, deleted_at__isnull=False,
+        )
+    except Project.DoesNotExist:
+        return JsonResponse({"error": "Archived project not found"}, status=404)
+    project.restore()
+    return JsonResponse(serialize_project(project))
+
+
+@csrf_exempt
 @require_http_methods(["GET", "PUT", "PATCH", "DELETE"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
 def project_detail(request, project_id):
@@ -867,6 +900,10 @@ def share_get_public(request, token):
 
     if not share.is_active:
         return JsonResponse({"error": "Share link is no longer active"}, status=410)
+
+    # Block access to archived projects
+    if share.offer and share.offer.project and share.offer.project.deleted_at is not None:
+        return JsonResponse({"error": "Project is archived"}, status=410)
 
     # QA2-019: Don't serve draft offers through share links
     if share.offer and share.offer.status == OfferStatus.DRAFT:
