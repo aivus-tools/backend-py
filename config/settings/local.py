@@ -3,6 +3,11 @@ from .base import INSTALLED_APPS
 from .base import MIDDLEWARE
 from .base import env
 
+# AIVUS AUTHENTICATION (local defaults)
+# ------------------------------------------------------------------------------
+HMAC_SECRET = env("HMAC_SECRET", default="local-hmac-secret-for-development")
+API_KEY = env("API_KEY", default="local-api-key-for-development")
+
 # GENERAL
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#debug

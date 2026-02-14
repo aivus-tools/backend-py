@@ -79,7 +79,7 @@ def serialize_project(project: Project, include_relations: bool = True) -> dict:
 
 
 def serialize_offer(offer: Offer) -> dict:
-    """Serialize Offer model to dict."""
+    """Serialize Offer model to dict (vendor view — includes cost/profit)."""
     # Use reconstructed details from OfferEntry records (falls back to raw details)
     details = reconstruct_details_from_entries(offer)
 
@@ -91,8 +91,33 @@ def serialize_offer(offer: Offer) -> dict:
         "parentOfferId": str(offer.parent_offer_id) if offer.parent_offer_id else None,
         "projectId": str(offer.project_id) if offer.project_id else None,
         "status": offer.status,
-        "cost": offer.cost,
-        "profit": offer.profit,
+        # QA4-037: Convert Decimal to float for JSON serialization
+        "cost": float(offer.cost) if offer.cost is not None else None,
+        "profit": float(offer.profit) if offer.profit is not None else None,
+        "details": details,
+        "deadline": offer.deadline.isoformat() if offer.deadline else None,
+        "source": offer.source,
+        "isLocked": offer.is_locked,
+        "createdAt": offer.created_at.isoformat() if offer.created_at else None,
+        "updatedAt": offer.updated_at.isoformat() if offer.updated_at else None,
+    }
+
+
+def serialize_offer_for_client(offer: Offer) -> dict:
+    """Serialize Offer for client view — excludes vendor cost/profit.
+
+    QA4-023: Clients should not see internal vendor cost and profit margins.
+    """
+    details = reconstruct_details_from_entries(offer)
+
+    return {
+        "id": str(offer.id),
+        "uuid": str(offer.id),
+        "projectName": offer.project_name,
+        "description": offer.description,
+        "parentOfferId": str(offer.parent_offer_id) if offer.parent_offer_id else None,
+        "projectId": str(offer.project_id) if offer.project_id else None,
+        "status": offer.status,
         "details": details,
         "deadline": offer.deadline.isoformat() if offer.deadline else None,
         "source": offer.source,
@@ -129,8 +154,6 @@ def serialize_share_public(share: Share) -> dict:
             "projectName": offer.project_name,
             "description": offer.description,
             "status": offer.status,
-            "cost": offer.cost,
-            "profit": offer.profit,
             "details": details,
             "deadline": offer.deadline.isoformat() if offer.deadline else None,
             "source": offer.source,
@@ -240,13 +263,12 @@ def serialize_brief_detail(brief: Brief) -> dict:
     linked_offers = []
     for bo in brief_offers:
         offer = bo.offer
+        # QA4-023: Exclude cost/profit from client-facing brief detail
         offer_data = {
             "id": str(offer.id),
             "projectName": offer.project_name,
             "description": offer.description,
             "status": offer.status,
-            "cost": offer.cost,
-            "profit": offer.profit,
             "deadline": offer.deadline.isoformat() if offer.deadline else None,
             "source": offer.source,
             "isLocked": offer.is_locked,

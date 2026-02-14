@@ -3,12 +3,14 @@
 import json
 import logging
 
-from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import UserGroup
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import UserSettings
@@ -58,8 +60,9 @@ def user_me(request):
 
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("Error getting user info")
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
@@ -73,15 +76,32 @@ def change_user_group(request, user_id):
     Body: {"group": "VENDOR"}
     """
     try:
+        # Users can only change their own group
+        if str(request.user_data["id"]) != str(user_id):
+            return JsonResponse({"error": "You can only change your own group"}, status=403)
+
         body = request.body.decode() if isinstance(request.body, (bytes, bytearray)) else request.body
         data = json.loads(body or "{}")
-        # Поддерживаем оба варианта: новый backend (group) и старый (newGroup)
+        # Support both formats: new backend (group) and legacy (newGroup)
         new_group = data.get("group") or data.get("newGroup")
 
         if not new_group:
             return JsonResponse({"error": "Group is required"}, status=400)
 
+        # Validate new_group is a valid UserGroup value
+        valid_groups = [g.value for g in UserGroup]
+        if new_group not in valid_groups:
+            return JsonResponse({"error": f"Invalid group. Must be one of: {', '.join(valid_groups)}"}, status=400)
+
         user = User.objects.get(id=user_id)
+
+        # Only allow CONFIRMED -> VENDOR or CONFIRMED -> CLIENT transitions
+        if user.group != UserGroup.CONFIRMED or new_group not in (UserGroup.VENDOR, UserGroup.CLIENT):
+            return JsonResponse(
+                {"error": "Group change only allowed from CONFIRMED to VENDOR or CLIENT"},
+                status=400,
+            )
+
         user.group = new_group
         user.save()
 
@@ -123,13 +143,14 @@ def change_user_group(request, user_id):
         return JsonResponse({"error": "User not found"}, status=404)
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("Error changing user group")
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["GET"])
-@require_groups("VENDOR", "CLIENT", "SYSTEM")
+@require_groups("SYSTEM")
 def get_users(request):
     """
     Get all users.
@@ -152,8 +173,9 @@ def get_users(request):
 
         return JsonResponse(users_data, safe=False, status=200)
 
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("Error getting users")
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Profile API ====================
@@ -184,6 +206,10 @@ def user_profile(request):
     try:
         data = json.loads(request.body)
 
+        # Validate input lengths
+        if "name" in data and len(data["name"]) > 255:
+            return JsonResponse({"error": "Name must be 255 characters or fewer"}, status=400)
+
         # Update User fields
         if "name" in data:
             user.name = data["name"]
@@ -208,9 +234,9 @@ def user_profile(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error updating profile")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 def _build_profile_response(user):
@@ -272,6 +298,8 @@ def user_settings(request):
         data = json.loads(request.body)
 
         if "language" in data:
+            if len(data["language"]) > 5:
+                return JsonResponse({"error": "Language must be 5 characters or fewer"}, status=400)
             settings.language = data["language"]
         if "nda_accepted" in data:
             settings.nda_accepted = bool(data["nda_accepted"])
@@ -285,9 +313,9 @@ def user_settings(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error updating settings")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 def _build_settings_response(settings):
@@ -333,9 +361,12 @@ def change_password(request):
                 status=400,
             )
 
-        if len(new_password) < 8:
+        # QA3-012: Use Django's password validation instead of simple length check
+        try:
+            validate_password(new_password, user=user)
+        except ValidationError as e:
             return JsonResponse(
-                {"error": "New password must be at least 8 characters"},
+                {"error": e.messages},
                 status=400,
             )
 
@@ -346,14 +377,15 @@ def change_password(request):
                 status=400,
             )
 
-        # Set new password
-        user.password = make_password(new_password)
+        # QA3-005: Use set_password() to update session auth hash,
+        # invalidating all other sessions on next request
+        user.set_password(new_password)
         user.save(update_fields=["password", "updated_at"])
 
         return JsonResponse({"message": "Password changed successfully"})
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error changing password")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)

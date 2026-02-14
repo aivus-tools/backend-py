@@ -4,6 +4,8 @@ import logging
 from decimal import Decimal
 from decimal import InvalidOperation
 
+from django.db import transaction
+
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.projects.models import Offer
@@ -90,59 +92,91 @@ def parse_offer_details_to_entries(offer, details_dict):
         logger.warning("parse_offer_details_to_entries: 'offers' is not a list for offer %s", offer.id)
         return
 
-    # Delete existing entries (full sync)
-    deleted_count, _ = OfferEntry.objects.filter(offer=offer).delete()
-    if deleted_count:
-        logger.info("Deleted %d existing OfferEntry records for offer %s", deleted_count, offer.id)
-
-    # Extract top-level metadata (everything except 'offers' array)
-    metadata = {}
-    for key, value in details_dict.items():
-        if key != "offers":
-            metadata[key] = value
-
-    offer.metadata = metadata
-    offer.details = details_dict
-    offer.save(update_fields=["metadata", "details", "updated_at"])
-
-    # Create OfferEntry records
-    entries_created = 0
+    # QA2-022: Validate all items before deleting, and wrap in transaction
+    # so rollback happens on any error
     for idx, item in enumerate(offers_list):
         if not isinstance(item, dict):
-            logger.warning("Skipping non-dict item at index %d for offer %s", idx, offer.id)
+            logger.warning("Invalid non-dict item at index %d for offer %s", idx, offer.id)
+
+    # QA3-037: Bulk pre-fetch entries and categories to avoid N+1 queries
+    entry_ids = set()
+    category_ids = set()
+    for item in offers_list:
+        if not isinstance(item, dict):
             continue
+        if item.get("entryId"):
+            entry_ids.add(item["entryId"])
+        if item.get("categoryId"):
+            category_ids.add(item["categoryId"])
 
-        # Collect extra data (units, options, and anything not in the direct mapping)
-        mapped_keys = {
-            "id", "item", "entryId", "categoryId", "price", "cost",
-            "clientPrice", "clientCost", "surcharge", "taxRate", "taxPrice",
-            "showTax", "isLinkedSurcharge", "marketRange",
+    entries_by_id = {}
+    if entry_ids:
+        entries_by_id = {
+            str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)
         }
-        item_data = {}
-        for key, value in item.items():
-            if key not in mapped_keys:
-                item_data[key] = value
+    categories_by_id = {}
+    if category_ids:
+        categories_by_id = {
+            str(c.id): c for c in Category.objects.filter(id__in=category_ids)
+        }
 
-        OfferEntry.objects.create(
-            offer=offer,
-            frontend_id=str(item.get("id", "")),
-            item_name=item.get("item", ""),
-            entry=_lookup_entry(item.get("entryId")),
-            category=_lookup_category(item.get("categoryId")),
-            price=_to_decimal(item.get("price")),
-            cost=_to_decimal(item.get("cost")),
-            client_price=_to_decimal(item.get("clientPrice")),
-            client_cost=_to_decimal(item.get("clientCost")),
-            surcharge=_to_decimal(item.get("surcharge")),
-            tax_rate=_to_decimal(item.get("taxRate")) or Decimal("0"),
-            tax_price=_to_decimal(item.get("taxPrice")),
-            show_tax=bool(item.get("showTax", False)),
-            is_linked_surcharge=bool(item.get("isLinkedSurcharge", True)),
-            market_range=str(item.get("marketRange", "")),
-            item_data=item_data,
-            sort_order=idx,
-        )
-        entries_created += 1
+    with transaction.atomic():
+        # Delete existing entries (full sync)
+        deleted_count, _ = OfferEntry.objects.filter(offer=offer).delete()
+        if deleted_count:
+            logger.info("Deleted %d existing OfferEntry records for offer %s", deleted_count, offer.id)
+
+        # Extract top-level metadata (everything except 'offers' array)
+        metadata = {}
+        for key, value in details_dict.items():
+            if key != "offers":
+                metadata[key] = value
+
+        offer.metadata = metadata
+        offer.details = details_dict
+        offer.save(update_fields=["metadata", "details", "updated_at"])
+
+        # Create OfferEntry records
+        entries_created = 0
+        for idx, item in enumerate(offers_list):
+            if not isinstance(item, dict):
+                continue
+
+            # Collect extra data (units, options, and anything not in the direct mapping)
+            mapped_keys = {
+                "id", "item", "entryId", "categoryId", "price", "cost",
+                "clientPrice", "clientCost", "surcharge", "taxRate", "taxPrice",
+                "showTax", "isLinkedSurcharge", "marketRange",
+            }
+            item_data = {}
+            for key, value in item.items():
+                if key not in mapped_keys:
+                    item_data[key] = value
+
+            # QA3-037: Use pre-fetched lookups instead of per-item queries
+            entry_ref = entries_by_id.get(str(item.get("entryId", "")))
+            category_ref = categories_by_id.get(str(item.get("categoryId", "")))
+
+            OfferEntry.objects.create(
+                offer=offer,
+                frontend_id=str(item.get("id", "")),
+                item_name=item.get("item", ""),
+                entry=entry_ref,
+                category=category_ref,
+                price=_to_decimal(item.get("price")),
+                cost=_to_decimal(item.get("cost")),
+                client_price=_to_decimal(item.get("clientPrice")),
+                client_cost=_to_decimal(item.get("clientCost")),
+                surcharge=_to_decimal(item.get("surcharge")),
+                tax_rate=_to_decimal(item.get("taxRate")) or Decimal("0"),
+                tax_price=_to_decimal(item.get("taxPrice")),
+                show_tax=bool(item.get("showTax", False)),
+                is_linked_surcharge=bool(item.get("isLinkedSurcharge", True)),
+                market_range=str(item.get("marketRange", "")),
+                item_data=item_data,
+                sort_order=idx,
+            )
+            entries_created += 1
 
     logger.info(
         "Created %d OfferEntry records for offer %s",
@@ -159,14 +193,15 @@ def reconstruct_details_from_entries(offer):
     Returns the same structure that the frontend expects.
     Falls back to offer.details if no OfferEntry records exist.
     """
-    entries = offer.offer_entries.all().order_by("sort_order", "created_at")
+    # QA3-031: Convert to list first to avoid .exists() bypassing prefetch cache
+    entries_list = list(offer.offer_entries.all().order_by("sort_order", "created_at"))
 
-    if not entries.exists():
+    if not entries_list:
         # No parsed entries yet - return raw details
         return offer.details
 
     offers_list = []
-    for entry_record in entries:
+    for entry_record in entries_list:
         item = {}
 
         # Restore fields from item_data first (units, options, etc.)

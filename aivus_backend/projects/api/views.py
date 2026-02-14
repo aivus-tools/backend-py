@@ -15,12 +15,31 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+try:
+    from django_ratelimit.decorators import ratelimit
+except ImportError:
+    from django.conf import settings as django_settings
+
+    if not django_settings.DEBUG:
+        raise ImportError(
+            "django-ratelimit is required in production but not installed. "
+            "Run: pip install django-ratelimit"
+        )
+
+    # Fallback: no-op decorator only in DEBUG mode
+    def ratelimit(**kwargs):  # noqa: ARG001
+        def decorator(func):
+            return func
+        return decorator
+
 from aivus_backend.catalog.models import Entry
 from aivus_backend.catalog.models import Unit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.ai_brief import analyze_brief
 from aivus_backend.projects.ai_brief import analyze_comparison
 from aivus_backend.projects.ai_brief import process_chat_message
@@ -29,6 +48,7 @@ from aivus_backend.projects.api.serializers import serialize_brief_detail
 from aivus_backend.projects.api.serializers import serialize_brief_offer
 from aivus_backend.projects.api.serializers import serialize_brief_with_offers
 from aivus_backend.projects.api.serializers import serialize_offer
+from aivus_backend.projects.api.serializers import serialize_offer_for_client
 from aivus_backend.projects.api.serializers import serialize_project
 from aivus_backend.projects.api.serializers import serialize_rate_card
 from aivus_backend.projects.api.serializers import serialize_rate_card_item
@@ -57,6 +77,15 @@ from aivus_backend.users.models import Vendor
 logger = logging.getLogger(__name__)
 
 
+def _validate_uuid(value, field_name="id"):
+    """Validate and return a UUID string. Raises ValueError if invalid."""
+    try:
+        uuid_module.UUID(str(value))
+        return str(value)
+    except (ValueError, AttributeError):
+        raise ValueError(f"Invalid UUID format for {field_name}")
+
+
 # ==================== Projects API ====================
 
 
@@ -66,12 +95,14 @@ logger = logging.getLogger(__name__)
 def projects_list(request):
     """List all projects or create a new one."""
     if request.method == "GET":
-        # Get vendor_id from headers
-        vendor_id = request.META.get("HTTP_X_VENDOR_ID")
+        # QA3-009: Use authenticated user_data instead of raw header
+        vendor_id = request.user_data.get("vendor_id")
         if not vendor_id:
             return JsonResponse({"error": "Vendor ID required"}, status=400)
 
-        projects = Project.objects.filter(vendor_id=vendor_id, deleted_at__isnull=True)
+        projects = Project.objects.filter(
+            vendor_id=vendor_id, deleted_at__isnull=True,
+        ).select_related("client").prefetch_related("collaborators", "client_managers")
         return JsonResponse([serialize_project(p) for p in projects], safe=False)
 
     if request.method == "POST":
@@ -82,6 +113,14 @@ def projects_list(request):
             team_id = data.get("teamId")  # Optional
             name = data.get("name")
             status = data.get("status", "DRAFT")
+
+            # QA4-022: Validate status against ProjectStatus enum
+            valid_statuses = [s.value for s in ProjectStatus]
+            if status not in valid_statuses:
+                return JsonResponse(
+                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    status=400,
+                )
 
             # New fields
             crm_id = data.get("crmId", "")
@@ -98,6 +137,23 @@ def projects_list(request):
                     {"error": "vendorId and name are required"},
                     status=400,
                 )
+
+            # QA3-010: Verify vendorId matches authenticated user's vendor
+            user_vendor_id = request.user_data.get("vendor_id")
+            if not user_vendor_id or vendor_id != user_vendor_id:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+            # Validate UUID fields
+            try:
+                _validate_uuid(vendor_id, "vendorId")
+                if brief_id:
+                    _validate_uuid(brief_id, "briefId")
+                if team_id:
+                    _validate_uuid(team_id, "teamId")
+                if client_id:
+                    _validate_uuid(client_id, "clientId")
+            except ValueError as e:
+                return JsonResponse({"error": str(e)}, status=400)
 
             # Verify vendor exists
             try:
@@ -175,7 +231,7 @@ def projects_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating project")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -190,6 +246,11 @@ def project_detail(request, project_id):
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
+    # Verify ownership: project's vendor_id must match requesting user's vendor_id
+    user_vendor_id = request.user_data.get("vendor_id")
+    if not user_vendor_id or str(project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
     if request.method == "GET":
         return JsonResponse(serialize_project(project))
 
@@ -200,6 +261,13 @@ def project_detail(request, project_id):
             if "name" in data:
                 project.name = data["name"]
             if "status" in data:
+                # QA3-034: Validate status against ProjectStatus enum
+                valid_statuses = [s.value for s in ProjectStatus]
+                if data["status"] not in valid_statuses:
+                    return JsonResponse(
+                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        status=400,
+                    )
                 project.status = data["status"]
             if "briefId" in data:
                 if data["briefId"]:
@@ -243,35 +311,37 @@ def project_detail(request, project_id):
 
             # Update collaborators if provided
             if "collaborators" in data:
-                # Delete existing and recreate
-                project.collaborators.all().delete()
-                for collab in data["collaborators"]:
-                    user = None
-                    user_id = collab.get("userId")
-                    if user_id:
-                        try:
-                            user = User.objects.get(id=user_id)
-                        except User.DoesNotExist:
-                            pass
+                with transaction.atomic():
+                    # Delete existing and recreate
+                    project.collaborators.all().delete()
+                    for collab in data["collaborators"]:
+                        user = None
+                        user_id = collab.get("userId")
+                        if user_id:
+                            try:
+                                user = User.objects.get(id=user_id)
+                            except User.DoesNotExist:
+                                pass
 
-                    ProjectCollaborator.objects.create(
-                        project=project,
-                        user=user,
-                        name=collab.get("name", ""),
-                        email=collab.get("email", ""),
-                        role=collab.get("role", "internal_user"),
-                    )
+                        ProjectCollaborator.objects.create(
+                            project=project,
+                            user=user,
+                            name=collab.get("name", ""),
+                            email=collab.get("email", ""),
+                            role=collab.get("role", "internal_user"),
+                        )
 
             # Update client managers if provided
             if "clientManagers" in data:
-                # Delete existing and recreate
-                project.client_managers.all().delete()
-                for manager in data["clientManagers"]:
-                    ClientManager.objects.create(
-                        project=project,
-                        name=manager.get("name", ""),
-                        position=manager.get("position", ""),
-                    )
+                with transaction.atomic():
+                    # Delete existing and recreate
+                    project.client_managers.all().delete()
+                    for manager in data["clientManagers"]:
+                        ClientManager.objects.create(
+                            project=project,
+                            name=manager.get("name", ""),
+                            position=manager.get("position", ""),
+                        )
 
             project.save()
             return JsonResponse(serialize_project(project))
@@ -280,7 +350,7 @@ def project_detail(request, project_id):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error updating project")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
         project.deleted_at = datetime.now(timezone.utc)
@@ -300,10 +370,29 @@ def project_thumbnail(request, project_id):
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
+    # QA3-003: Verify ownership
+    user_vendor_id = request.user_data.get("vendor_id")
+    if not user_vendor_id or str(project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
     if "thumbnail" not in request.FILES:
         return JsonResponse({"error": "No file provided"}, status=400)
 
-    project.thumbnail = request.FILES["thumbnail"]
+    file = request.FILES["thumbnail"]
+
+    # Validate file type
+    allowed_types = ("image/jpeg", "image/png", "image/gif", "image/webp")
+    if file.content_type not in allowed_types:
+        return JsonResponse(
+            {"error": f"Invalid file type. Allowed types: {', '.join(allowed_types)}"},
+            status=400,
+        )
+
+    # Validate file size (max 5MB)
+    if file.size > 5 * 1024 * 1024:
+        return JsonResponse({"error": "File size must not exceed 5MB"}, status=400)
+
+    project.thumbnail = file
     project.save()
 
     return JsonResponse({
@@ -320,7 +409,22 @@ def project_thumbnail(request, project_id):
 def briefs_list(request):
     """List all briefs or create a new one."""
     if request.method == "GET":
-        briefs = Brief.objects.filter(deleted_at__isnull=True)
+        user_group = request.user_data.get("group")
+        user_client_id = request.user_data.get("client_id")
+        user_vendor_id = request.user_data.get("vendor_id")
+
+        if user_group == "CLIENT" and user_client_id:
+            briefs = Brief.objects.filter(client_id=user_client_id, deleted_at__isnull=True)
+        elif user_group == "VENDOR" and user_vendor_id:
+            briefs = Brief.objects.filter(
+                projects__vendor_id=user_vendor_id,
+                deleted_at__isnull=True,
+            ).distinct()
+        elif user_group == "SYSTEM":
+            briefs = Brief.objects.filter(deleted_at__isnull=True)
+        else:
+            briefs = Brief.objects.none()
+
         return JsonResponse([serialize_brief(b) for b in briefs], safe=False)
 
     if request.method == "POST":
@@ -329,6 +433,19 @@ def briefs_list(request):
             status = data.get("status", "DRAFT")
             details = data.get("details", {})
             client_id = data.get("clientId")
+
+            # QA4-022: Validate status against BriefStatus enum
+            valid_statuses = [s.value for s in BriefStatus]
+            if status not in valid_statuses:
+                return JsonResponse(
+                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    status=400,
+                )
+
+            # QA3-015: For CLIENT users, force client_id from authenticated user
+            user_group = request.user_data.get("group")
+            if user_group == "CLIENT":
+                client_id = request.user_data.get("client_id")
 
             brief = Brief.objects.create(
                 status=status,
@@ -342,7 +459,7 @@ def briefs_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating brief")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -357,19 +474,42 @@ def brief_detail(request, brief_id):
     except Brief.DoesNotExist:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
+    # QA4-017: Role-aware ownership check
+    user_group = request.user_data.get("group")
+    if user_group == "CLIENT":
+        user_client_id = request.user_data.get("client_id")
+        if not user_client_id or str(brief.client_id) != user_client_id:
+            return JsonResponse({"error": "Access denied"}, status=403)
+    elif user_group == "VENDOR":
+        user_vendor_id = request.user_data.get("vendor_id")
+        if not user_vendor_id or not brief.projects.filter(vendor_id=user_vendor_id).exists():
+            return JsonResponse({"error": "Access denied"}, status=403)
+    elif user_group != "SYSTEM":
+        return JsonResponse({"error": "Access denied"}, status=403)
+
     if request.method == "GET":
         return JsonResponse(serialize_brief(brief))
 
     if request.method in ["PUT", "PATCH"]:
         try:
+            # QA2-020: Reject excessively large request bodies
+            if len(request.body) > 1_000_000:
+                return JsonResponse({"error": "Request body too large"}, status=400)
+
             data = json.loads(request.body)
 
             if "status" in data:
+                valid_statuses = [s.value for s in BriefStatus]
+                if data["status"] not in valid_statuses:
+                    return JsonResponse(
+                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        status=400,
+                    )
                 brief.status = data["status"]
             if "details" in data:
                 brief.details = data["details"]
-            if "clientId" in data:
-                brief.client_id = data["clientId"] if data["clientId"] else None
+            # QA2-009: Do NOT allow changing clientId via PATCH to prevent mass assignment
+            # data.pop("clientId", None) — simply not applying it
 
             brief.save()
             return JsonResponse(serialize_brief(brief))
@@ -378,7 +518,7 @@ def brief_detail(request, brief_id):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error updating brief")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
         brief.deleted_at = datetime.now(timezone.utc)
@@ -397,20 +537,37 @@ def brief_detail(request, brief_id):
 def offers_list(request):
     """List all offers or create a new one."""
     if request.method == "GET":
+        user_vendor_id = request.user_data.get("vendor_id")
+        user_group = request.user_data.get("group")
         # Get project_id from query params if provided
         project_id = request.GET.get("projectId")
         if project_id:
+            # QA2-010: Also verify project ownership for VENDOR users
+            filter_kwargs = {
+                "project_id": project_id,
+                "deleted_at__isnull": True,
+            }
+            if user_group == "VENDOR" and user_vendor_id:
+                filter_kwargs["project__vendor_id"] = user_vendor_id
             offers = Offer.objects.filter(
-                project_id=project_id,
+                **filter_kwargs,
+            ).prefetch_related("offer_entries")
+        elif user_vendor_id:
+            offers = Offer.objects.filter(
+                project__vendor_id=user_vendor_id,
                 deleted_at__isnull=True,
-            )
+            ).prefetch_related("offer_entries")
         else:
-            offers = Offer.objects.filter(deleted_at__isnull=True)
+            offers = Offer.objects.none()
 
         return JsonResponse([serialize_offer(o) for o in offers], safe=False)
 
     if request.method == "POST":
         try:
+            # QA2-020: Reject excessively large request bodies
+            if len(request.body) > 1_000_000:
+                return JsonResponse({"error": "Request body too large"}, status=400)
+
             data = json.loads(request.body)
             project_id = data.get("projectId")
             project_name = data.get("projectName")
@@ -429,11 +586,30 @@ def offers_list(request):
                     status=400,
                 )
 
+            # Validate UUID
+            try:
+                _validate_uuid(project_id, "projectId")
+            except ValueError as e:
+                return JsonResponse({"error": str(e)}, status=400)
+
+            # Validate status is a valid OfferStatus value
+            valid_statuses = [s.value for s in OfferStatus]
+            if status not in valid_statuses:
+                return JsonResponse(
+                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    status=400,
+                )
+
             # Verify project exists
             try:
                 project = Project.objects.get(id=project_id)
             except Project.DoesNotExist:
                 return JsonResponse({"error": "Project not found"}, status=404)
+
+            # QA2-002: Verify requesting vendor owns the project
+            user_vendor_id = request.user_data.get("vendor_id")
+            if not user_vendor_id or str(project.vendor_id) != user_vendor_id:
+                return JsonResponse({"error": "Access denied"}, status=403)
 
             # Parse deadline
             try:
@@ -467,7 +643,7 @@ def offers_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating offer")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -478,15 +654,24 @@ def offers_list(request):
 def offer_detail(request, offer_id):
     """Get, update, or delete a specific offer."""
     try:
-        offer = Offer.objects.get(id=offer_id, deleted_at__isnull=True)
+        offer = Offer.objects.select_related("project").get(id=offer_id, deleted_at__isnull=True)
     except Offer.DoesNotExist:
         return JsonResponse({"error": "Offer not found"}, status=404)
+
+    # Verify ownership: offer's project vendor_id must match requesting user's vendor_id
+    user_vendor_id = request.user_data.get("vendor_id")
+    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
 
     if request.method == "GET":
         return JsonResponse(serialize_offer(offer))
 
     if request.method in ["PUT", "PATCH"]:
         try:
+            # QA2-020: Reject excessively large request bodies
+            if len(request.body) > 1_000_000:
+                return JsonResponse({"error": "Request body too large"}, status=400)
+
             data = json.loads(request.body)
 
             if "projectName" in data:
@@ -494,6 +679,12 @@ def offer_detail(request, offer_id):
             if "description" in data:
                 offer.description = data["description"]
             if "status" in data:
+                valid_statuses = [s.value for s in OfferStatus]
+                if data["status"] not in valid_statuses:
+                    return JsonResponse(
+                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        status=400,
+                    )
                 offer.status = data["status"]
             if "deadline" in data:
                 try:
@@ -507,6 +698,12 @@ def offer_detail(request, offer_id):
                         status=400,
                     )
             if "source" in data:
+                valid_sources = [s.value for s in OfferSource]
+                if data["source"] not in valid_sources:
+                    return JsonResponse(
+                        {"error": f"Invalid source. Must be one of: {', '.join(valid_sources)}"},
+                        status=400,
+                    )
                 offer.source = data["source"]
             if "isLocked" in data:
                 offer.is_locked = data["isLocked"]
@@ -518,11 +715,13 @@ def offer_detail(request, offer_id):
             # Handle details: save raw JSON and parse into OfferEntry records
             if "details" in data:
                 offer.details = data["details"]
-                offer.save()
+                # QA4-056: Single save — parse_offer_details_to_entries saves offer internally
                 try:
                     parse_offer_details_to_entries(offer, data["details"])
                 except Exception:
                     logger.exception("Error parsing offer details to entries for offer %s", offer.id)
+                    # Fallback: save offer if parsing failed
+                    offer.save()
             else:
                 offer.save()
 
@@ -532,7 +731,7 @@ def offer_detail(request, offer_id):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error updating offer")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
         offer.deleted_at = datetime.now(timezone.utc)
@@ -552,7 +751,27 @@ def offers_by_project(request, project_id):
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
-    offers = Offer.objects.filter(project=project, deleted_at__isnull=True)
+    # QA3-002: Verify ownership
+    user_group = request.user_data.get("group")
+    user_vendor_id = request.user_data.get("vendor_id")
+    user_client_id = request.user_data.get("client_id")
+
+    if user_group == "VENDOR":
+        if not user_vendor_id or str(project.vendor_id) != user_vendor_id:
+            return JsonResponse({"error": "Access denied"}, status=403)
+    elif user_group == "CLIENT":
+        # CLIENT can only see offers for projects linked to their briefs
+        has_access = Brief.objects.filter(
+            client_id=user_client_id,
+            projects=project,
+            deleted_at__isnull=True,
+        ).exists() if user_client_id else False
+        if not has_access:
+            return JsonResponse({"error": "Access denied"}, status=403)
+    elif user_group != "SYSTEM":
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    offers = Offer.objects.filter(project=project, deleted_at__isnull=True).prefetch_related("offer_entries")
     return JsonResponse([serialize_offer(o) for o in offers], safe=False)
 
 
@@ -578,6 +797,11 @@ def shares_create(request):
             return JsonResponse({"error": "offerId is required"}, status=400)
 
         try:
+            _validate_uuid(offer_id, "offerId")
+        except ValueError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+        try:
             offer = Offer.objects.select_related("project", "project__vendor").get(
                 id=offer_id,
                 deleted_at__isnull=True,
@@ -587,7 +811,7 @@ def shares_create(request):
 
         # Verify the requesting user owns the offer (via vendor)
         user_vendor_id = request.user_data.get("vendor_id")
-        if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+        if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
             return JsonResponse({"error": "Access denied"}, status=403)
 
         # Auto-publish offer if it's still DRAFT
@@ -621,7 +845,7 @@ def shares_create(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error creating share")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
@@ -644,6 +868,10 @@ def share_get_public(request, token):
     if not share.is_active:
         return JsonResponse({"error": "Share link is no longer active"}, status=410)
 
+    # QA2-019: Don't serve draft offers through share links
+    if share.offer and share.offer.status == OfferStatus.DRAFT:
+        return JsonResponse({"error": "Offer is not available"}, status=404)
+
     return JsonResponse(serialize_share_public(share))
 
 
@@ -663,9 +891,16 @@ def share_manage(request, token):
     except Share.DoesNotExist:
         return JsonResponse({"error": "Share not found"}, status=404)
 
+    # QA2-003: Reject share management when offer has no project
+    if share.offer.project is None:
+        return JsonResponse(
+            {"error": "Cannot manage share for offer without a project"},
+            status=400,
+        )
+
     # Verify ownership
     user_vendor_id = request.user_data.get("vendor_id")
-    if share.offer.project and user_vendor_id and str(share.offer.project.vendor_id) != user_vendor_id:
+    if not user_vendor_id or str(share.offer.project.vendor_id) != user_vendor_id:
         return JsonResponse({"error": "Access denied"}, status=403)
 
     # PATCH — toggle active/inactive
@@ -684,7 +919,7 @@ def share_manage(request, token):
             return JsonResponse(serialize_share(share))
         except Exception as e:
             logger.exception("Error toggling share")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     # DELETE — deactivate
     if request.method == "DELETE":
@@ -727,9 +962,9 @@ def share_link_to_brief(request, token):
         except Brief.DoesNotExist:
             return JsonResponse({"error": "Brief not found"}, status=404)
 
-        # Verify the client owns the brief
+        # QA3-014: Positive assertion ownership check (no NULL bypass)
         user_client_id = request.user_data.get("client_id")
-        if brief.client_id and user_client_id and str(brief.client_id) != user_client_id:
+        if not user_client_id or not brief.client_id or str(brief.client_id) != user_client_id:
             return JsonResponse({"error": "Access denied"}, status=403)
 
         # Get linking user
@@ -759,7 +994,7 @@ def share_link_to_brief(request, token):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error linking share to brief")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Offer Status ====================
@@ -782,9 +1017,9 @@ def offer_status_update(request, offer_id):
     except Offer.DoesNotExist:
         return JsonResponse({"error": "Offer not found"}, status=404)
 
-    # Verify ownership
+    # QA3-004: Positive assertion ownership check (no NULL bypass)
     user_vendor_id = request.user_data.get("vendor_id")
-    if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
         return JsonResponse({"error": "Access denied"}, status=403)
 
     try:
@@ -809,7 +1044,7 @@ def offer_status_update(request, offer_id):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error updating offer status")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Copy Offer ====================
@@ -831,60 +1066,62 @@ def offer_copy(request, offer_id):
     except Offer.DoesNotExist:
         return JsonResponse({"error": "Offer not found"}, status=404)
 
-    # Verify ownership
+    # QA3-004: Positive assertion ownership check (no NULL bypass)
     user_vendor_id = request.user_data.get("vendor_id")
-    if offer.project and user_vendor_id and str(offer.project.vendor_id) != user_vendor_id:
+    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
         return JsonResponse({"error": "Access denied"}, status=403)
 
     try:
-        # Get all offer entries before creating the copy
-        original_entries = list(
-            OfferEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order")
-        )
-
-        # Create the copy
-        new_offer = Offer.objects.create(
-            project_name=f"{offer.project_name} (Copy)",
-            project=offer.project,
-            parent_offer=offer,
-            description=offer.description,
-            status=OfferStatus.DRAFT,
-            cost=offer.cost,
-            profit=offer.profit,
-            details=offer.details,
-            metadata=offer.metadata,
-            deadline=offer.deadline,
-            source=offer.source,
-            is_locked=False,
-        )
-
-        # Deep copy OfferEntry records
-        for entry in original_entries:
-            OfferEntry.objects.create(
-                offer=new_offer,
-                frontend_id=entry.frontend_id,
-                item_name=entry.item_name,
-                entry=entry.entry,
-                category=entry.category,
-                price=entry.price,
-                cost=entry.cost,
-                client_price=entry.client_price,
-                client_cost=entry.client_cost,
-                surcharge=entry.surcharge,
-                tax_rate=entry.tax_rate,
-                tax_price=entry.tax_price,
-                show_tax=entry.show_tax,
-                is_linked_surcharge=entry.is_linked_surcharge,
-                market_range=entry.market_range,
-                item_data=entry.item_data,
-                sort_order=entry.sort_order,
+        # QA2-021: Wrap entire copy logic in a transaction
+        with transaction.atomic():
+            # Get all offer entries before creating the copy
+            original_entries = list(
+                OfferEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order")
             )
+
+            # Create the copy
+            new_offer = Offer.objects.create(
+                project_name=f"{offer.project_name} (Copy)",
+                project=offer.project,
+                parent_offer=offer,
+                description=offer.description,
+                status=OfferStatus.DRAFT,
+                cost=offer.cost,
+                profit=offer.profit,
+                details=offer.details,
+                metadata=offer.metadata,
+                deadline=offer.deadline,
+                source=offer.source,
+                is_locked=False,
+            )
+
+            # Deep copy OfferEntry records
+            for entry in original_entries:
+                OfferEntry.objects.create(
+                    offer=new_offer,
+                    frontend_id=entry.frontend_id,
+                    item_name=entry.item_name,
+                    entry=entry.entry,
+                    category=entry.category,
+                    price=entry.price,
+                    cost=entry.cost,
+                    client_price=entry.client_price,
+                    client_cost=entry.client_cost,
+                    surcharge=entry.surcharge,
+                    tax_rate=entry.tax_rate,
+                    tax_price=entry.tax_price,
+                    show_tax=entry.show_tax,
+                    is_linked_surcharge=entry.is_linked_surcharge,
+                    market_range=entry.market_range,
+                    item_data=entry.item_data,
+                    sort_order=entry.sort_order,
+                )
 
         return JsonResponse(serialize_offer(new_offer), status=201)
 
     except Exception as e:
         logger.exception("Error copying offer")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Templates API ====================
@@ -930,7 +1167,8 @@ def templates_list(request):
             except Offer.DoesNotExist:
                 return JsonResponse({"error": "Offer not found"}, status=404)
 
-            if offer.project and str(offer.project.vendor_id) != vendor_id:
+            # QA4-030: Positive assertion — offer must have a project owned by this vendor
+            if not offer.project or str(offer.project.vendor_id) != vendor_id:
                 return JsonResponse({"error": "Access denied"}, status=403)
 
             # Snapshot the full offer details (reconstructed from OfferEntry)
@@ -985,7 +1223,7 @@ def templates_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating template")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -1066,28 +1304,24 @@ def template_apply(request, template_id):
                 status=OfferStatus.DRAFT,
                 details=template.details,
                 metadata=template.metadata.get("offerMetadata", {}),
-                deadline=datetime.now(timezone.utc),
+                deadline=None,
                 source=OfferSource.PLATFORM,
                 is_locked=False,
             )
 
             # Create OfferEntry records from entries snapshot
             entries_snapshot = template.metadata.get("entriesSnapshot", [])
-            for entry_data in entries_snapshot:
-                entry_ref = None
-                if entry_data.get("entryId"):
-                    try:
-                        entry_ref = Entry.objects.get(id=entry_data["entryId"])
-                    except Entry.DoesNotExist:
-                        pass
 
-                category_ref = None
-                if entry_data.get("categoryId"):
-                    try:
-                        from aivus_backend.catalog.models import Category
-                        category_ref = Category.objects.get(id=entry_data["categoryId"])
-                    except Category.DoesNotExist:
-                        pass
+            # QA4-036: Bulk pre-fetch entries and categories to avoid N+1 queries
+            from aivus_backend.catalog.models import Category
+            entry_ids = {e["entryId"] for e in entries_snapshot if e.get("entryId")}
+            category_ids = {e["categoryId"] for e in entries_snapshot if e.get("categoryId")}
+            entries_by_id = {str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)} if entry_ids else {}
+            categories_by_id = {str(c.id): c for c in Category.objects.filter(id__in=category_ids)} if category_ids else {}
+
+            for entry_data in entries_snapshot:
+                entry_ref = entries_by_id.get(entry_data.get("entryId"))
+                category_ref = categories_by_id.get(entry_data.get("categoryId"))
 
                 OfferEntry.objects.create(
                     offer=offer,
@@ -1115,7 +1349,7 @@ def template_apply(request, template_id):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error applying template")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Rate Cards API ====================
@@ -1191,7 +1425,7 @@ def rate_cards_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating rate card")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -1266,7 +1500,7 @@ def rate_card_detail(request, rate_card_id):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error updating rate card")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
         rate_card.deleted_at = datetime.now(timezone.utc)
@@ -1342,6 +1576,14 @@ def client_briefs_list(request):
             details = data.get("details", {})
             status = data.get("status", "DRAFT")
 
+            # QA4-022: Validate status against BriefStatus enum
+            valid_statuses = [s.value for s in BriefStatus]
+            if status not in valid_statuses:
+                return JsonResponse(
+                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    status=400,
+                )
+
             # Store name inside details if provided
             if name and isinstance(details, dict):
                 details["name"] = name
@@ -1358,7 +1600,7 @@ def client_briefs_list(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error creating brief")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -1388,14 +1630,20 @@ def client_brief_detail(request, brief_id):
         try:
             data = json.loads(request.body)
 
+            if "details" in data:
+                brief.details = data["details"]
             if "name" in data:
                 if isinstance(brief.details, dict):
                     brief.details["name"] = data["name"]
                 else:
                     brief.details = {"name": data["name"]}
-            if "details" in data:
-                brief.details = data["details"]
             if "status" in data:
+                valid_statuses = [s.value for s in BriefStatus]
+                if data["status"] not in valid_statuses:
+                    return JsonResponse(
+                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        status=400,
+                    )
                 brief.status = data["status"]
 
             brief.save()
@@ -1405,7 +1653,7 @@ def client_brief_detail(request, brief_id):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logger.exception("Error updating brief")
-            return JsonResponse({"error": str(e)}, status=500)
+            return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
         brief.deleted_at = datetime.now(timezone.utc)
@@ -1444,7 +1692,8 @@ def client_brief_offers(request, brief_id):
     offers = []
     for bo in brief_offers:
         offer = bo.offer
-        offer_data = serialize_offer(offer)
+        # QA4-023: Use client serializer to exclude cost/profit
+        offer_data = serialize_offer_for_client(offer)
         offer_data["linkedAt"] = bo.created_at.isoformat() if bo.created_at else None
         offer_data["linkedBy"] = str(bo.linked_by_id) if bo.linked_by_id else None
         if offer.project and offer.project.vendor:
@@ -1465,6 +1714,7 @@ def client_brief_offers(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
+@ratelimit(key="user_or_ip", rate="20/m", method="POST", block=True)
 def client_brief_chat(request):
     """AI-powered chat for brief creation.
 
@@ -1490,11 +1740,12 @@ def client_brief_chat(request):
             except User.DoesNotExist:
                 pass
 
-        # Get brief if provided
+        # QA3-039: Get brief with ownership check
+        client_id = request.user_data.get("client_id")
         brief = None
         if brief_id:
             try:
-                brief = Brief.objects.get(id=brief_id, deleted_at__isnull=True)
+                brief = Brief.objects.get(id=brief_id, client_id=client_id, deleted_at__isnull=True)
             except Brief.DoesNotExist:
                 pass
 
@@ -1530,12 +1781,13 @@ def client_brief_chat(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error in brief chat")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
+@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
 def client_brief_chat_analyze(request):
     """Analyze a brief and provide suggestions.
 
@@ -1556,7 +1808,7 @@ def client_brief_chat_analyze(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Error analyzing brief")
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 # ==================== Comparison API ====================
@@ -1567,12 +1819,17 @@ def _build_comparison_data(brief):
 
     Returns structured data with vendors, categories, items, and totals.
     """
+    # QA3-036: prefetch offer entries to avoid N+1 queries
     brief_offers = BriefOffer.objects.filter(
         brief=brief,
     ).select_related(
         "offer",
         "offer__project",
         "offer__project__vendor",
+    ).prefetch_related(
+        "offer__offer_entries",
+        "offer__offer_entries__category",
+        "offer__offer_entries__entry",
     )
 
     if not brief_offers.exists():
@@ -1599,11 +1856,11 @@ def _build_comparison_data(brief):
             vendor_id = str(offer.id)  # Use offer ID as fallback
             vendor_name = offer.project_name
 
-        # Get offer entries
-        entries = OfferEntry.objects.filter(
-            offer=offer,
-            deleted_at__isnull=True,
-        ).select_related("category", "entry").order_by("sort_order")
+        # QA3-036: Use prefetched entries instead of per-offer query
+        entries = sorted(
+            [e for e in offer.offer_entries.all() if e.deleted_at is None],
+            key=lambda e: e.sort_order,
+        )
 
         vendor_total = sum(
             (e.client_price or e.price or Decimal("0")) for e in entries
@@ -1712,6 +1969,7 @@ def client_brief_comparison(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
+@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
 def client_brief_comparison_analyze(request, brief_id):
     """AI analysis of comparison data for a brief's offers.
 
@@ -1773,6 +2031,10 @@ def client_xlsx_upload(request):
     if not file:
         return JsonResponse({"error": "No file provided"}, status=400)
 
+    # Validate file size (max 10MB)
+    if file.size > 10 * 1024 * 1024:
+        return JsonResponse({"error": "File size must not exceed 10MB"}, status=400)
+
     try:
         wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
     except Exception:
@@ -1781,11 +2043,19 @@ def client_xlsx_upload(request):
 
     offer_id = None
     offer = None
+    max_sheets = 20
+    max_cells_per_sheet = 10000
     try:
-        for sheet in wb.sheetnames:
+        for sheet_idx, sheet in enumerate(wb.sheetnames):
+            if sheet_idx >= max_sheets:
+                break
             ws = wb[sheet]
+            cell_count = 0
             for row in ws.iter_rows():
                 for cell in row:
+                    cell_count += 1
+                    if cell_count > max_cells_per_sheet:
+                        break
                     value = str(cell.value or "").strip()
                     # Check if it looks like a UUID
                     try:
@@ -1801,7 +2071,7 @@ def client_xlsx_upload(request):
                             break
                     except (ValueError, AttributeError):
                         continue
-                if offer_id:
+                if offer_id or cell_count > max_cells_per_sheet:
                     break
             if offer_id:
                 break
@@ -1814,8 +2084,13 @@ def client_xlsx_upload(request):
             status=404,
         )
 
-    # Find share for this offer
+    # QA2-018: Verify the client has access via an existing share
     share = Share.objects.filter(offer_id=offer_id, is_active=True).first()
+    if not share:
+        return JsonResponse(
+            {"error": "No active share found for this offer"},
+            status=403,
+        )
 
     return JsonResponse({
         "offer_id": offer_id,

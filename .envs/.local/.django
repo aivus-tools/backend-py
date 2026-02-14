@@ -25,4 +25,6 @@ DEBUG=True
 # ------------------------------------------------------------------------------
 GOOGLE_APPLICATION_CREDENTIALS=/app/gcs-credentials.json
 DJANGO_GCP_STORAGE_BUCKET_NAME=aivus-production-media
-OPENAI_API_KEY=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
+# WARNING: The previously exposed API key MUST be revoked in the OpenAI dashboard!
+# Visit https://platform.openai.com/api-keys to revoke it.
+OPENAI_API_KEY=changeme-your-openai-key-here

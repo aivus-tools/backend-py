@@ -171,7 +171,7 @@ class OfferAdmin(ModelAdmin):
     def pretty_details(self, instance):
         return mark_safe(
             f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
-            f'{json.dumps(instance.details, indent=4, ensure_ascii=False)}'
+            f'{json.dumps(instance.details, indent=4, ensure_ascii=True)}'
             f'</pre>'
         )
 
@@ -255,7 +255,7 @@ class TemplateAdmin(ModelAdmin):
     def pretty_details(self, instance):
         return mark_safe(
             f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
-            f'{json.dumps(instance.details, indent=4, ensure_ascii=False)}'
+            f'{json.dumps(instance.details, indent=4, ensure_ascii=True)}'
             f'</pre>'
         )
 

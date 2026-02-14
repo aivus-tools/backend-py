@@ -21,6 +21,7 @@ from aivus_backend.catalog.models import Entry
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import Project
+from aivus_backend.users.models import Client as ClientModel
 from aivus_backend.users.models import Team
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
@@ -93,11 +94,18 @@ def project(vendor):
 
 
 @pytest.fixture
-def brief(db):
-    """Create a test brief."""
+def client_entity(client_user):
+    """Create a client entity."""
+    return ClientModel.objects.create(name="API Test Company", owner=client_user)
+
+
+@pytest.fixture
+def brief(client_entity):
+    """Create a test brief linked to a client."""
     return Brief.objects.create(
         status="DRAFT",
         details={"projectName": "Test Brief"},
+        client=client_entity,
     )
 
 
@@ -156,9 +164,16 @@ class TestAuthentication:
         response = api_client.get("/api/v1/briefs")
         assert response.status_code in (401, 403)
 
-    def test_wrong_group_access_denied(self, api_client, vendor_user):
+    def test_wrong_group_access_denied(self, api_client, db):
         """Request with non-allowed group should be denied (403)."""
-        headers = _auth_headers(vendor_user, "UNCONFIRMED")
+        # Create a user with UNCONFIRMED group (not allowed for projects)
+        unconfirmed_user = User.objects.create_user(
+            email="unconfirmed@example.com",
+            password="testpass123",
+            name="Unconfirmed User",
+            group="UNCONFIRMED",
+        )
+        headers = _auth_headers(unconfirmed_user, "UNCONFIRMED")
         response = api_client.get("/api/v1/projects", **headers)
         # require_groups decorator returns 403 for wrong group
         assert response.status_code == 403
@@ -172,9 +187,11 @@ class TestAuthentication:
 class TestProjectsAPI:
     """Test Projects CRUD API."""
 
-    def test_projects_list_requires_vendor_id(self, api_client, vendor_user, vendor):
-        """GET /projects without X-Vendor-Id should return 400."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+    def test_projects_list_requires_vendor_id(self, api_client, client_user):
+        """GET /projects without vendor context should return 400."""
+        # QA3-009: vendor_id now comes from user_data, not header
+        # A CLIENT user has no vendor_id, so they get 400
+        headers = _auth_headers(client_user, "CLIENT")
         response = api_client.get("/api/v1/projects", **headers)
         assert response.status_code == 400
         data = json.loads(response.content)
@@ -469,9 +486,9 @@ class TestOffersAPI:
 class TestBriefsAPI:
     """Test Briefs CRUD API."""
 
-    def test_create_brief(self, api_client, vendor_user, vendor):
+    def test_create_brief(self, api_client, client_user, client_entity):
         """POST /briefs should create a new brief."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+        headers = _auth_headers(client_user, "CLIENT")
         payload = {
             "status": "DRAFT",
             "details": {
@@ -490,9 +507,9 @@ class TestBriefsAPI:
         assert data["status"] == "DRAFT"
         assert data["details"]["projectName"] == "New Brief"
 
-    def test_get_brief_detail(self, api_client, vendor_user, vendor, brief):
-        """GET /briefs/<id> should return brief details."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+    def test_get_brief_detail(self, api_client, client_user, client_entity, brief):
+        """GET /briefs/<id> should return brief details (requires client ownership)."""
+        headers = _auth_headers(client_user, "CLIENT")
         response = api_client.get(
             f"/api/v1/briefs/{brief.id}", **headers
         )
@@ -500,11 +517,11 @@ class TestBriefsAPI:
         data = json.loads(response.content)
         assert data["id"] == str(brief.id)
 
-    def test_update_brief(self, api_client, vendor_user, vendor, brief):
-        """PATCH /briefs/<id> should update brief."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+    def test_update_brief(self, api_client, client_user, client_entity, brief):
+        """PATCH /briefs/<id> should update brief (requires client ownership)."""
+        headers = _auth_headers(client_user, "CLIENT")
         payload = {
-            "status": "RFP",
+            "status": "SUBMITTED",
             "details": {"projectName": "Updated Brief", "budget": 20000},
         }
         response = api_client.patch(
@@ -515,12 +532,12 @@ class TestBriefsAPI:
         )
         assert response.status_code == 200
         data = json.loads(response.content)
-        assert data["status"] == "RFP"
+        assert data["status"] == "SUBMITTED"
         assert data["details"]["budget"] == 20000
 
-    def test_delete_brief(self, api_client, vendor_user, vendor, brief):
-        """DELETE /briefs/<id> should soft delete."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+    def test_delete_brief(self, api_client, client_user, client_entity, brief):
+        """DELETE /briefs/<id> should soft delete (requires client ownership)."""
+        headers = _auth_headers(client_user, "CLIENT")
         response = api_client.delete(
             f"/api/v1/briefs/{brief.id}", **headers
         )
@@ -528,18 +545,18 @@ class TestBriefsAPI:
         brief.refresh_from_db()
         assert brief.deleted_at is not None
 
-    def test_briefs_list(self, api_client, vendor_user, vendor, brief):
-        """GET /briefs should return all briefs."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+    def test_briefs_list(self, api_client, client_user, client_entity, brief):
+        """GET /briefs should return client's briefs."""
+        headers = _auth_headers(client_user, "CLIENT")
         response = api_client.get("/api/v1/briefs", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert isinstance(data, list)
         assert len(data) >= 1
 
-    def test_create_brief_invalid_json(self, api_client, vendor_user, vendor):
+    def test_create_brief_invalid_json(self, api_client, client_user, client_entity):
         """POST /briefs with invalid JSON should return 400."""
-        headers = _auth_headers(vendor_user, "VENDOR")
+        headers = _auth_headers(client_user, "CLIENT")
         response = api_client.post(
             "/api/v1/briefs",
             data="not json at all",

@@ -31,6 +31,15 @@ class ProjectStatus(models.TextChoices):
     ONGOING = "ONGOING", "In progress"
 
 
+class BriefStatus(models.TextChoices):
+    """Brief status choices."""
+
+    DRAFT = "DRAFT", "Draft"
+    SUBMITTED = "SUBMITTED", "Submitted"
+    REVIEWING = "REVIEWING", "Reviewing"
+    COMPLETED = "COMPLETED", "Completed"
+
+
 class AuthType(models.TextChoices):
     """Authentication type choices."""
 

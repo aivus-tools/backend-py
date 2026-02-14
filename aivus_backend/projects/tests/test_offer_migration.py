@@ -258,47 +258,43 @@ class TestOfferModel:
 
 
 class TestOfferEntry:
-    """Tests for OfferEntry model."""
+    """Tests for OfferEntry model.
+
+    QA4-014: Updated to use current OfferEntry fields (price, cost, item_name, etc.)
+    and removed tests for non-existent constraints.
+    """
 
     def test_offer_entry_creation(self, offer, entry):
         """Test creating an OfferEntry linking Offer to Entry."""
         offer_entry = OfferEntry.objects.create(
             offer=offer,
             entry=entry,
-            total_price=Decimal("500.00"),
-            base_price=Decimal("450.00"),
-            details={"surcharge": 10, "taxRate": 0},
+            item_name="Camera Operator",
+            price=Decimal("500.00"),
+            cost=Decimal("450.00"),
+            client_price=Decimal("550.00"),
+            surcharge=Decimal("10.00"),
+            tax_rate=Decimal("6.00"),
+            sort_order=0,
+            item_data={"units": [{"type": "quantity", "count": 1}]},
         )
         assert offer_entry.id is not None
         assert offer_entry.offer == offer
         assert offer_entry.entry == entry
-        assert offer_entry.total_price == Decimal("500.00")
-        assert offer_entry.base_price == Decimal("450.00")
-        assert offer_entry.details["surcharge"] == 10
-
-    def test_offer_entry_unique_constraint(self, offer, entry):
-        """Test unique_together constraint on (offer, entry)."""
-        OfferEntry.objects.create(
-            offer=offer,
-            entry=entry,
-            total_price=Decimal("500.00"),
-            base_price=Decimal("450.00"),
-        )
-        with pytest.raises(IntegrityError):
-            OfferEntry.objects.create(
-                offer=offer,
-                entry=entry,
-                total_price=Decimal("600.00"),
-                base_price=Decimal("550.00"),
-            )
+        assert offer_entry.price == Decimal("500.00")
+        assert offer_entry.cost == Decimal("450.00")
+        assert offer_entry.item_name == "Camera Operator"
+        assert offer_entry.item_data["units"][0]["type"] == "quantity"
 
     def test_offer_entry_cascade_delete(self, offer, entry):
         """Test that hard-deleting an Offer cascades to OfferEntry."""
         OfferEntry.objects.create(
             offer=offer,
             entry=entry,
-            total_price=Decimal("500.00"),
-            base_price=Decimal("450.00"),
+            item_name="Test Item",
+            price=Decimal("500.00"),
+            cost=Decimal("450.00"),
+            sort_order=0,
         )
         offer_id = offer.id
         assert OfferEntry.objects.filter(offer_id=offer_id).count() == 1
@@ -307,20 +303,41 @@ class TestOfferEntry:
         assert OfferEntry.objects.filter(offer_id=offer_id).count() == 0
 
     def test_multiple_entries_per_offer(self, offer, entry, entry2):
-        """Test that an offer can have multiple entries."""
+        """Test that an offer can have multiple entries (no unique constraint on offer+entry)."""
         OfferEntry.objects.create(
             offer=offer,
             entry=entry,
-            total_price=Decimal("500.00"),
-            base_price=Decimal("450.00"),
+            item_name="Entry 1",
+            price=Decimal("500.00"),
+            cost=Decimal("450.00"),
+            sort_order=0,
         )
         OfferEntry.objects.create(
             offer=offer,
             entry=entry2,
-            total_price=Decimal("300.00"),
-            base_price=Decimal("250.00"),
+            item_name="Entry 2",
+            price=Decimal("300.00"),
+            cost=Decimal("250.00"),
+            sort_order=1,
         )
         assert offer.offer_entries.count() == 2
+
+    def test_offer_entry_soft_delete(self, offer, entry):
+        """Test soft delete sets deleted_at timestamp."""
+        offer_entry = OfferEntry.objects.create(
+            offer=offer,
+            entry=entry,
+            item_name="Soft Delete Test",
+            price=Decimal("100.00"),
+            sort_order=0,
+        )
+        assert offer_entry.deleted_at is None
+        offer_entry.deleted_at = timezone.now()
+        offer_entry.save()
+        assert OfferEntry.objects.filter(id=offer_entry.id).exists()
+        assert not OfferEntry.objects.filter(
+            id=offer_entry.id, deleted_at__isnull=True
+        ).exists()
 
 
 # ==================== OfferRate Tests ====================

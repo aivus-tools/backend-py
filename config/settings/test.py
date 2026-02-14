@@ -34,5 +34,16 @@ TEMPLATES[0]["OPTIONS"]["debug"] = True  # type: ignore[index]
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#media-url
 MEDIA_URL = "http://media.testserver/"
+# HMAC / API KEY
+# QA3-025: Provide defaults so tests run outside Docker
+# ------------------------------------------------------------------------------
+HMAC_SECRET = env("HMAC_SECRET", default="test-hmac-secret")
+API_KEY = env("API_KEY", default="test-api-key")
+
+# RATE LIMITING
+# ------------------------------------------------------------------------------
+# Disable rate limiting in tests to prevent test interference
+RATELIMIT_ENABLE = False
+
 # Your stuff...
 # ------------------------------------------------------------------------------

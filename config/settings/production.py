@@ -18,7 +18,8 @@ from .base import env
 # https://docs.djangoproject.com/en/dev/ref/settings/#secret-key
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 # https://docs.djangoproject.com/en/dev/ref/settings/#allowed-hosts
-ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["go.aivus.com"])
+# QA3-007: Fixed domain from .com to .co to match actual production domain
+ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["go.aivus.co"])
 
 # DATABASES
 # ------------------------------------------------------------------------------
@@ -56,7 +57,7 @@ CSRF_COOKIE_NAME = "__Secure-csrftoken"
 # https://docs.djangoproject.com/en/dev/topics/security/#ssl-https
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-hsts-seconds
 # TODO: set this to 60 seconds first and then to 518400 once you prove the former works
-SECURE_HSTS_SECONDS = 60
+SECURE_HSTS_SECONDS = 518400
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-hsts-include-subdomains
 SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool(
     "DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS",
@@ -98,9 +99,10 @@ STATIC_URL = f"https://storage.googleapis.com/{GS_BUCKET_NAME}/static/"
 # EMAIL
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#default-from-email
+# QA3-007: Fixed domain from .com to .co
 DEFAULT_FROM_EMAIL = env(
     "DJANGO_DEFAULT_FROM_EMAIL",
-    default="Aivus-Backend <noreply@go.aivus.com>",
+    default="Aivus-Backend <noreply@go.aivus.co>",
 )
 # https://docs.djangoproject.com/en/dev/ref/settings/#server-email
 SERVER_EMAIL = env("DJANGO_SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
@@ -130,14 +132,6 @@ ADMIN_URL = env("DJANGO_ADMIN_URL")
 #    "BREVO_API_URL": env("BREVO_API_URL", default="https://api.brevo.com/v3/"),
 #}
 
-# EMAIL
-# ------------------------------------------------------------------------------
-# https://docs.djangoproject.com/en/dev/ref/settings/#email-host
-EMAIL_HOST = env("EMAIL_HOST", default="mailpit")
-# https://docs.djangoproject.com/en/dev/ref/settings/#email-port
-EMAIL_PORT = 1025
-# https://docs.djangoproject.com/en/dev/ref/settings/#default-from-email
-DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="noreply@aivus.local")
 # Frontend URL for email links
 FRONTEND_URL = env("FRONTEND_URL", default="https://go.aivus.co")
 
@@ -167,7 +161,7 @@ LOGGING = {
     },
     "handlers": {
         "console": {
-            "level": "DEBUG",
+            "level": "INFO",
             "class": "logging.StreamHandler",
             "formatter": "verbose",
         },
@@ -199,14 +193,16 @@ LOGGING = {
             "propagate": False,
         },
         # Application loggers
+        # QA2-031: Use INFO level in production (not DEBUG)
         "aivus_backend": {
-            "level": "DEBUG",
+            "level": "INFO",
             "handlers": ["console"],
             "propagate": False,
         },
         # Third-party
+        # QA2-031: Use INFO level in production (not DEBUG)
         "gunicorn.error": {
-            "level": "DEBUG",
+            "level": "INFO",
             "handlers": ["console"],
             "propagate": False,
         },
@@ -252,6 +248,9 @@ if SENTRY_DSN:
         traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
     )
 
+
+# QA2-005: Production CSRF_TRUSTED_ORIGINS
+CSRF_TRUSTED_ORIGINS = ["https://go.aivus.co", "https://app.aivus.co"]
 
 # Your stuff...
 # ------------------------------------------------------------------------------

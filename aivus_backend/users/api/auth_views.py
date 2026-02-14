@@ -6,6 +6,8 @@ import secrets
 import string
 
 from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -17,6 +19,23 @@ from aivus_backend.users.emails import send_password_reset_email
 from aivus_backend.users.models import User, Vendor, Client
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
+
+try:
+    from django_ratelimit.decorators import ratelimit
+except ImportError:
+    from django.conf import settings as django_settings
+
+    if not django_settings.DEBUG:
+        raise ImportError(
+            "django-ratelimit is required in production but not installed. "
+            "Run: pip install django-ratelimit"
+        )
+
+    # Fallback: no-op decorator only in DEBUG mode
+    def ratelimit(**kwargs):  # noqa: ARG001
+        def decorator(func):
+            return func
+        return decorator
 
 
 def generate_temporary_password(length: int = 12) -> str:
@@ -30,6 +49,7 @@ logger = logging.getLogger(__name__)
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="5/m", method="POST", block=True)
 def register(request):
     """
     Register a new user.
@@ -39,7 +59,7 @@ def register(request):
     """
     try:
         data = json.loads(request.body)
-        email = data.get("email")
+        email = data.get("email", "").strip().lower()
         password = data.get("password")
         name = data.get("name")
         auth_type = data.get("authType", "CREDENTIALS")
@@ -47,17 +67,31 @@ def register(request):
         if not email or not name:
             return JsonResponse({"error": "Email and name are required"}, status=400)
 
+        # QA2-001: Reject Google auth type through register endpoint
+        if auth_type == "GOOGLE":
+            return JsonResponse(
+                {"error": "Google authentication must use OAuth flow"},
+                status=400,
+            )
+
         # Check if user exists
         if User.objects.filter(email=email).exists():
             return JsonResponse({"error": "Email already exists"}, status=400)
 
-        # For Google users, generate a temporary password
-        if auth_type == "GOOGLE":
-            temporary_password = generate_temporary_password()
-            hashed_password = make_password(temporary_password)
-        else:
-            temporary_password = None
-            hashed_password = make_password(password) if password else make_password("")
+        # QA2-012: Use Django's password validation instead of simple length check
+        if not password:
+            return JsonResponse(
+                {"error": "Password is required"},
+                status=400,
+            )
+        try:
+            validate_password(password)
+        except ValidationError as e:
+            return JsonResponse(
+                {"error": e.messages},
+                status=400,
+            )
+        hashed_password = make_password(password)
 
         # Create user
         user = User.objects.create(
@@ -65,41 +99,24 @@ def register(request):
             name=name,
             password=hashed_password,
             auth_type=auth_type,
-            group="CONFIRMED" if auth_type == "GOOGLE" else "UNCONFIRMED",
+            group="UNCONFIRMED",
         )
 
         # Send confirmation email for CREDENTIALS users
-        if auth_type == "CREDENTIALS":
-            token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
+        token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
 
-            # Send confirmation email
-            email_sent = send_confirmation_email(user, token_obj.token)
+        # Send confirmation email
+        email_sent = send_confirmation_email(user, token_obj.token)
 
-            if email_sent:
-                logger.info("Confirmation email sent to %s", user.email)
-            else:
-                logger.error("Failed to send confirmation email to %s", user.email)
-
-            return JsonResponse(
-                {
-                    "message": "User registered. Check your email to confirm account.",
-                    "id": str(user.id),
-                },
-                status=201,
-            )
-
-        # Google users - send welcome email with temporary password
-        email_sent = send_google_welcome_email(user, temporary_password)
         if email_sent:
-            logger.info("Google welcome email sent to %s", user.email)
+            logger.info("Confirmation email sent to %s", user.email)
         else:
-            logger.warning("Failed to send Google welcome email to %s", user.email)
+            logger.error("Failed to send confirmation email to %s", user.email)
 
+        # QA4-049: Do not expose internal UUID in register response
         return JsonResponse(
             {
-                "message": "User registered successfully via Google. Check your email for temporary password.",
-                "id": str(user.id),
-                "group": user.group,
+                "message": "User registered. Check your email to confirm account.",
             },
             status=201,
         )
@@ -108,12 +125,13 @@ def register(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.exception("Register error: %s", e)
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="5/m", method="POST", block=True)
 def login(request):
     """
     Login user.
@@ -123,7 +141,7 @@ def login(request):
     """
     try:
         data = json.loads(request.body)
-        email = data.get("email")
+        email = data.get("email", "").strip().lower()
         password = data.get("password")
         auth_type = data.get("authType", "CREDENTIALS")
 
@@ -132,7 +150,8 @@ def login(request):
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
 
-        user = User.objects.filter(email=email).first()
+        # QA4-009: Exclude soft-deleted users from login
+        user = User.objects.filter(email=email, deleted_at__isnull=True).first()
 
         logger.debug(
             "User lookup: found=%s, user_auth_type=%s",
@@ -144,10 +163,12 @@ def login(request):
         if not user:
             return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-        # Handle Google login - allow for any user
+        # Google authentication must go through OAuth flow, not direct login
         if auth_type == "GOOGLE":
-            # Google OAuth verified by NextAuth, prepare response data below
-            pass
+            return JsonResponse(
+                {"error": "Google authentication must go through OAuth flow, not direct login"},
+                status=400,
+            )
         else:
             # Handle credential login - require password
             if not password:
@@ -163,6 +184,13 @@ def login(request):
 
             if not password_valid:
                 return JsonResponse({"error": "Invalid credentials"}, status=401)
+
+        # QA4-010: Block UNCONFIRMED users from logging in
+        if user.group == "UNCONFIRMED":
+            return JsonResponse(
+                {"error": "Please confirm your email before logging in"},
+                status=403,
+            )
 
         # Prepare common response data
         response_data = {
@@ -187,12 +215,14 @@ def login(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Login error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
+@ratelimit(key="ip", rate="10/m", method="GET", block=True)
 def confirm_email(request):
     """
     Confirm email.
@@ -219,6 +249,14 @@ def confirm_email(request):
             )
 
         user = token_obj.user
+
+        # QA4-033: Only allow confirming UNCONFIRMED users
+        if user.group != "UNCONFIRMED":
+            return JsonResponse(
+                {"error": "Email already confirmed"},
+                status=400,
+            )
+
         user.group = "CONFIRMED"
         user.save()
         logger.info("Email confirmed for user: %s", user.email)
@@ -236,32 +274,36 @@ def confirm_email(request):
         )
 
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Confirm email error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="10/m", method="POST", block=True)
 def check_email(request):
     """
     Check if email exists.
 
     POST /api/v1/auth/check-email
     Body: {"email": "..."}
+
+    QA2-011: Always returns exists=true to prevent email enumeration.
+    QA3-059: This endpoint intentionally always returns true for security
+    (anti-enumeration). Kept for frontend backward compatibility.
     """
     try:
         data = json.loads(request.body)
-        email = data.get("email")
+        email = data.get("email", "").strip().lower()
 
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
 
-        user = User.objects.filter(email=email).first()
-
+        # QA2-011: Always return exists=true to prevent email enumeration
         return JsonResponse(
             {
-                "exists": bool(user),
-                "authType": user.auth_type if user else None,
+                "exists": True,
             },
             status=200,
         )
@@ -269,12 +311,14 @@ def check_email(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Check email error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="5/m", method="POST", block=True)
 def forgot_password(request):
     """
     Request password reset.
@@ -284,29 +328,28 @@ def forgot_password(request):
     """
     try:
         data = json.loads(request.body)
-        email = data.get("email")
+        email = data.get("email", "").strip().lower()
 
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
 
-        user = User.objects.filter(email=email).first()
+        # QA4-009: Exclude soft-deleted users from password reset
+        user = User.objects.filter(email=email, deleted_at__isnull=True).first()
 
-        if not user:
-            return JsonResponse({"error": "User not found"}, status=404)
+        if user:
+            token_obj = AuthToken.create_token(user, TokenType.PASSWORD_RESET)
 
-        token_obj = AuthToken.create_token(user, TokenType.PASSWORD_RESET)
+            # Send password reset email
+            email_sent = send_password_reset_email(user, token_obj.token)
 
-        # Send password reset email
-        email_sent = send_password_reset_email(user, token_obj.token)
-
-        if email_sent:
-            logger.info("Password reset email sent to %s", user.email)
-        else:
-            logger.error("Failed to send password reset email to %s", user.email)
+            if email_sent:
+                logger.info("Password reset email sent to %s", user.email)
+            else:
+                logger.error("Failed to send password reset email to %s", user.email)
 
         return JsonResponse(
             {
-                "message": "Password reset link sent to your email.",
+                "message": "If an account with that email exists, a password reset link has been sent.",
             },
             status=200,
         )
@@ -314,12 +357,14 @@ def forgot_password(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Forgot password error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="3/m", method="POST", block=True)
 def resend_confirmation(request):
     """
     Resend email confirmation link.
@@ -329,42 +374,36 @@ def resend_confirmation(request):
     """
     try:
         data = json.loads(request.body)
-        email = data.get("email")
+        email = data.get("email", "").strip().lower()
 
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
 
-        user = User.objects.filter(email=email).first()
+        # QA3-013: Always return generic 200 to prevent email enumeration
+        # QA4-009: Exclude soft-deleted users
+        user = User.objects.filter(email=email, deleted_at__isnull=True).first()
 
-        if not user:
-            return JsonResponse({"error": "User not found"}, status=404)
+        if user and user.group == "UNCONFIRMED":
+            # Delete old confirmation tokens
+            AuthToken.objects.filter(
+                user=user,
+                token_type=TokenType.EMAIL_CONFIRMATION,
+            ).delete()
 
-        if user.group != "UNCONFIRMED":
-            return JsonResponse(
-                {"error": "User is already confirmed"},
-                status=400,
-            )
+            # Create new token
+            token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
 
-        # Delete old confirmation tokens
-        AuthToken.objects.filter(
-            user=user,
-            token_type=TokenType.EMAIL_CONFIRMATION,
-        ).delete()
+            # Send confirmation email
+            email_sent = send_confirmation_email(user, token_obj.token)
 
-        # Create new token
-        token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
-
-        # Send confirmation email
-        email_sent = send_confirmation_email(user, token_obj.token)
-
-        if email_sent:
-            logger.info("Confirmation email resent to %s", user.email)
-        else:
-            logger.error("Failed to resend confirmation email to %s", user.email)
+            if email_sent:
+                logger.info("Confirmation email resent to %s", user.email)
+            else:
+                logger.error("Failed to resend confirmation email to %s", user.email)
 
         return JsonResponse(
             {
-                "message": "Confirmation email has been resent.",
+                "message": "If an account with that email exists and is unconfirmed, a confirmation email has been sent.",
             },
             status=200,
         )
@@ -372,12 +411,14 @@ def resend_confirmation(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Resend confirmation error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
+@ratelimit(key="ip", rate="5/m", method="POST", block=True)
 def reset_password(request):
     """
     Reset password.
@@ -397,6 +438,15 @@ def reset_password(request):
         if not new_password:
             return JsonResponse({"error": "Password is required"}, status=400)
 
+        # QA2-012: Use Django's password validation instead of simple length check
+        try:
+            validate_password(new_password)
+        except ValidationError as e:
+            return JsonResponse(
+                {"error": e.messages},
+                status=400,
+            )
+
         token_obj = AuthToken.objects.filter(
             token=token,
             token_type=TokenType.PASSWORD_RESET,
@@ -409,7 +459,9 @@ def reset_password(request):
             )
 
         user = token_obj.user
-        user.password = make_password(new_password)
+        # QA2-004: Use set_password() to change session auth hash,
+        # invalidating all other sessions on next request
+        user.set_password(new_password)
         user.save()
 
         token_obj.delete()
@@ -419,4 +471,5 @@ def reset_password(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        logger.exception("Reset password error: %s", e)
+        return JsonResponse({"error": "An internal error occurred"}, status=500)

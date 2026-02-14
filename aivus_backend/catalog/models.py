@@ -65,8 +65,8 @@ class Unit(models.Model):
 
     def save(self, *args, **kwargs):
         if self.is_default:
-            # Set all other units' is_default to False
-            Unit.objects.exclude(pk=self.pk).update(is_default=False)
+            # QA3-033: Scope is_default reset to same dimension only
+            Unit.objects.filter(dimension=self.dimension).exclude(pk=self.pk).update(is_default=False)
         super().save(*args, **kwargs)
 
 

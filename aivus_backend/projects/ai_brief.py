@@ -8,6 +8,7 @@ and OpenAI for natural language understanding and generation.
 import json
 import logging
 import os
+import threading
 from typing import Annotated
 
 from langgraph.graph import END
@@ -211,6 +212,7 @@ def chat_node(state: BriefChatState) -> dict:
             temperature=0.7,
             max_tokens=1000,
             response_format={"type": "json_object"},
+            timeout=60,
         )
 
         content = response.choices[0].message.content
@@ -305,13 +307,16 @@ def _build_chat_graph():
 
 # Singleton graph instance
 _chat_graph = None
+_chat_graph_lock = threading.Lock()
 
 
 def _get_chat_graph():
     """Get or create the chat graph singleton."""
     global _chat_graph  # noqa: PLW0603
     if _chat_graph is None:
-        _chat_graph = _build_chat_graph()
+        with _chat_graph_lock:
+            if _chat_graph is None:
+                _chat_graph = _build_chat_graph()
     return _chat_graph
 
 
@@ -335,8 +340,16 @@ def process_chat_message(user_message: str, history: list, extracted_fields: dic
     """
     graph = _get_chat_graph()
 
-    # Build messages list from history + new message
-    messages = list(history) if history else []
+    # QA4-025: Sanitize history — only allow valid roles and limit to last 20 messages
+    safe_history = []
+    if history:
+        for msg in history:
+            if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and isinstance(msg.get("content"), str):
+                safe_history.append({"role": msg["role"], "content": msg["content"]})
+        safe_history = safe_history[-20:]
+
+    # Build messages list from sanitized history + new message
+    messages = safe_history
     messages.append({"role": "user", "content": user_message})
 
     initial_state = {
@@ -379,6 +392,7 @@ def analyze_brief(brief_data: dict) -> dict:
             temperature=0.5,
             max_tokens=1000,
             response_format={"type": "json_object"},
+            timeout=60,
         )
 
         content = response.choices[0].message.content
@@ -412,24 +426,27 @@ def analyze_comparison(brief_data: dict, comparison_data: dict, question: str | 
     """
     client = _get_openai_client()
 
-    user_content = (
+    data_content = (
         f"Brief details:\n{json.dumps(brief_data, indent=2)}\n\n"
         f"Comparison data:\n{json.dumps(comparison_data, indent=2)}"
     )
 
+    messages = [
+        {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+        {"role": "user", "content": data_content},
+    ]
+
     if question:
-        user_content += f"\n\nUser's specific question: {question}"
+        messages.append({"role": "user", "content": question})
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
+            messages=messages,
             temperature=0.5,
             max_tokens=2000,
             response_format={"type": "json_object"},
+            timeout=60,
         )
 
         content = response.choices[0].message.content
