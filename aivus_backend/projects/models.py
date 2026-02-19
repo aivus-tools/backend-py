@@ -8,6 +8,7 @@ from django.db import models
 
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
+from aivus_backend.core.managers import JournalizeManager
 from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
@@ -97,12 +98,18 @@ class Project(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
+    objects = JournalizeManager()
+
     class Meta:
         db_table = "project"
         ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.name} ({self.vendor.name})"
+
+    def restore(self):
+        self.deleted_at = None
+        self.save(update_fields=("deleted_at",))
 
 
 class ProjectCollaborator(models.Model):

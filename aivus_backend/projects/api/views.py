@@ -102,7 +102,7 @@ def projects_list(request):
             return JsonResponse({"error": "Vendor ID required"}, status=400)
 
         projects = Project.objects.filter(
-            vendor_id=vendor_id, deleted_at__isnull=True,
+            vendor_id=vendor_id,
         ).select_related("client").prefetch_related("collaborators", "client_managers")
         return JsonResponse([serialize_project(p) for p in projects], safe=False)
 
@@ -276,7 +276,7 @@ def project_restore(request, project_id):
 def project_detail(request, project_id):
     """Get, update, or delete a specific project."""
     try:
-        project = Project.objects.get(id=project_id, deleted_at__isnull=True)
+        project = Project.objects.get(id=project_id)
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
@@ -400,7 +400,7 @@ def project_detail(request, project_id):
 def project_thumbnail(request, project_id):
     """Upload project thumbnail image."""
     try:
-        project = Project.objects.get(id=project_id, deleted_at__isnull=True)
+        project = Project.objects.get(id=project_id)
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
@@ -793,7 +793,7 @@ def offer_detail(request, offer_id):
 def offers_by_project(request, project_id):
     """Get all offers for a specific project."""
     try:
-        project = Project.objects.get(id=project_id, deleted_at__isnull=True)
+        project = Project.objects.get(id=project_id)
     except Project.DoesNotExist:
         return JsonResponse({"error": "Project not found"}, status=404)
 
