@@ -1306,10 +1306,10 @@ def templates_list(request):
 
 
 @csrf_exempt
-@require_http_methods(["GET", "DELETE"])
+@require_http_methods(["GET", "PATCH", "DELETE"])
 @require_groups("VENDOR", "SYSTEM")
 def template_detail(request, template_id):
-    """Get or delete a specific template."""
+    """Get, update, or delete a specific template."""
     vendor_id = request.user_data.get("vendor_id")
     if not vendor_id:
         return JsonResponse({"error": "Vendor context required"}, status=400)
@@ -1324,6 +1324,63 @@ def template_detail(request, template_id):
         return JsonResponse({"error": "Template not found"}, status=404)
 
     if request.method == "GET":
+        return JsonResponse(serialize_template(template))
+
+    if request.method == "PATCH":
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        # Update only the fields that are provided
+        if "name" in data:
+            template.name = data["name"]
+        if "description" in data:
+            template.description = data["description"]
+        if "metadata" in data:
+            template.metadata = data["metadata"]
+
+        if "details" in data:
+            template.details = data["details"]
+
+            # Recalculate entriesSnapshot from the new details
+            offers_list = data["details"].get("offers", [])
+            entries_snapshot = []
+            for idx, item in enumerate(offers_list):
+                # Extract known structured fields; everything else goes into itemData
+                known_keys = {
+                    "id", "item", "entryId", "categoryId",
+                    "price", "cost", "clientPrice", "clientCost",
+                    "surcharge", "taxRate", "taxPrice",
+                    "showTax", "isLinkedSurcharge", "marketRange",
+                }
+                item_data = {k: v for k, v in item.items() if k not in known_keys}
+
+                entries_snapshot.append({
+                    "frontendId": item.get("id"),
+                    "itemName": item.get("item", ""),
+                    "entryId": item.get("entryId"),
+                    "categoryId": item.get("categoryId"),
+                    "price": str(item["price"]) if item.get("price") is not None else None,
+                    "cost": str(item["cost"]) if item.get("cost") is not None else None,
+                    "clientPrice": str(item["clientPrice"]) if item.get("clientPrice") is not None else None,
+                    "clientCost": str(item["clientCost"]) if item.get("clientCost") is not None else None,
+                    "surcharge": str(item["surcharge"]) if item.get("surcharge") is not None else None,
+                    "taxRate": str(item.get("taxRate", 0)),
+                    "taxPrice": str(item["taxPrice"]) if item.get("taxPrice") is not None else None,
+                    "showTax": item.get("showTax", False),
+                    "isLinkedSurcharge": item.get("isLinkedSurcharge", False),
+                    "marketRange": item.get("marketRange"),
+                    "itemData": item_data if item_data else None,
+                    "sortOrder": idx,
+                })
+
+            # Store entriesSnapshot inside metadata
+            if not isinstance(template.metadata, dict):
+                template.metadata = {}
+            template.metadata["entriesSnapshot"] = entries_snapshot
+
+        template.save()
         return JsonResponse(serialize_template(template))
 
     if request.method == "DELETE":

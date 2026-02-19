@@ -155,6 +155,7 @@ def serialize_share_public(share: Share) -> dict:
             "description": offer.description,
             "status": offer.status,
             "details": details,
+            "projectId": str(offer.project_id) if offer.project_id else None,
             "deadline": offer.deadline.isoformat() if offer.deadline else None,
             "source": offer.source,
             "isLocked": offer.is_locked,
