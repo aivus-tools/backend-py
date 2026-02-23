@@ -185,13 +185,6 @@ def login(request):
             if not password_valid:
                 return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-        # QA4-010: Block UNCONFIRMED users from logging in
-        if user.group == "UNCONFIRMED":
-            return JsonResponse(
-                {"error": "Please confirm your email before logging in"},
-                status=403,
-            )
-
         # Prepare common response data
         response_data = {
             "id": str(user.id),
@@ -300,10 +293,20 @@ def check_email(request):
         if not email:
             return JsonResponse({"error": "Email is required"}, status=400)
 
-        # QA2-011: Always return exists=true to prevent email enumeration
+        user = User.objects.filter(email=email, deleted_at__isnull=True).first()
+
+        if user:
+            return JsonResponse(
+                {
+                    "exists": True,
+                    "authType": user.auth_type,
+                },
+                status=200,
+            )
+
         return JsonResponse(
             {
-                "exists": True,
+                "exists": False,
             },
             status=200,
         )

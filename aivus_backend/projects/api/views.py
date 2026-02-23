@@ -764,8 +764,19 @@ def offer_detail(request, offer_id):
                     total_cost=Sum('cost'),
                     total_client_cost=Sum('client_cost'),
                 )
-                offer.cost = entries_agg['total_cost'] or Decimal('0')
-                client_total = entries_agg['total_client_cost'] or Decimal('0')
+                base_cost = entries_agg['total_cost'] or Decimal('0')
+                base_client_cost = entries_agg['total_client_cost'] or Decimal('0')
+
+                unforeseen = data["details"].get("unforeseenExpenses", {})
+                if unforeseen.get("isVisible", True):
+                    uf_percent = Decimal(str(unforeseen.get("percent", 0)))
+                    uf_client_percent = Decimal(str(unforeseen.get("clientPercent", 0)))
+                    offer.cost = base_cost + base_cost * uf_percent / 100
+                    client_total = base_client_cost + base_client_cost * uf_client_percent / 100
+                else:
+                    offer.cost = base_cost
+                    client_total = base_client_cost
+
                 offer.profit = client_total - offer.cost
                 offer.save(update_fields=['cost', 'profit', 'updated_at'])
             else:
