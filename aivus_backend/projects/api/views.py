@@ -8,7 +8,6 @@ from datetime import datetime
 from datetime import timezone
 from decimal import Decimal
 
-from django.db.models import Sum
 import openpyxl
 from django.db import IntegrityError
 from django.db import transaction
@@ -69,6 +68,7 @@ from aivus_backend.projects.models import RateCardItem
 from aivus_backend.projects.models import Share
 from aivus_backend.projects.models import Template
 from aivus_backend.projects.services import parse_offer_details_to_entries
+from aivus_backend.projects.services import recalculate_offer_totals
 from aivus_backend.projects.services import reconstruct_details_from_entries
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import Team
@@ -702,8 +702,9 @@ def offer_detail(request, offer_id):
 
     if request.method in ["PUT", "PATCH"]:
         try:
-            # QA2-020: Reject excessively large request bodies
-            if len(request.body) > 1_000_000:
+            body_len = len(request.body)
+            if body_len > 1_000_000:
+                logger.warning("PATCH offer %s: body too large (%d bytes)", offer_id, body_len)
                 return JsonResponse({"error": "Request body too large"}, status=400)
 
             data = json.loads(request.body)
@@ -712,7 +713,7 @@ def offer_detail(request, offer_id):
                 offer.project_name = data["projectName"]
             if "description" in data:
                 offer.description = data["description"]
-            if "status" in data:
+            if "status" in data and data["status"] is not None:
                 valid_statuses = [s.value for s in OfferStatus]
                 if data["status"] not in valid_statuses:
                     return JsonResponse(
@@ -721,17 +722,19 @@ def offer_detail(request, offer_id):
                     )
                 offer.status = data["status"]
             if "deadline" in data:
-                try:
-                    deadline_dt = datetime.fromisoformat(
-                        data["deadline"].replace("Z", "+00:00"),
-                    )
-                    offer.deadline = deadline_dt
-                except (ValueError, AttributeError):
-                    return JsonResponse(
-                        {"error": "Invalid deadline format"},
-                        status=400,
-                    )
-            if "source" in data:
+                if data["deadline"] is None:
+                    offer.deadline = None
+                else:
+                    try:
+                        offer.deadline = datetime.fromisoformat(
+                            data["deadline"].replace("Z", "+00:00"),
+                        )
+                    except (ValueError, AttributeError):
+                        return JsonResponse(
+                            {"error": "Invalid deadline format"},
+                            status=400,
+                        )
+            if "source" in data and data["source"] is not None:
                 valid_sources = [s.value for s in OfferSource]
                 if data["source"] not in valid_sources:
                     return JsonResponse(
@@ -746,48 +749,25 @@ def offer_detail(request, offer_id):
             if "profit" in data:
                 offer.profit = data["profit"]
 
-            # Handle details: save raw JSON and parse into OfferEntry records
             if "details" in data:
                 offer.details = data["details"]
-                # QA4-056: Single save — parse_offer_details_to_entries saves offer internally
                 try:
                     parse_offer_details_to_entries(offer, data["details"])
                 except Exception:
                     logger.exception("Error parsing offer details to entries for offer %s", offer.id)
-                    # Fallback: save offer if parsing failed
                     offer.save()
 
-                # Recompute offer-level cost and profit from entries
-                entries_agg = OfferEntry.objects.filter(
-                    offer=offer, deleted_at__isnull=True
-                ).aggregate(
-                    total_cost=Sum('cost'),
-                    total_client_cost=Sum('client_cost'),
-                )
-                base_cost = entries_agg['total_cost'] or Decimal('0')
-                base_client_cost = entries_agg['total_client_cost'] or Decimal('0')
-
-                unforeseen = data["details"].get("unforeseenExpenses", {})
-                if unforeseen.get("isVisible", True):
-                    uf_percent = Decimal(str(unforeseen.get("percent", 0)))
-                    uf_client_percent = Decimal(str(unforeseen.get("clientPercent", 0)))
-                    offer.cost = base_cost + base_cost * uf_percent / 100
-                    client_total = base_client_cost + base_client_cost * uf_client_percent / 100
-                else:
-                    offer.cost = base_cost
-                    client_total = base_client_cost
-
-                offer.profit = client_total - offer.cost
-                offer.save(update_fields=['cost', 'profit', 'updated_at'])
+                recalculate_offer_totals(offer)
             else:
                 offer.save()
 
             return JsonResponse(serialize_offer(offer))
 
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.error("PATCH offer %s: invalid JSON body (%d bytes): %s", offer_id, len(request.body), exc)
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
-            logger.exception("Error updating offer")
+        except Exception:
+            logger.exception("Error updating offer %s", offer_id)
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
@@ -1198,6 +1178,8 @@ def offer_copy(request, offer_id):
                     sort_order=entry.sort_order,
                 )
 
+            recalculate_offer_totals(new_offer)
+
         return JsonResponse(serialize_offer(new_offer), status=201)
 
     except Exception as e:
@@ -1487,6 +1469,8 @@ def template_apply(request, template_id):
                     item_data=entry_data.get("itemData", {}),
                     sort_order=entry_data.get("sortOrder", 0),
                 )
+
+            recalculate_offer_totals(offer)
 
         return JsonResponse(serialize_offer(offer), status=201)
 
