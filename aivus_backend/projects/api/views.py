@@ -60,7 +60,9 @@ from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
+from aivus_backend.projects.models import OfferDeliverable
 from aivus_backend.projects.models import OfferEntry
+from aivus_backend.projects.models import OfferScheduleEntry
 from aivus_backend.projects.models import Project
 from aivus_backend.projects.models import ProjectCollaborator
 from aivus_backend.projects.models import RateCard
@@ -651,25 +653,48 @@ def offers_list(request):
             except (ValueError, AttributeError):
                 return JsonResponse({"error": "Invalid deadline format"}, status=400)
 
-            offer = Offer.objects.create(
-                project=project,
-                project_name=project_name,
-                description=description,
-                status=status,
-                details=details,
-                deadline=deadline_dt,
-                source=source,
-                is_locked=is_locked,
-                cost=cost,
-                profit=profit,
-            )
+            create_kwargs: dict = {
+                "project": project,
+                "project_name": project_name,
+                "description": description,
+                "status": status,
+                "details": details,
+                "deadline": deadline_dt,
+                "source": source,
+                "is_locked": is_locked,
+                "cost": cost,
+                "profit": profit,
+            }
 
-            # Parse details JSON into OfferEntry records
+            if "bidDate" in data:
+                if data["bidDate"] is not None:
+                    try:
+                        create_kwargs["bid_date"] = datetime.strptime(data["bidDate"], "%Y-%m-%d").date()
+                    except (ValueError, AttributeError):
+                        return JsonResponse({"error": "Invalid bidDate format"}, status=400)
+            if "revision" in data:
+                create_kwargs["revision"] = data["revision"]
+            if "term" in data:
+                create_kwargs["term"] = data["term"]
+            if "territory" in data:
+                create_kwargs["territory"] = data["territory"]
+            if "mediaPlacements" in data:
+                create_kwargs["media_placements"] = data["mediaPlacements"]
+            if "coverPageNotes" in data:
+                create_kwargs["cover_page_notes"] = data["coverPageNotes"]
+
+            offer = Offer.objects.create(**create_kwargs)
+
             if details:
                 try:
                     parse_offer_details_to_entries(offer, details)
                 except Exception:
                     logger.exception("Error parsing offer details to entries for offer %s", offer.id)
+
+            if "deliverables" in data:
+                _sync_offer_deliverables(offer, data["deliverables"])
+            if "scheduleEntries" in data:
+                _sync_offer_schedule_entries(offer, data["scheduleEntries"])
 
             return JsonResponse(serialize_offer(offer), status=201)
 
@@ -748,6 +773,29 @@ def offer_detail(request, offer_id):
                 offer.cost = data["cost"]
             if "profit" in data:
                 offer.profit = data["profit"]
+            if "bidDate" in data:
+                if data["bidDate"] is None:
+                    offer.bid_date = None
+                else:
+                    try:
+                        offer.bid_date = datetime.strptime(data["bidDate"], "%Y-%m-%d").date()
+                    except (ValueError, AttributeError):
+                        return JsonResponse({"error": "Invalid bidDate format"}, status=400)
+            if "revision" in data:
+                offer.revision = data["revision"]
+            if "term" in data:
+                offer.term = data["term"]
+            if "territory" in data:
+                offer.territory = data["territory"]
+            if "mediaPlacements" in data:
+                offer.media_placements = data["mediaPlacements"]
+            if "coverPageNotes" in data:
+                offer.cover_page_notes = data["coverPageNotes"]
+
+            if "deliverables" in data:
+                _sync_offer_deliverables(offer, data["deliverables"])
+            if "scheduleEntries" in data:
+                _sync_offer_schedule_entries(offer, data["scheduleEntries"])
 
             if "details" in data:
                 offer.details = data["details"]
@@ -1108,6 +1156,66 @@ def offer_status_update(request, offer_id):
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
+def _sync_offer_deliverables(offer, deliverables_data):
+    existing_ids = set()
+    for i, d in enumerate(deliverables_data):
+        deliverable_id = d.get("id")
+        if deliverable_id:
+            try:
+                deliverable = OfferDeliverable.objects.get(id=deliverable_id, offer=offer, deleted_at__isnull=True)
+                deliverable.quantity = d.get("quantity", deliverable.quantity)
+                deliverable.duration = d.get("duration", deliverable.duration)
+                deliverable.duration_unit = d.get("durationUnit", deliverable.duration_unit)
+                deliverable.notes = d.get("notes", deliverable.notes)
+                deliverable.sort_order = i
+                deliverable.save()
+                existing_ids.add(deliverable.id)
+            except OfferDeliverable.DoesNotExist:
+                deliverable_id = None
+        if not deliverable_id:
+            new_d = OfferDeliverable.objects.create(
+                offer=offer,
+                quantity=d.get("quantity", 1),
+                duration=d.get("duration", ""),
+                duration_unit=d.get("durationUnit", "Sec"),
+                notes=d.get("notes", ""),
+                sort_order=i,
+            )
+            existing_ids.add(new_d.id)
+    from django.utils import timezone as tz
+    OfferDeliverable.objects.filter(offer=offer, deleted_at__isnull=True).exclude(id__in=existing_ids).update(deleted_at=tz.now())
+
+
+def _sync_offer_schedule_entries(offer, entries_data):
+    existing_ids = set()
+    for i, e in enumerate(entries_data):
+        entry_id = e.get("id")
+        if entry_id:
+            try:
+                entry = OfferScheduleEntry.objects.get(id=entry_id, offer=offer, deleted_at__isnull=True)
+                entry.phase_type = e.get("phaseType", entry.phase_type)
+                entry.days = e.get("days", entry.days)
+                entry.hours_per_day = e.get("hoursPerDay", entry.hours_per_day)
+                entry.notes = e.get("notes", entry.notes)
+                entry.sort_order = i
+                entry.save()
+                existing_ids.add(entry.id)
+            except OfferScheduleEntry.DoesNotExist:
+                entry_id = None
+        if not entry_id:
+            new_e = OfferScheduleEntry.objects.create(
+                offer=offer,
+                phase_type=e.get("phaseType", "Prep"),
+                days=e.get("days", 1),
+                hours_per_day=e.get("hoursPerDay", 12),
+                notes=e.get("notes", ""),
+                sort_order=i,
+            )
+            existing_ids.add(new_e.id)
+    from django.utils import timezone as tz
+    OfferScheduleEntry.objects.filter(offer=offer, deleted_at__isnull=True).exclude(id__in=existing_ids).update(deleted_at=tz.now())
+
+
 # ==================== Copy Offer ====================
 
 
@@ -1140,7 +1248,6 @@ def offer_copy(request, offer_id):
                 OfferEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order")
             )
 
-            # Create the copy
             new_offer = Offer.objects.create(
                 project_name=f"{offer.project_name} (Copy)",
                 project=offer.project,
@@ -1154,9 +1261,14 @@ def offer_copy(request, offer_id):
                 deadline=offer.deadline,
                 source=offer.source,
                 is_locked=False,
+                bid_date=offer.bid_date,
+                revision=offer.revision,
+                term=offer.term,
+                territory=offer.territory,
+                media_placements=offer.media_placements,
+                cover_page_notes=offer.cover_page_notes,
             )
 
-            # Deep copy OfferEntry records
             for entry in original_entries:
                 OfferEntry.objects.create(
                     offer=new_offer,
@@ -1176,6 +1288,26 @@ def offer_copy(request, offer_id):
                     market_range=entry.market_range,
                     item_data=entry.item_data,
                     sort_order=entry.sort_order,
+                )
+
+            for d in OfferDeliverable.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order"):
+                OfferDeliverable.objects.create(
+                    offer=new_offer,
+                    quantity=d.quantity,
+                    duration=d.duration,
+                    duration_unit=d.duration_unit,
+                    notes=d.notes,
+                    sort_order=d.sort_order,
+                )
+
+            for s in OfferScheduleEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order"):
+                OfferScheduleEntry.objects.create(
+                    offer=new_offer,
+                    phase_type=s.phase_type,
+                    days=s.days,
+                    hours_per_day=s.hours_per_day,
+                    notes=s.notes,
+                    sort_order=s.sort_order,
                 )
 
             recalculate_offer_totals(new_offer)

@@ -1,8 +1,9 @@
-"""Django admin configuration for projects app."""
+import json
 
+from django import forms
 from django.contrib import admin
 from django.utils.safestring import mark_safe
-import json
+from tinymce.widgets import TinyMCE
 from unfold.admin import ModelAdmin
 
 from .models import Brief
@@ -10,8 +11,10 @@ from .models import BriefOffer
 from .models import ChatMessage
 from .models import ClientManager
 from .models import Offer
+from .models import OfferDeliverable
 from .models import OfferEntry
 from .models import OfferRate
+from .models import OfferScheduleEntry
 from .models import Project
 from .models import ProjectCollaborator
 from .models import Rate
@@ -141,9 +144,34 @@ class RateAdmin(ModelAdmin):
     ordering = ["-created_at"]
 
 
+class OfferAdminForm(forms.ModelForm):
+    cover_page_notes = forms.CharField(
+        widget=TinyMCE(attrs={"cols": 80, "rows": 20}),
+        required=False,
+    )
+
+    class Meta:
+        model = Offer
+        fields = "__all__"
+
+
+class OfferDeliverableInline(admin.TabularInline):
+    model = OfferDeliverable
+    extra = 0
+    readonly_fields = ["created_at"]
+    fields = ["quantity", "duration", "duration_unit", "notes", "sort_order", "created_at"]
+
+
+class OfferScheduleEntryInline(admin.TabularInline):
+    model = OfferScheduleEntry
+    extra = 0
+    readonly_fields = ["created_at"]
+    fields = ["phase_type", "days", "hours_per_day", "notes", "sort_order", "created_at"]
+
+
 @admin.register(Offer)
 class OfferAdmin(ModelAdmin):
-    """Offer admin configuration."""
+    form = OfferAdminForm
 
     list_display = [
         "project_name",
@@ -163,9 +191,19 @@ class OfferAdmin(ModelAdmin):
         "deadline",
         "source",
         "is_locked",
+        "bid_date",
+        "revision",
+        "term",
+        "territory",
+        "media_placements",
+        "cover_page_notes",
         "pretty_details",
+        "created_at",
+        "updated_at",
+        "deleted_at",
     ]
     ordering = ["-created_at"]
+    inlines = [OfferDeliverableInline, OfferScheduleEntryInline]
 
     @admin.display(description="Details")
     def pretty_details(self, instance):
@@ -189,8 +227,6 @@ class OfferEntryAdmin(ModelAdmin):
 
 @admin.register(OfferRate)
 class OfferRateAdmin(ModelAdmin):
-    """OfferRate admin configuration."""
-
     list_display = [
         "offer",
         "name",
@@ -203,6 +239,24 @@ class OfferRateAdmin(ModelAdmin):
     list_filter = ["created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["-created_at"]
+
+
+@admin.register(OfferDeliverable)
+class OfferDeliverableAdmin(ModelAdmin):
+    list_display = ["offer", "quantity", "duration", "duration_unit", "sort_order", "created_at"]
+    search_fields = ["offer__project_name"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["sort_order", "-created_at"]
+
+
+@admin.register(OfferScheduleEntry)
+class OfferScheduleEntryAdmin(ModelAdmin):
+    list_display = ["offer", "phase_type", "days", "hours_per_day", "sort_order", "created_at"]
+    search_fields = ["offer__project_name", "phase_type"]
+    list_filter = ["created_at"]
+    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    ordering = ["sort_order", "-created_at"]
 
 
 @admin.register(Share)

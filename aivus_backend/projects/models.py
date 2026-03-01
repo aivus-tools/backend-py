@@ -279,6 +279,12 @@ class Offer(models.Model):
     profit = models.DecimalField(max_digits=12, decimal_places=2, default=0, null=True, blank=True)
     details = models.JSONField(default=dict)
     metadata = models.JSONField(default=dict, blank=True)
+    bid_date = models.DateField(null=True, blank=True)
+    revision = models.CharField(max_length=50, blank=True, default="")
+    term = models.CharField(max_length=50, blank=True, default="6 months")
+    territory = models.JSONField(default=list, blank=True)
+    media_placements = models.JSONField(default=list, blank=True)
+    cover_page_notes = models.TextField(blank=True, default="")
     deadline = models.DateTimeField(null=True, blank=True)
     source = models.CharField(max_length=20, choices=OfferSource.choices)
     is_locked = models.BooleanField(default=False)
@@ -377,6 +383,46 @@ class OfferRate(models.Model):
 
     def __str__(self):
         return f"{self.offer.project_name} - {self.name}"
+
+
+class OfferDeliverable(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    offer = models.ForeignKey(Offer, on_delete=models.CASCADE, related_name="deliverables")
+    quantity = models.PositiveIntegerField(default=1)
+    duration = models.CharField(max_length=20, blank=True, default="")
+    duration_unit = models.CharField(max_length=10, blank=True, default="Sec")
+    notes = models.TextField(blank=True, default="")
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "offer_deliverable"
+        ordering = ["sort_order", "-created_at"]
+
+    def __str__(self):
+        return f"{self.offer.project_name} - {self.quantity}x {self.duration}{self.duration_unit}"
+
+
+class OfferScheduleEntry(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    offer = models.ForeignKey(Offer, on_delete=models.CASCADE, related_name="schedule_entries")
+    phase_type = models.CharField(max_length=100, default="Prep")
+    days = models.PositiveIntegerField(default=1)
+    hours_per_day = models.PositiveIntegerField(default=12)
+    notes = models.TextField(blank=True, default="")
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "offer_schedule_entry"
+        ordering = ["sort_order", "-created_at"]
+
+    def __str__(self):
+        return f"{self.offer.project_name} - {self.phase_type} ({self.days}d @ {self.hours_per_day}h)"
 
 
 class Share(models.Model):

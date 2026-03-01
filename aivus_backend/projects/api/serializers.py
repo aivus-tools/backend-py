@@ -4,6 +4,8 @@ from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
+from aivus_backend.projects.models import OfferDeliverable
+from aivus_backend.projects.models import OfferScheduleEntry
 from aivus_backend.projects.models import Project
 from aivus_backend.projects.models import ProjectCollaborator
 from aivus_backend.projects.models import RateCard
@@ -78,12 +80,45 @@ def serialize_project(project: Project, include_relations: bool = True) -> dict:
     return result
 
 
+def serialize_offer_deliverable(deliverable: OfferDeliverable) -> dict:
+    return {
+        "id": str(deliverable.id),
+        "quantity": deliverable.quantity,
+        "duration": deliverable.duration,
+        "durationUnit": deliverable.duration_unit,
+        "notes": deliverable.notes,
+        "sortOrder": deliverable.sort_order,
+    }
+
+
+def serialize_offer_schedule_entry(entry: OfferScheduleEntry) -> dict:
+    return {
+        "id": str(entry.id),
+        "phaseType": entry.phase_type,
+        "days": entry.days,
+        "hoursPerDay": entry.hours_per_day,
+        "notes": entry.notes,
+        "sortOrder": entry.sort_order,
+    }
+
+
+def _serialize_offer_meta_fields(offer: Offer) -> dict:
+    return {
+        "bidDate": offer.bid_date.isoformat() if offer.bid_date else None,
+        "revision": offer.revision,
+        "term": offer.term,
+        "territory": offer.territory,
+        "mediaPlacements": offer.media_placements,
+        "coverPageNotes": offer.cover_page_notes,
+        "deliverables": [serialize_offer_deliverable(x) for x in offer.deliverables.filter(deleted_at__isnull=True)],
+        "scheduleEntries": [serialize_offer_schedule_entry(x) for x in offer.schedule_entries.filter(deleted_at__isnull=True)],
+    }
+
+
 def serialize_offer(offer: Offer) -> dict:
-    """Serialize Offer model to dict (vendor view — includes cost/profit)."""
-    # Use reconstructed details from OfferEntry records (falls back to raw details)
     details = reconstruct_details_from_entries(offer)
 
-    return {
+    result = {
         "id": str(offer.id),
         "uuid": str(offer.id),
         "projectName": offer.project_name,
@@ -91,7 +126,6 @@ def serialize_offer(offer: Offer) -> dict:
         "parentOfferId": str(offer.parent_offer_id) if offer.parent_offer_id else None,
         "projectId": str(offer.project_id) if offer.project_id else None,
         "status": offer.status,
-        # QA4-037: Convert Decimal to float for JSON serialization
         "cost": float(offer.cost) if offer.cost is not None else None,
         "profit": float(offer.profit) if offer.profit is not None else None,
         "details": details,
@@ -101,16 +135,14 @@ def serialize_offer(offer: Offer) -> dict:
         "createdAt": offer.created_at.isoformat() if offer.created_at else None,
         "updatedAt": offer.updated_at.isoformat() if offer.updated_at else None,
     }
+    result.update(_serialize_offer_meta_fields(offer))
+    return result
 
 
 def serialize_offer_for_client(offer: Offer) -> dict:
-    """Serialize Offer for client view — excludes vendor cost/profit.
-
-    QA4-023: Clients should not see internal vendor cost and profit margins.
-    """
     details = reconstruct_details_from_entries(offer)
 
-    return {
+    result = {
         "id": str(offer.id),
         "uuid": str(offer.id),
         "projectName": offer.project_name,
@@ -125,6 +157,8 @@ def serialize_offer_for_client(offer: Offer) -> dict:
         "createdAt": offer.created_at.isoformat() if offer.created_at else None,
         "updatedAt": offer.updated_at.isoformat() if offer.updated_at else None,
     }
+    result.update(_serialize_offer_meta_fields(offer))
+    return result
 
 
 def serialize_share(share: Share) -> dict:
@@ -141,27 +175,29 @@ def serialize_share(share: Share) -> dict:
 
 
 def serialize_share_public(share: Share) -> dict:
-    """Serialize Share for public access — includes full offer details and vendor info."""
     offer = share.offer
     details = reconstruct_details_from_entries(offer)
+
+    offer_data = {
+        "id": str(offer.id),
+        "projectName": offer.project_name,
+        "description": offer.description,
+        "status": offer.status,
+        "details": details,
+        "projectId": str(offer.project_id) if offer.project_id else None,
+        "deadline": offer.deadline.isoformat() if offer.deadline else None,
+        "source": offer.source,
+        "isLocked": offer.is_locked,
+        "createdAt": offer.created_at.isoformat() if offer.created_at else None,
+        "updatedAt": offer.updated_at.isoformat() if offer.updated_at else None,
+    }
+    offer_data.update(_serialize_offer_meta_fields(offer))
 
     result = {
         "id": str(share.id),
         "token": share.token,
         "isActive": share.is_active,
-        "offer": {
-            "id": str(offer.id),
-            "projectName": offer.project_name,
-            "description": offer.description,
-            "status": offer.status,
-            "details": details,
-            "projectId": str(offer.project_id) if offer.project_id else None,
-            "deadline": offer.deadline.isoformat() if offer.deadline else None,
-            "source": offer.source,
-            "isLocked": offer.is_locked,
-            "createdAt": offer.created_at.isoformat() if offer.created_at else None,
-            "updatedAt": offer.updated_at.isoformat() if offer.updated_at else None,
-        },
+        "offer": offer_data,
         "vendor": None,
     }
 
