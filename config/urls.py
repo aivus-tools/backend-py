@@ -37,6 +37,8 @@ urlpatterns = [
         name="change-user-group",
     ),
     path("api/v1/users", user_views.get_users, name="get-users"),
+    path("api/v1/vendor/settings/logo", user_views.vendor_settings_logo, name="vendor-settings-logo"),
+    path("api/v1/vendor/settings", user_views.vendor_settings, name="vendor-settings"),
     # Catalog API
     path("api/v1/", include("aivus_backend.catalog.api.urls", namespace="catalog_api")),
     # Projects API (briefs, projects, offers)

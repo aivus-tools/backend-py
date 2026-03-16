@@ -88,6 +88,7 @@ class Project(models.Model):
     client_name = models.CharField(max_length=255, blank=True, default="")
     irs_ein = models.CharField(max_length=50, blank=True, default="")
     brand_name = models.CharField(max_length=255, blank=True, default="")
+    agency_name = models.CharField(max_length=255, blank=True, default="")
     thumbnail = models.ImageField(
         upload_to="project_thumbnails/",
         null=True,
@@ -118,6 +119,8 @@ class ProjectCollaborator(models.Model):
     ROLE_CHOICES = [
         ("internal_user", "Internal User"),
         ("external_user", "External User"),
+        ("producer", "Producer"),
+        ("agency_producer", "Agency Producer"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -285,6 +288,15 @@ class Offer(models.Model):
     territory = models.JSONField(default=list, blank=True)
     media_placements = models.JSONField(default=list, blank=True)
     cover_page_notes = models.TextField(blank=True, default="")
+    assumptions_exclusions = models.TextField(blank=True, default="")
+    fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    production_insurance_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    production_fee_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    post_markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    post_insurance_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    post_tax_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     deadline = models.DateTimeField(null=True, blank=True)
     source = models.CharField(max_length=20, choices=OfferSource.choices)
     is_locked = models.BooleanField(default=False)
@@ -333,6 +345,7 @@ class OfferEntry(models.Model):
     tax_rate = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     tax_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     show_tax = models.BooleanField(default=False)
+    overtime = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     is_linked_surcharge = models.BooleanField(default=True)
     market_range = models.CharField(max_length=50, blank=True, default="")
     item_data = models.JSONField(default=dict, blank=True)

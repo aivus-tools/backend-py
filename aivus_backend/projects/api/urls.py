@@ -83,6 +83,8 @@ urlpatterns = [
         views.client_brief_comparison_analyze,
         name="client_brief_comparison_analyze",
     ),
+    # Export Data
+    path("offers/<uuid:offer_id>/export-data", views.offer_export_data, name="offer_export_data"),
     # XLSX Upload (Sprint 5)
     path("client/xlsx-upload", views.client_xlsx_upload, name="client_xlsx_upload"),
 ]

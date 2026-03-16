@@ -28,9 +28,9 @@ class EntryAdminForm(forms.ModelForm):
 class CategoryAdmin(ModelAdmin):
     """Category admin configuration."""
 
-    list_display = ["name", "level", "parent_category", "created_at"]
-    search_fields = ["name"]
-    list_filter = ["level", "created_at"]
+    list_display = ["name", "code", "level", "parent_category", "tags", "created_at"]
+    search_fields = ["name", "code"]
+    list_filter = ["level", "tags", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["level", "name"]
 
@@ -51,12 +51,12 @@ class EntryAdmin(ModelAdmin):
     """Entry admin configuration."""
 
     form = EntryAdminForm
-    list_display = ["name", "short_description", "category", "is_approved", "created_at"]
-    search_fields = ["name", "short_description", "description"]
+    list_display = ["name", "code", "short_description", "category", "is_approved", "created_at"]
+    search_fields = ["name", "code", "short_description", "description"]
     list_filter = ["is_approved", "category", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["-created_at"]
-    fields = ["name", "category", "short_description", "description", "is_approved"]
+    fields = ["name", "code", "category", "short_description", "description", "is_approved"]
 
 
 @admin.register(EntryUnit)

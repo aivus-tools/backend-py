@@ -178,7 +178,7 @@ def parse_offer_details_to_entries(offer, details_dict):
             mapped_keys = {
                 "id", "item", "entryId", "categoryId", "price", "cost",
                 "clientPrice", "clientCost", "surcharge", "taxRate", "taxPrice",
-                "showTax", "isLinkedSurcharge", "marketRange",
+                "showTax", "overtime", "isLinkedSurcharge", "marketRange",
             }
             item_data = {}
             for key, value in item.items():
@@ -203,6 +203,7 @@ def parse_offer_details_to_entries(offer, details_dict):
                 tax_rate=_to_decimal(item.get("taxRate")) or Decimal("0"),
                 tax_price=_to_decimal(item.get("taxPrice")),
                 show_tax=bool(item.get("showTax", False)),
+                overtime=_to_decimal(item.get("overtime")) or Decimal("0"),
                 is_linked_surcharge=bool(item.get("isLinkedSurcharge", True)),
                 market_range=str(item.get("marketRange", "")),
                 item_data=item_data,
@@ -266,6 +267,7 @@ def reconstruct_details_from_entries(offer):
             item["taxPrice"] = float(entry_record.tax_price)
 
         item["showTax"] = entry_record.show_tax
+        item["overtime"] = float(entry_record.overtime)
         item["isLinkedSurcharge"] = entry_record.is_linked_surcharge
         item["marketRange"] = entry_record.market_range
 

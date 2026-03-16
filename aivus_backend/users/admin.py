@@ -11,6 +11,7 @@ from .models import Team
 from .models import User
 from .models import UserTeam
 from .models import Vendor
+from .models import VendorSettings
 
 
 @admin.register(User)
@@ -97,3 +98,21 @@ class UserTeamAdmin(ModelAdmin):
     list_filter = ["role", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     ordering = ["-created_at"]
+
+
+@admin.register(VendorSettings)
+class VendorSettingsAdmin(ModelAdmin):
+    list_display = ["vendor", "company_name", "fringes_percent", "production_fee_percent", "created_at"]
+    search_fields = ["vendor__name", "company_name"]
+    readonly_fields = ["created_at", "updated_at"]
+    fieldsets = (
+        (None, {"fields": ("vendor", "logo", "company_name", "agency_name")}),
+        ("Production Defaults", {"fields": (
+            "fringes_percent", "handling_percent", "markup_percent",
+            "production_insurance_percent", "production_fee_percent",
+        )}),
+        ("Post-Production Defaults", {"fields": (
+            "post_markup_percent", "post_insurance_percent", "post_tax_percent",
+        )}),
+        ("Timestamps", {"fields": ("created_at", "updated_at")}),
+    )

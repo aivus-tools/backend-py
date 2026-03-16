@@ -2,9 +2,16 @@
 
 import uuid
 
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 
 from aivus_backend.core.enums import UnitDimension
+
+CATEGORY_TAG_CHOICES = [
+    ("production", "Production"),
+    ("post_production", "Post-Production"),
+    ("pre_production", "Pre-Production"),
+]
 
 
 class Category(models.Model):
@@ -19,7 +26,13 @@ class Category(models.Model):
         related_name="children",
     )
     name = models.CharField(max_length=255)
+    code = models.CharField(max_length=10, blank=True, default="")
     level = models.IntegerField()
+    tags = ArrayField(
+        models.CharField(max_length=20, choices=CATEGORY_TAG_CHOICES),
+        default=list,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -30,7 +43,8 @@ class Category(models.Model):
         verbose_name_plural = "Categories"
 
     def __str__(self):
-        return self.name
+        prefix = f"[{self.code}] " if self.code else ""
+        return f"{prefix}{self.name}"
 
     def get_full_path(self):
         """Get category path: Parent > Child > Grandchild."""
@@ -75,6 +89,7 @@ class Entry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
+    code = models.CharField(max_length=50, blank=True, default="")
     short_description = models.CharField(max_length=500, blank=True, default="")
     description = models.TextField(blank=True, default="")
     is_approved = models.BooleanField(default=False)

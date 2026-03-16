@@ -76,6 +76,7 @@ from aivus_backend.users.models import Client
 from aivus_backend.users.models import Team
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
+from aivus_backend.users.models import VendorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def projects_list(request):
             client_name = data.get("clientName", "")
             irs_ein = data.get("irsEin", "")
             brand_name = data.get("brandName", "")
+            agency_name = data.get("agencyName", "")
             collaborators = data.get("collaborators", [])
             client_managers = data.get("clientManagers", [])
 
@@ -200,6 +202,7 @@ def projects_list(request):
                 client_name=client_name,
                 irs_ein=irs_ein,
                 brand_name=brand_name,
+                agency_name=agency_name,
             )
 
             # Create collaborators
@@ -344,6 +347,8 @@ def project_detail(request, project_id):
                 project.irs_ein = data["irsEin"]
             if "brandName" in data:
                 project.brand_name = data["brandName"]
+            if "agencyName" in data:
+                project.agency_name = data["agencyName"]
 
             # Update collaborators if provided
             if "collaborators" in data:
@@ -683,6 +688,17 @@ def offers_list(request):
             if "coverPageNotes" in data:
                 create_kwargs["cover_page_notes"] = data["coverPageNotes"]
 
+            vendor_settings = VendorSettings.objects.filter(vendor=project.vendor).first()
+            if vendor_settings:
+                create_kwargs["fringes_percent"] = vendor_settings.fringes_percent
+                create_kwargs["handling_percent"] = vendor_settings.handling_percent
+                create_kwargs["markup_percent"] = vendor_settings.markup_percent
+                create_kwargs["production_insurance_percent"] = vendor_settings.production_insurance_percent
+                create_kwargs["production_fee_percent"] = vendor_settings.production_fee_percent
+                create_kwargs["post_markup_percent"] = vendor_settings.post_markup_percent
+                create_kwargs["post_insurance_percent"] = vendor_settings.post_insurance_percent
+                create_kwargs["post_tax_percent"] = vendor_settings.post_tax_percent
+
             offer = Offer.objects.create(**create_kwargs)
 
             if details:
@@ -791,6 +807,22 @@ def offer_detail(request, offer_id):
                 offer.media_placements = data["mediaPlacements"]
             if "coverPageNotes" in data:
                 offer.cover_page_notes = data["coverPageNotes"]
+            if "assumptionsExclusions" in data:
+                offer.assumptions_exclusions = data["assumptionsExclusions"]
+
+            percent_fields_map = {
+                "fringesPercent": "fringes_percent",
+                "handlingPercent": "handling_percent",
+                "markupPercent": "markup_percent",
+                "productionInsurancePercent": "production_insurance_percent",
+                "productionFeePercent": "production_fee_percent",
+                "postMarkupPercent": "post_markup_percent",
+                "postInsurancePercent": "post_insurance_percent",
+                "postTaxPercent": "post_tax_percent",
+            }
+            for json_key, model_field in percent_fields_map.items():
+                if json_key in data:
+                    setattr(offer, model_field, Decimal(str(data[json_key])))
 
             if "deliverables" in data:
                 _sync_offer_deliverables(offer, data["deliverables"])
@@ -2360,3 +2392,200 @@ def client_xlsx_upload(request):
         "has_share": share is not None,
     })
 
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def offer_export_data(request, offer_id):
+    try:
+        offer = Offer.objects.select_related(
+            "project",
+            "project__vendor",
+            "project__client",
+        ).get(id=offer_id, deleted_at__isnull=True)
+    except Offer.DoesNotExist:
+        return JsonResponse({"error": "Offer not found"}, status=404)
+
+    user_vendor_id = request.user_data.get("vendor_id")
+    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    project = offer.project
+    vendor = project.vendor
+
+    vendor_settings = VendorSettings.objects.filter(vendor=vendor).first()
+    logo_url = None
+    if vendor_settings and vendor_settings.logo:
+        logo_url = vendor_settings.logo.url
+
+    collaborators = ProjectCollaborator.objects.filter(
+        project=project,
+    ).values("id", "name", "email", "role", "user_id")
+    collaborators_list = [
+        {
+            "id": str(x["id"]),
+            "userId": str(x["user_id"]) if x["user_id"] else None,
+            "name": x["name"],
+            "email": x["email"],
+            "role": x["role"],
+        }
+        for x in collaborators
+    ]
+
+    client_managers = ClientManager.objects.filter(
+        project=project,
+    ).values("id", "name", "position")
+    client_managers_list = [
+        {
+            "id": str(x["id"]),
+            "name": x["name"],
+            "position": x["position"],
+        }
+        for x in client_managers
+    ]
+
+    entries = OfferEntry.objects.filter(
+        offer=offer,
+        deleted_at__isnull=True,
+    ).select_related("category", "category__parent_category", "entry").order_by("sort_order")
+
+    fringes_pct = float(offer.fringes_percent)
+    crew_codes = {"A", "B", "G", "M"}
+
+    categories_map = {}
+    for entry in entries:
+        category_id = str(entry.category_id) if entry.category_id else "uncategorized"
+        if category_id not in categories_map:
+            parent = entry.category.parent_category if entry.category else None
+            categories_map[category_id] = {
+                "id": category_id if category_id != "uncategorized" else "uncategorized",
+                "code": entry.category.code if entry.category else "",
+                "name": entry.category.name if entry.category else "Uncategorized",
+                "level": entry.category.level if entry.category else 0,
+                "parentCategoryId": str(parent.id) if parent else None,
+                "parentCategoryName": parent.name if parent else None,
+                "parentCategoryCode": parent.code if parent else None,
+                "tags": entry.category.tags if entry.category else [],
+                "parentTags": parent.tags if parent else [],
+                "entries": [],
+                "_raw_estimates": [],
+            }
+
+        estimate = float(entry.client_price) if entry.client_price is not None else float(entry.price or 0)
+        rate = float(entry.price) if entry.price is not None else 0
+
+        units_list = []
+        item_data = entry.item_data or {}
+        raw_units = item_data.get("units") or []
+        for u in raw_units:
+            if u is not None:
+                units_list.append({
+                    "label": u.get("label", ""),
+                    "symbol": u.get("label", ""),
+                    "count": u.get("count", 0),
+                })
+
+        categories_map[category_id]["entries"].append({
+            "id": str(entry.id),
+            "entryId": str(entry.entry_id) if entry.entry_id else str(entry.id),
+            "code": entry.entry.code if entry.entry else "",
+            "name": entry.item_name,
+            "rate": rate,
+            "units": units_list,
+            "overtime": float(entry.overtime) if entry.overtime else 0,
+            "estimate": estimate,
+        })
+        categories_map[category_id]["_raw_estimates"].append(estimate)
+
+    categories_list = []
+    for cat in categories_map.values():
+        sub_total = sum(cat["_raw_estimates"])
+        code = cat["code"]
+        fringes = sub_total * (fringes_pct / 100) if code in crew_codes else None
+        section_total = sub_total + (fringes or 0)
+        del cat["_raw_estimates"]
+        cat["subTotal"] = round(sub_total, 2)
+        cat["fringes"] = round(fringes, 2) if fringes is not None else None
+        cat["sectionTotal"] = round(section_total, 2)
+        categories_list.append(cat)
+
+    share = Share.objects.filter(offer=offer, is_active=True).first()
+
+    deliverables = OfferDeliverable.objects.filter(
+        offer=offer,
+        deleted_at__isnull=True,
+    ).order_by("sort_order")
+
+    schedule_entries = OfferScheduleEntry.objects.filter(
+        offer=offer,
+        deleted_at__isnull=True,
+    ).order_by("sort_order")
+
+    company_name = vendor_settings.company_name if vendor_settings else ""
+
+    result = {
+        "offer": {
+            "id": str(offer.id),
+            "uuid": str(offer.id),
+            "status": offer.status,
+            "cost": float(offer.cost) if offer.cost is not None else None,
+            "bidDate": offer.bid_date.isoformat() if offer.bid_date else None,
+            "revision": offer.revision,
+            "term": offer.term,
+            "territory": offer.territory,
+            "mediaPlacements": offer.media_placements,
+            "coverPageNotes": offer.cover_page_notes,
+            "assumptionsExclusions": offer.assumptions_exclusions,
+            "fringesPercent": str(offer.fringes_percent),
+            "handlingPercent": str(offer.handling_percent),
+            "markupPercent": str(offer.markup_percent),
+            "productionInsurancePercent": str(offer.production_insurance_percent),
+            "productionFeePercent": str(offer.production_fee_percent),
+            "postMarkupPercent": str(offer.post_markup_percent),
+            "postInsurancePercent": str(offer.post_insurance_percent),
+            "postTaxPercent": str(offer.post_tax_percent),
+            "customFeeNames": offer.details.get("customFeeNames", {}),
+            "categoryExternalMarkup": offer.details.get("categoryExternalMarkup", {}),
+            "deliverables": [
+                {
+                    "id": str(x.id),
+                    "quantity": x.quantity,
+                    "duration": x.duration,
+                    "durationUnit": x.duration_unit,
+                    "notes": x.notes,
+                    "sortOrder": x.sort_order,
+                }
+                for x in deliverables
+            ],
+            "scheduleEntries": [
+                {
+                    "id": str(x.id),
+                    "phaseType": x.phase_type,
+                    "days": x.days,
+                    "hoursPerDay": x.hours_per_day,
+                    "notes": x.notes,
+                    "sortOrder": x.sort_order,
+                }
+                for x in schedule_entries
+            ],
+        },
+        "project": {
+            "id": str(project.id),
+            "name": project.name,
+            "agencyName": project.agency_name,
+            "clientName": project.client_name or (project.client.name if project.client else None),
+            "brandName": project.brand_name,
+            "clientManagers": client_managers_list,
+        },
+        "vendor": {
+            "name": vendor.name,
+            "companyName": company_name or None,
+            "logoUrl": logo_url,
+        },
+        "collaborators": collaborators_list,
+        "categories": categories_list,
+        "shareToken": share.token if share else None,
+    }
+
+    return JsonResponse(result)

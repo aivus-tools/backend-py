@@ -424,3 +424,113 @@ def user_profile_avatar(request):
     user.save(update_fields=["avatar"])
 
     return JsonResponse({"avatar_url": user.avatar.url})
+
+
+# ==================== Vendor Settings API ====================
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_settings(request):
+    user_data = request.user_data
+    user_id = user_data.get("id")
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    vendor = Vendor.objects.filter(owner=user).first()
+    if not vendor:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+    settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
+
+    if request.method == "GET":
+        return JsonResponse(_build_vendor_settings_response(settings))
+
+    try:
+        data = json.loads(request.body)
+
+        if "companyName" in data:
+            settings.company_name = data["companyName"]
+        if "agencyName" in data:
+            settings.agency_name = data["agencyName"]
+
+        from decimal import Decimal
+
+        percent_fields_map = {
+            "fringesPercent": "fringes_percent",
+            "handlingPercent": "handling_percent",
+            "markupPercent": "markup_percent",
+            "productionInsurancePercent": "production_insurance_percent",
+            "productionFeePercent": "production_fee_percent",
+            "postMarkupPercent": "post_markup_percent",
+            "postInsurancePercent": "post_insurance_percent",
+            "postTaxPercent": "post_tax_percent",
+        }
+        for json_key, model_field in percent_fields_map.items():
+            if json_key in data:
+                setattr(settings, model_field, Decimal(str(data[json_key])))
+
+        settings.save()
+        return JsonResponse(_build_vendor_settings_response(settings))
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception:
+        logger.exception("Error updating vendor settings")
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_settings_logo(request):
+    user_data = request.user_data
+    user_id = user_data.get("id")
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    vendor = Vendor.objects.filter(owner=user).first()
+    if not vendor:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+    settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
+
+    logo_file = request.FILES.get("logo")
+    if not logo_file:
+        return JsonResponse({"error": "No logo file provided"}, status=400)
+
+    if settings.logo:
+        settings.logo.delete(save=False)
+
+    settings.logo = logo_file
+    settings.save(update_fields=["logo"])
+
+    return JsonResponse({"logoUrl": settings.logo.url})
+
+
+def _build_vendor_settings_response(settings):
+    return {
+        "id": str(settings.id),
+        "vendorId": str(settings.vendor_id),
+        "logoUrl": settings.logo.url if settings.logo else None,
+        "companyName": settings.company_name,
+        "agencyName": settings.agency_name,
+        "fringesPercent": str(settings.fringes_percent),
+        "handlingPercent": str(settings.handling_percent),
+        "markupPercent": str(settings.markup_percent),
+        "productionInsurancePercent": str(settings.production_insurance_percent),
+        "productionFeePercent": str(settings.production_fee_percent),
+        "postMarkupPercent": str(settings.post_markup_percent),
+        "postInsurancePercent": str(settings.post_insurance_percent),
+        "postTaxPercent": str(settings.post_tax_percent),
+        "updatedAt": settings.updated_at.isoformat() if settings.updated_at else None,
+    }

@@ -8,6 +8,7 @@ def serialize_category(category):
         "name": category.name,
         "level": category.level,
         "parentCategoryId": str(category.parent_category_id) if category.parent_category_id else None,
+        "tags": category.tags or [],
     }
 
 
