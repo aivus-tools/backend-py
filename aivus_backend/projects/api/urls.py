@@ -45,6 +45,7 @@ urlpatterns = [
     path("shares/<str:token>", views.share_get_public, name="share_get_public"),
     path("shares/<str:token>/manage", views.share_manage, name="share_manage"),
     path("shares/<str:token>/link", views.share_link_to_brief, name="share_link_to_brief"),
+    path("shares/<str:token>/export-data", views.share_export_data, name="share_export_data"),
     # Templates (Sprint 3)
     path("templates", views.templates_list, name="templates_list"),
     path("templates/<uuid:template_id>", views.template_detail, name="template_detail"),

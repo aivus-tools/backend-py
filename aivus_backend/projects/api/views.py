@@ -2394,23 +2394,7 @@ def client_xlsx_upload(request):
 
 
 
-@csrf_exempt
-@require_http_methods(["GET"])
-@require_groups("VENDOR", "SYSTEM")
-def offer_export_data(request, offer_id):
-    try:
-        offer = Offer.objects.select_related(
-            "project",
-            "project__vendor",
-            "project__client",
-        ).get(id=offer_id, deleted_at__isnull=True)
-    except Offer.DoesNotExist:
-        return JsonResponse({"error": "Offer not found"}, status=404)
-
-    user_vendor_id = request.user_data.get("vendor_id")
-    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
-        return JsonResponse({"error": "Access denied"}, status=403)
-
+def _build_offer_export_data(offer):
     project = offer.project
     vendor = project.vendor
 
@@ -2450,8 +2434,6 @@ def offer_export_data(request, offer_id):
         deleted_at__isnull=True,
     ).select_related("category", "category__parent_category", "entry").order_by("sort_order")
 
-    fringes_pct = float(offer.fringes_percent)
-    crew_codes = {"A", "B", "G", "M"}
 
     categories_map = {}
     for entry in entries:
@@ -2472,7 +2454,7 @@ def offer_export_data(request, offer_id):
                 "_raw_estimates": [],
             }
 
-        estimate = float(entry.client_price) if entry.client_price is not None else float(entry.price or 0)
+        estimate = float(entry.client_cost) if entry.client_cost is not None else float(entry.cost or 0)
         rate = float(entry.price) if entry.price is not None else 0
 
         units_list = []
@@ -2501,13 +2483,10 @@ def offer_export_data(request, offer_id):
     categories_list = []
     for cat in categories_map.values():
         sub_total = sum(cat["_raw_estimates"])
-        code = cat["code"]
-        fringes = sub_total * (fringes_pct / 100) if code in crew_codes else None
-        section_total = sub_total + (fringes or 0)
         del cat["_raw_estimates"]
         cat["subTotal"] = round(sub_total, 2)
-        cat["fringes"] = round(fringes, 2) if fringes is not None else None
-        cat["sectionTotal"] = round(section_total, 2)
+        cat["fringes"] = None
+        cat["sectionTotal"] = round(sub_total, 2)
         categories_list.append(cat)
 
     share = Share.objects.filter(offer=offer, is_active=True).first()
@@ -2524,7 +2503,7 @@ def offer_export_data(request, offer_id):
 
     company_name = vendor_settings.company_name if vendor_settings else ""
 
-    result = {
+    return {
         "offer": {
             "id": str(offer.id),
             "uuid": str(offer.id),
@@ -2545,8 +2524,8 @@ def offer_export_data(request, offer_id):
             "postMarkupPercent": str(offer.post_markup_percent),
             "postInsurancePercent": str(offer.post_insurance_percent),
             "postTaxPercent": str(offer.post_tax_percent),
-            "customFeeNames": offer.details.get("customFeeNames", {}),
-            "categoryExternalMarkup": offer.details.get("categoryExternalMarkup", {}),
+            "customFeeNames": (offer.details or {}).get("customFeeNames", {}),
+            "categoryExternalMarkup": (offer.details or {}).get("categoryExternalMarkup", {}),
             "deliverables": [
                 {
                     "id": str(x.id),
@@ -2588,4 +2567,49 @@ def offer_export_data(request, offer_id):
         "shareToken": share.token if share else None,
     }
 
-    return JsonResponse(result)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def offer_export_data(request, offer_id):
+    try:
+        offer = Offer.objects.select_related(
+            "project",
+            "project__vendor",
+            "project__client",
+        ).get(id=offer_id, deleted_at__isnull=True)
+    except Offer.DoesNotExist:
+        return JsonResponse({"error": "Offer not found"}, status=404)
+
+    user_vendor_id = request.user_data.get("vendor_id")
+    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    return JsonResponse(_build_offer_export_data(offer))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+def share_export_data(request, token):
+    try:
+        share = Share.objects.select_related(
+            "offer",
+            "offer__project",
+            "offer__project__vendor",
+            "offer__project__client",
+        ).get(token=token)
+    except Share.DoesNotExist:
+        return JsonResponse({"error": "Share not found"}, status=404)
+
+    if not share.is_active:
+        return JsonResponse({"error": "Share link is no longer active"}, status=403)
+
+    if share.offer.project and share.offer.project.deleted_at is not None:
+        return JsonResponse({"error": "Project is archived"}, status=403)
+
+    offer = share.offer
+    if offer.deleted_at is not None:
+        return JsonResponse({"error": "Offer not found"}, status=404)
+
+    return JsonResponse(_build_offer_export_data(offer))
