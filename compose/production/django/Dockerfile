@@ -87,6 +87,8 @@ USER django
 
 RUN DATABASE_URL="" \
   DJANGO_SETTINGS_MODULE="config.settings.test" \
+  HMAC_SECRET="build" \
+  API_KEY="build" \
   python manage.py compilemessages
 
 ENTRYPOINT ["/entrypoint"]
