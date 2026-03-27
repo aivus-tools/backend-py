@@ -52,6 +52,8 @@ jobs:
       DATABASE_URL: postgres://aivus:test_password@localhost:5432/aivus_test
       REDIS_URL: redis://localhost:6379/0
       DJANGO_SETTINGS_MODULE: config.settings.test
+      HMAC_SECRET: ci-test-secret
+      API_KEY: ci-test-key
 
     steps:
       - uses: actions/checkout@v4
