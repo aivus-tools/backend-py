@@ -52,6 +52,7 @@ class User(AbstractUser):
         db_index=True,
     )
     position = models.CharField(max_length=255, blank=True, default="")
+    avatar = models.ImageField(upload_to="avatars/", null=True, blank=True)
     auth_type = models.CharField(
         max_length=20,
         choices=AuthType.choices,
@@ -192,8 +193,77 @@ class UserTeam(models.Model):
         return f"{self.user.name} - {self.team.name} ({self.role})"
 
 
+class UserSettings(models.Model):
+    """User settings for preferences and notifications."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="settings",
+    )
+    language = models.CharField(max_length=5, default="en")
+    nda_accepted = models.BooleanField(default=False)
+    notification_email = models.BooleanField(default=True)
+    notification_browser = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_settings"
+
+    def __str__(self):
+        return f"Settings for {self.user.email}"
+
+
+class VendorSettings(models.Model):
+    """Vendor-level settings: branding, default percentages for offers."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.OneToOneField(
+        Vendor,
+        on_delete=models.CASCADE,
+        related_name="vendor_settings",
+    )
+    logo = models.ImageField(upload_to="vendor_logos/", null=True, blank=True)
+    company_name = models.CharField(max_length=255, blank=True, default="")
+    agency_name = models.CharField(max_length=255, blank=True, default="")
+    fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    production_insurance_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
+    production_fee_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
+    post_markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    post_insurance_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
+    post_tax_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "vendor_settings"
+
+    def __str__(self):
+        return f"Settings for {self.vendor.name}"
+
+
 # Import AuthToken to make it visible to Django migrations
 from .tokens import AuthToken  # noqa: E402
 from .tokens import TokenType  # noqa: E402
 
-__all__ = ["AuthToken", "Client", "Team", "TokenType", "User", "UserTeam", "Vendor"]
+__all__ = [
+    "AuthToken",
+    "Client",
+    "Team",
+    "TokenType",
+    "User",
+    "UserSettings",
+    "UserTeam",
+    "Vendor",
+    "VendorSettings",
+]

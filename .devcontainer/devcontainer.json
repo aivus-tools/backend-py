@@ -17,9 +17,8 @@
             "type": "bind"
         }
     ],
-    // Tells devcontainer.json supporting services / tools whether they should run
     // /bin/sh -c "while sleep 1000; do :; done" when starting the container instead of the container’s default command
-    "overrideCommand": false,
+    "overrideCommand": true,
     "service": "django",
     // "remoteEnv": {"PATH": "/home/dev-user/.local/bin:${containerEnv:PATH}"},
     "remoteUser": "dev-user",
@@ -40,7 +39,7 @@
                     "languageServer": "Pylance",
                     "linting.enabled": true,
                     "linting.mypyEnabled": true,
-                    "linting.mypyPath": "/usr/local/bin/mypy",
+                    "linting.mypyPath": "/usr/local/bin/mypy"
                 }
             },
             // https://code.visualstudio.com/docs/remote/devcontainerjson-reference#_vs-code-specific-properties

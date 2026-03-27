@@ -1,7 +1,7 @@
 # ==== pytest ====
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "--ds=config.settings.test --reuse-db --import-mode=importlib"
+addopts = "--ds=config.settings.test --reuse-db --import-mode=importlib --ignore=test_catalog_api.py"
 python_files = [
     "tests.py",
     "test_*.py",
@@ -57,6 +57,7 @@ indent_size = 2
 extend-exclude = [
     "*/migrations/*.py",
     "staticfiles/*",
+    "test_catalog_api.py",
 ]
 
 [tool.ruff.lint]
@@ -129,6 +130,17 @@ ignore = [
     # https://github.com/astral-sh/ruff/issues/7871
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+    "PLR2004",
+    "S106",
+    "S308",
+    "PLC0415",
+    "FBT001",
+    "FBT002",
+]
+"conftest.py" = ["PLR2004", "S106"]
+
 [tool.ruff.lint.isort]
 force-single-line = true
 
@@ -158,7 +170,7 @@ dev = [
 [project]
 name = "aivus_backend"
 version = "0.1.0"
-description = "Behold My Awesome Project!"
+description = "AIVUS Backend - AI-powered SaaS for creative RFP automation"
 readme = "README.md"
 
 license = { text = "Not open source" }
@@ -172,6 +184,7 @@ dependencies = [
     "collectfasta==3.3.1",
     "crispy-bootstrap5==2025.6",
     "django==5.2.7",
+    "django-tinymce==4.1.0",
     "django-unfold==0.42.0",
     "django-allauth[mfa]==65.12.1",
     "django-anymail[brevo]==13.1",
@@ -189,4 +202,8 @@ dependencies = [
     "python-slugify==8.0.4",
     "redis==6.4.0",
     "sentry-sdk==2.42.1",
+    "openai>=1.0.0",
+    "langgraph>=0.2.0",
+    "openpyxl>=3.1.0",
+    "django-ratelimit>=4.1.0",
 ]

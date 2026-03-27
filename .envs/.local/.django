@@ -17,3 +17,14 @@ CELERY_FLOWER_PASSWORD=admin123
 # ------------------------------------------------------------------------------
 HMAC_SECRET=local-hmac-secret-for-development
 API_KEY=local-api-key-for-development
+
+DJANGO_DEBUG=True
+DEBUG=True
+
+# GCP Storage (optional - if empty, local filesystem will be used)
+# ------------------------------------------------------------------------------
+GOOGLE_APPLICATION_CREDENTIALS=/app/gcs-credentials.json
+DJANGO_GCP_STORAGE_BUCKET_NAME=aivus-production-media
+# WARNING: The previously exposed API key MUST be revoked in the OpenAI dashboard!
+# Visit https://platform.openai.com/api-keys to revoke it.
+OPENAI_API_KEY=changeme-your-openai-key-here

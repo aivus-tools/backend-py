@@ -31,6 +31,15 @@ class ProjectStatus(models.TextChoices):
     ONGOING = "ONGOING", "In progress"
 
 
+class BriefStatus(models.TextChoices):
+    """Brief status choices."""
+
+    DRAFT = "DRAFT", "Draft"
+    SUBMITTED = "SUBMITTED", "Submitted"
+    REVIEWING = "REVIEWING", "Reviewing"
+    COMPLETED = "COMPLETED", "Completed"
+
+
 class AuthType(models.TextChoices):
     """Authentication type choices."""
 
@@ -43,6 +52,14 @@ class OfferSource(models.TextChoices):
 
     PLATFORM = "PLATFORM", "Default source"
     UPLOAD = "UPLOAD", "Uploaded"
+
+
+class OfferStatus(models.TextChoices):
+    """Offer status choices."""
+
+    DRAFT = "DRAFT", "Draft"
+    PUBLISHED = "PUBLISHED", "Published"
+    ARCHIVED = "ARCHIVED", "Archived"
 
 
 class ShareType(models.TextChoices):

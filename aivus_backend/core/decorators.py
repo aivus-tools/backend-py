@@ -33,12 +33,12 @@ def require_groups(*groups):
         def wrapper(request, *args, **kwargs):
             # Check if user is authenticated
             if not hasattr(request, "user_data") or not request.user_data:
-                return JsonResponse({"error": "User is not authenticated"}, status=403)
+                return JsonResponse({"error": "Authentication required"}, status=401)
 
             user_group = request.user_data.get("group")
             if not user_group or user_group not in groups:
                 return JsonResponse(
-                    {"error": f"Access denied for group {user_group}"},
+                    {"error": "Access denied"},
                     status=403,
                 )
 

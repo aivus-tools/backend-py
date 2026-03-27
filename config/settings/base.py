@@ -53,8 +53,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # AIVUS AUTHENTICATION
 # ------------------------------------------------------------------------------
-HMAC_SECRET = env("HMAC_SECRET", default="change-me-in-production")
-API_KEY = env("API_KEY", default="change-me-in-production")
+HMAC_SECRET = env("HMAC_SECRET")
+API_KEY = env("API_KEY")
 
 # URLS
 # ------------------------------------------------------------------------------
@@ -88,6 +88,7 @@ THIRD_PARTY_APPS = [
     "allauth.mfa",
     "allauth.socialaccount",
     "django_celery_beat",
+    "tinymce",
 ]
 
 LOCAL_APPS = [
@@ -157,7 +158,8 @@ MIDDLEWARE = [
 
 # Exempt API endpoints from CSRF validation (using HMAC instead)
 CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]
-CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read CSRF cookie for API
+# QA2-016: Set CSRF_COOKIE_HTTPONLY to True for security
+CSRF_COOKIE_HTTPONLY = True
 
 # STATIC
 # ------------------------------------------------------------------------------
@@ -224,10 +226,11 @@ FIXTURE_DIRS = (str(APPS_DIR / "fixtures"),)
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#session-cookie-httponly
 SESSION_COOKIE_HTTPONLY = True
-# https://docs.djangoproject.com/en/dev/ref/settings/#csrf-cookie-httponly
-CSRF_COOKIE_HTTPONLY = True
+# QA2-017: Set session timeout to 24 hours
+SESSION_COOKIE_AGE = 86400
 # https://docs.djangoproject.com/en/dev/ref/settings/#x-frame-options
-X_FRAME_OPTIONS = "DENY"
+# QA2-006: Use SAMEORIGIN to avoid conflict with CSP frame-ancestors
+X_FRAME_OPTIONS = "SAMEORIGIN"
 
 # EMAIL
 # ------------------------------------------------------------------------------
@@ -342,6 +345,17 @@ SOCIALACCOUNT_ADAPTER = "aivus_backend.users.adapters.SocialAccountAdapter"
 # https://docs.allauth.org/en/latest/socialaccount/configuration.html
 SOCIALACCOUNT_FORMS = {"signup": "aivus_backend.users.forms.UserSocialSignupForm"}
 
+
+# TINYMCE
+# ------------------------------------------------------------------------------
+TINYMCE_DEFAULT_CONFIG = {
+    "theme": "silver",
+    "height": 300,
+    "menubar": False,
+    "plugins": "advlist autolink lists link charmap preview anchor searchreplace visualblocks code fullscreen insertdatetime table code help wordcount",
+    "toolbar": "undo redo | formatselect | bold italic underline strikethrough | forecolor backcolor | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link | removeformat | code",
+    "content_style": "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px }",
+}
 
 # Your stuff...
 # ------------------------------------------------------------------------------

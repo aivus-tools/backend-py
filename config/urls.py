@@ -24,15 +24,37 @@ urlpatterns = [
     path("api/v1/auth/", include("aivus_backend.users.api.urls", namespace="auth_api")),
     path("api/v1/users/me", user_views.user_me, name="user-me"),
     path(
+        "api/v1/users/profile/avatar",
+        user_views.user_profile_avatar,
+        name="user-profile-avatar",
+    ),
+    path("api/v1/users/profile", user_views.user_profile, name="user-profile"),
+    path("api/v1/users/settings", user_views.user_settings, name="user-settings"),
+    path(
+        "api/v1/users/change-password",
+        user_views.change_password,
+        name="change-password",
+    ),
+    path(
         "api/v1/users/<uuid:user_id>/change-group",
         user_views.change_user_group,
         name="change-user-group",
     ),
     path("api/v1/users", user_views.get_users, name="get-users"),
+    path(
+        "api/v1/vendor/settings/logo",
+        user_views.vendor_settings_logo,
+        name="vendor-settings-logo",
+    ),
+    path("api/v1/vendor/settings", user_views.vendor_settings, name="vendor-settings"),
     # Catalog API
     path("api/v1/", include("aivus_backend.catalog.api.urls", namespace="catalog_api")),
     # Projects API (briefs, projects, offers)
-    path("api/v1/", include("aivus_backend.projects.api.urls", namespace="projects_api")),
+    path(
+        "api/v1/", include("aivus_backend.projects.api.urls", namespace="projects_api")
+    ),
+    # TinyMCE
+    path("tinymce/", include("tinymce.urls")),
     # Your stuff: custom urls includes go here
     # ...
     # Media files

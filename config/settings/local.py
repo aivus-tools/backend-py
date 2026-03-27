@@ -3,6 +3,11 @@ from .base import INSTALLED_APPS
 from .base import MIDDLEWARE
 from .base import env
 
+# AIVUS AUTHENTICATION (local defaults)
+# ------------------------------------------------------------------------------
+HMAC_SECRET = env("HMAC_SECRET", default="local-hmac-secret-for-development")
+API_KEY = env("API_KEY", default="local-api-key-for-development")
+
 # GENERAL
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#debug
@@ -69,5 +74,26 @@ INSTALLED_APPS += ["django_extensions"]
 
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#task-eager-propagates
 CELERY_TASK_EAGER_PROPAGATES = True
+# GCP Storage (optional for local dev - falls back to filesystem if not configured)
+# ------------------------------------------------------------------------------
+GCS_BUCKET_NAME = env("DJANGO_GCP_STORAGE_BUCKET_NAME", default="")
+
+if GCS_BUCKET_NAME:
+    GS_BUCKET_NAME = GCS_BUCKET_NAME
+    GS_DEFAULT_ACL = "publicRead"
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.gcloud.GoogleCloudStorage",
+            "OPTIONS": {
+                "location": "media",
+                "file_overwrite": False,
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    MEDIA_URL = f"https://storage.googleapis.com/{GS_BUCKET_NAME}/media/"
+
 # Your stuff...
 # ------------------------------------------------------------------------------
