@@ -15,6 +15,3 @@ urlpatterns = [
     path("entries/<uuid:entry_id>", get_entry, name="entry-detail"),
     path("units", get_units, name="units"),
 ]
-
-
-

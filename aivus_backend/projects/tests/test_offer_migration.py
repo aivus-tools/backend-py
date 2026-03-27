@@ -10,21 +10,21 @@ These tests verify:
 7. Complex JSON structure handling
 """
 
-import pytest
 from decimal import Decimal
+
+import pytest
 from django.db import IntegrityError
 from django.utils import timezone
 
-from aivus_backend.catalog.models import Category, Entry, Unit
-from aivus_backend.projects.models import (
-    Brief,
-    Offer,
-    OfferEntry,
-    OfferRate,
-    Project,
-    Rate,
-)
-from aivus_backend.users.models import User, Vendor
+from aivus_backend.catalog.models import Category
+from aivus_backend.catalog.models import Entry
+from aivus_backend.projects.models import Offer
+from aivus_backend.projects.models import OfferEntry
+from aivus_backend.projects.models import OfferRate
+from aivus_backend.projects.models import Project
+from aivus_backend.projects.models import Rate
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 
 
 @pytest.fixture
@@ -213,9 +213,7 @@ class TestOfferModel:
         # Soft-deleted offer should still exist in DB
         assert Offer.objects.filter(id=offer.id).exists()
         # But not in active queryset
-        assert not Offer.objects.filter(
-            id=offer.id, deleted_at__isnull=True
-        ).exists()
+        assert not Offer.objects.filter(id=offer.id, deleted_at__isnull=True).exists()
 
     def test_offer_details_with_complex_json(self, project):
         """Test offer with deeply nested JSON details."""
@@ -232,9 +230,7 @@ class TestOfferModel:
                     ],
                     "options": {
                         "time": [{"type": "time", "count": 1, "label": "Hour"}],
-                        "quantity": [
-                            {"type": "quantity", "count": 1, "label": "Each"}
-                        ],
+                        "quantity": [{"type": "quantity", "count": 1, "label": "Each"}],
                     },
                 }
                 for i in range(1, 6)
@@ -303,7 +299,7 @@ class TestOfferEntry:
         assert OfferEntry.objects.filter(offer_id=offer_id).count() == 0
 
     def test_multiple_entries_per_offer(self, offer, entry, entry2):
-        """Test that an offer can have multiple entries (no unique constraint on offer+entry)."""
+        """Test that an offer can have multiple entries."""
         OfferEntry.objects.create(
             offer=offer,
             entry=entry,

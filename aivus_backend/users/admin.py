@@ -20,6 +20,15 @@ class UserAdmin(ModelAdmin, auth_admin.UserAdmin):
 
     form = UserAdminChangeForm
     add_form = UserAdminCreationForm
+    add_fieldsets = (
+        (
+            None,
+            {
+                "classes": ("wide",),
+                "fields": ("email", "password1", "password2"),
+            },
+        ),
+    )
     fieldsets = (
         (None, {"fields": ("email", "password")}),
         ("Personal info", {"fields": ("name", "position")}),
@@ -102,17 +111,38 @@ class UserTeamAdmin(ModelAdmin):
 
 @admin.register(VendorSettings)
 class VendorSettingsAdmin(ModelAdmin):
-    list_display = ["vendor", "company_name", "fringes_percent", "production_fee_percent", "created_at"]
+    list_display = [
+        "vendor",
+        "company_name",
+        "fringes_percent",
+        "production_fee_percent",
+        "created_at",
+    ]
     search_fields = ["vendor__name", "company_name"]
     readonly_fields = ["created_at", "updated_at"]
     fieldsets = (
         (None, {"fields": ("vendor", "logo", "company_name", "agency_name")}),
-        ("Production Defaults", {"fields": (
-            "fringes_percent", "handling_percent", "markup_percent",
-            "production_insurance_percent", "production_fee_percent",
-        )}),
-        ("Post-Production Defaults", {"fields": (
-            "post_markup_percent", "post_insurance_percent", "post_tax_percent",
-        )}),
+        (
+            "Production Defaults",
+            {
+                "fields": (
+                    "fringes_percent",
+                    "handling_percent",
+                    "markup_percent",
+                    "production_insurance_percent",
+                    "production_fee_percent",
+                )
+            },
+        ),
+        (
+            "Post-Production Defaults",
+            {
+                "fields": (
+                    "post_markup_percent",
+                    "post_insurance_percent",
+                    "post_tax_percent",
+                )
+            },
+        ),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )

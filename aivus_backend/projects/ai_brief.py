@@ -25,7 +25,10 @@ BRIEF_FIELDS = {
     "clientName": {"description": "Client company name", "required": False},
     "brandName": {"description": "Brand name for the video", "required": False},
     "projectDescription": {
-        "description": "Detailed description of the video project - what kind of video, its purpose, target audience",
+        "description": (
+            "Detailed description of the video project"
+            " - what kind of video, its purpose, target audience"
+        ),
         "required": True,
     },
     "referenceVideos": {
@@ -33,7 +36,9 @@ BRIEF_FIELDS = {
         "required": False,
     },
     "distributionAndAdPlacements": {
-        "description": "Where the video will be distributed (TV, YouTube, social media, etc.)",
+        "description": (
+            "Where the video will be distributed (TV, YouTube, social media, etc.)"
+        ),
         "required": False,
     },
     "territory": {
@@ -62,58 +67,94 @@ BRIEF_FIELDS = {
     },
 }
 
-SYSTEM_PROMPT = """You are AIVUS AI, a friendly and professional video production brief creation assistant.
-Your job is to help clients create comprehensive briefs for video production projects.
-
-You should be conversational, warm, and guide the user naturally. Ask 2-3 questions at a time maximum.
-Don't overwhelm the user with too many questions at once.
-
-IMPORTANT RULES:
-1. Start by understanding what kind of video the client wants (commercial, music video, corporate, etc.)
-2. Ask about the project name and a brief description of what they envision
-3. Then ask about technical specs: duration, any additional cuts/versions needed
-4. Ask about distribution (where will it air/be posted)
-5. Ask about budget if they haven't mentioned it
-6. Ask about shooting requirements, territory, and timeline
-7. Reference videos are nice-to-have, ask about them naturally
-
-When you have enough information to create a brief (at minimum: project name, description, and video duration),
-you can produce the brief. You don't need ALL fields - just the essential ones.
-
-CONVERSATION STYLE:
-- Be enthusiastic about their project
-- Use natural language, not robotic forms
-- Acknowledge what they've told you before asking more
-- Keep responses concise (2-4 sentences + questions)
-- If they give you a lot of info at once, extract everything you can
-
-You will be given the current conversation history and the fields extracted so far.
-Your response must be a JSON object with two fields:
-- "reply": Your conversational response to the user
-- "extracted_fields": A JSON object with any NEW fields you extracted from the LATEST user message
-- "is_complete": boolean - true if you have enough info to produce a complete brief
-
-For extracted_fields, use this schema:
-{
-    "projectName": "string",
-    "description": "string",
-    "clientName": "string",
-    "brandName": "string",
-    "projectDescription": "detailed string",
-    "referenceVideos": [{"url": "string", "comment": "string"}],
-    "distributionAndAdPlacements": "string",
-    "territory": ["string"],
-    "term": {"length": "string", "unit": "string"},
-    "mainVideoDuration": {"number": "1", "length": "30", "timeUnit": "sec", "comment": ""},
-    "cuts": [{"number": "1", "length": "15", "timeUnit": "sec", "comment": ""}],
-    "shootingDays": {"number": "string", "length": "string", "comment": "", "timeUnit": ""},
-    "budget": number,
-    "visibleForVendors": true
-}
-
-Only include fields that were NEWLY mentioned in the latest message. Do not repeat previously extracted fields.
-
-IMPORTANT: Always respond with valid JSON only. No markdown, no code blocks, just JSON."""
+SYSTEM_PROMPT = (
+    "You are AIVUS AI, a friendly and professional"
+    " video production brief creation assistant.\n"
+    "Your job is to help clients create comprehensive"
+    " briefs for video production projects.\n"
+    "\n"
+    "You should be conversational, warm, and guide the"
+    " user naturally. Ask 2-3 questions at a time"
+    " maximum.\n"
+    "Don't overwhelm the user with too many questions"
+    " at once.\n"
+    "\n"
+    "IMPORTANT RULES:\n"
+    "1. Start by understanding what kind of video the"
+    " client wants (commercial, music video,"
+    " corporate, etc.)\n"
+    "2. Ask about the project name and a brief"
+    " description of what they envision\n"
+    "3. Then ask about technical specs: duration, any"
+    " additional cuts/versions needed\n"
+    "4. Ask about distribution (where will it air/be"
+    " posted)\n"
+    "5. Ask about budget if they haven't mentioned it\n"
+    "6. Ask about shooting requirements, territory,"
+    " and timeline\n"
+    "7. Reference videos are nice-to-have, ask about"
+    " them naturally\n"
+    "\n"
+    "When you have enough information to create a brief"
+    " (at minimum: project name, description, and video"
+    " duration),\n"
+    "you can produce the brief. You don't need ALL"
+    " fields - just the essential ones.\n"
+    "\n"
+    "CONVERSATION STYLE:\n"
+    "- Be enthusiastic about their project\n"
+    "- Use natural language, not robotic forms\n"
+    "- Acknowledge what they've told you before asking"
+    " more\n"
+    "- Keep responses concise (2-4 sentences +"
+    " questions)\n"
+    "- If they give you a lot of info at once, extract"
+    " everything you can\n"
+    "\n"
+    "You will be given the current conversation history"
+    " and the fields extracted so far.\n"
+    "Your response must be a JSON object with two"
+    " fields:\n"
+    '- "reply": Your conversational response to the'
+    " user\n"
+    '- "extracted_fields": A JSON object with any NEW'
+    " fields you extracted from the LATEST user"
+    " message\n"
+    '- "is_complete": boolean - true if you have enough'
+    " info to produce a complete brief\n"
+    "\n"
+    "For extracted_fields, use this schema:\n"
+    "{\n"
+    '    "projectName": "string",\n'
+    '    "description": "string",\n'
+    '    "clientName": "string",\n'
+    '    "brandName": "string",\n'
+    '    "projectDescription": "detailed string",\n'
+    '    "referenceVideos": [{"url": "string",'
+    ' "comment": "string"}],\n'
+    '    "distributionAndAdPlacements": "string",\n'
+    '    "territory": ["string"],\n'
+    '    "term": {"length": "string",'
+    ' "unit": "string"},\n'
+    '    "mainVideoDuration": {"number": "1",'
+    ' "length": "30", "timeUnit": "sec",'
+    ' "comment": ""},\n'
+    '    "cuts": [{"number": "1", "length": "15",'
+    ' "timeUnit": "sec", "comment": ""}],\n'
+    '    "shootingDays": {"number": "string",'
+    ' "length": "string", "comment": "",'
+    ' "timeUnit": ""},\n'
+    '    "budget": number,\n'
+    '    "visibleForVendors": true\n'
+    "}\n"
+    "\n"
+    "Only include fields that were NEWLY mentioned in"
+    " the latest message. Do not repeat previously"
+    " extracted fields.\n"
+    "\n"
+    "IMPORTANT: Always respond with valid JSON only."
+    " No markdown, no code blocks, just JSON."
+)
 
 ANALYSIS_SYSTEM_PROMPT = """You are AIVUS AI, an expert video production analyst.
 Analyze the given brief data and provide:
@@ -128,26 +169,36 @@ Respond with a JSON object:
     "suggestions": ["suggestion 1", "suggestion 2", ...]
 }"""
 
-COMPARISON_SYSTEM_PROMPT = """You are AIVUS AI, an expert video production cost analyst.
-You help clients understand and compare vendor offers for video production projects.
-
-Given the brief details and comparison data from multiple vendors, provide insightful analysis.
-Focus on:
-1. Price differences and what they might mean
-2. Which vendor appears to offer better value for specific categories
-3. Any red flags (unusually low or high prices)
-4. Overall recommendations
-
-Be balanced, professional, and data-driven. Use specific numbers from the data.
-If the user asks a specific question, focus your analysis on that question.
-
-Respond with a JSON object:
-{
-    "analysis": "Your detailed analysis text (can use markdown formatting)",
-    "highlights": [
-        {"type": "positive|negative|neutral", "text": "A specific highlight or finding"}
-    ]
-}"""
+COMPARISON_SYSTEM_PROMPT = (
+    "You are AIVUS AI, an expert video production"
+    " cost analyst.\n"
+    "You help clients understand and compare vendor"
+    " offers for video production projects.\n"
+    "\n"
+    "Given the brief details and comparison data from"
+    " multiple vendors, provide insightful analysis.\n"
+    "Focus on:\n"
+    "1. Price differences and what they might mean\n"
+    "2. Which vendor appears to offer better value for"
+    " specific categories\n"
+    "3. Any red flags (unusually low or high prices)\n"
+    "4. Overall recommendations\n"
+    "\n"
+    "Be balanced, professional, and data-driven. Use"
+    " specific numbers from the data.\n"
+    "If the user asks a specific question, focus your"
+    " analysis on that question.\n"
+    "\n"
+    "Respond with a JSON object:\n"
+    "{\n"
+    '    "analysis": "Your detailed analysis text'
+    ' (can use markdown formatting)",\n'
+    '    "highlights": [\n'
+    '        {"type": "positive|negative|neutral",'
+    ' "text": "A specific highlight or finding"}\n'
+    "    ]\n"
+    "}"
+)
 
 
 def _get_openai_client():
@@ -162,9 +213,13 @@ def _get_openai_client():
 def _merge_extracted_fields(existing: dict, new_fields: dict) -> dict:
     """Merge newly extracted fields into existing brief data."""
     merged = dict(existing)
-    for key, value in new_fields.items():
-        if value is not None and value != "" and value != [] and value != {}:
-            merged[key] = value
+    merged.update(
+        {
+            key: value
+            for key, value in new_fields.items()
+            if value is not None and value not in ("", [], {})
+        }
+    )
     return merged
 
 
@@ -202,8 +257,9 @@ def chat_node(state: BriefChatState) -> dict:
         openai_messages.append({"role": "system", "content": context_msg})
 
     # Add conversation history
-    for msg in state["messages"]:
-        openai_messages.append({"role": msg["role"], "content": msg["content"]})
+    openai_messages.extend(
+        {"role": msg["role"], "content": msg["content"]} for msg in state["messages"]
+    )
 
     try:
         response = client.chat.completions.create(
@@ -218,7 +274,12 @@ def chat_node(state: BriefChatState) -> dict:
         content = response.choices[0].message.content
         parsed = json.loads(content)
 
-        reply = parsed.get("reply", "I'd love to help you create a brief! What kind of video project are you working on?")
+        fallback_reply = (
+            "I'd love to help you create a brief!"
+            " What kind of video project are you"
+            " working on?"
+        )
+        reply = parsed.get("reply", fallback_reply)
         new_fields = parsed.get("extracted_fields", {})
         is_complete = parsed.get("is_complete", False)
 
@@ -237,17 +298,33 @@ def chat_node(state: BriefChatState) -> dict:
 
     except json.JSONDecodeError:
         logger.exception("Failed to parse OpenAI response as JSON")
+        parse_error_reply = (
+            "I'd love to help you create a brief!"
+            " Could you tell me about your video"
+            " project?"
+        )
         return {
-            "reply": "I'd love to help you create a brief! Could you tell me about your video project?",
+            "reply": parse_error_reply,
             "is_complete": False,
-            "messages": [{"role": "assistant", "content": "I'd love to help you create a brief! Could you tell me about your video project?"}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": parse_error_reply,
+                }
+            ],
         }
     except Exception:
         logger.exception("Error in chat node")
+        error_reply = "I encountered a temporary issue. Could you please try again?"
         return {
-            "reply": "I encountered a temporary issue. Could you please try again?",
+            "reply": error_reply,
             "is_complete": False,
-            "messages": [{"role": "assistant", "content": "I encountered a temporary issue. Could you please try again?"}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": error_reply,
+                }
+            ],
         }
 
 
@@ -277,9 +354,14 @@ def finalize_node(state: BriefChatState) -> dict:
         "territory": fields.get("territory", []),
         "collaborators": fields.get("collaborators", []),
         "term": fields.get("term", {"length": "", "unit": ""}),
-        "mainVideoDuration": fields.get("mainVideoDuration", {"number": "", "length": "", "timeUnit": "sec", "comment": ""}),
+        "mainVideoDuration": fields.get(
+            "mainVideoDuration",
+            {"number": "", "length": "", "timeUnit": "sec", "comment": ""},
+        ),
         "cuts": fields.get("cuts", []),
-        "shootingDays": fields.get("shootingDays", {"number": "", "length": "", "comment": "", "timeUnit": ""}),
+        "shootingDays": fields.get(
+            "shootingDays", {"number": "", "length": "", "comment": "", "timeUnit": ""}
+        ),
         "estimationTemplate": fields.get("estimationTemplate", ""),
         "budget": fields.get("budget", 0),
         "visibleForVendors": fields.get("visibleForVendors", True),
@@ -299,7 +381,9 @@ def _build_chat_graph():
     builder.add_node("finalize", finalize_node)
 
     builder.set_entry_point("chat")
-    builder.add_conditional_edges("chat", should_end, {"finalize": "finalize", END: END})
+    builder.add_conditional_edges(
+        "chat", should_end, {"finalize": "finalize", END: END}
+    )
     builder.add_edge("finalize", END)
 
     return builder.compile()
@@ -323,12 +407,15 @@ def _get_chat_graph():
 # ==================== Public API ====================
 
 
-def process_chat_message(user_message: str, history: list, extracted_fields: dict | None = None) -> dict:
+def process_chat_message(
+    user_message: str, history: list, extracted_fields: dict | None = None
+) -> dict:
     """Process a user message in the brief creation chat.
 
     Args:
         user_message: The user's latest message
-        history: List of previous messages [{"role": "user"|"assistant", "content": "..."}]
+        history: List of previous messages
+            [{"role": "user"|"assistant", "content": "..."}]
         extracted_fields: Previously extracted brief fields
 
     Returns:
@@ -341,12 +428,13 @@ def process_chat_message(user_message: str, history: list, extracted_fields: dic
     graph = _get_chat_graph()
 
     # QA4-025: Sanitize history — only allow valid roles and limit to last 20 messages
-    safe_history = []
-    if history:
-        for msg in history:
-            if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and isinstance(msg.get("content"), str):
-                safe_history.append({"role": msg["role"], "content": msg["content"]})
-        safe_history = safe_history[-20:]
+    safe_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in (history or [])
+        if isinstance(msg, dict)
+        and msg.get("role") in ("user", "assistant")
+        and isinstance(msg.get("content"), str)
+    ][-20:]
 
     # Build messages list from sanitized history + new message
     messages = safe_history
@@ -363,7 +451,9 @@ def process_chat_message(user_message: str, history: list, extracted_fields: dic
 
     return {
         "reply": result.get("reply", ""),
-        "brief_data": result.get("extracted_fields") if result.get("is_complete") else None,
+        "brief_data": result.get("extracted_fields")
+        if result.get("is_complete")
+        else None,
         "is_complete": result.get("is_complete", False),
         "extracted_fields": result.get("extracted_fields", {}),
     }
@@ -387,7 +477,13 @@ def analyze_brief(brief_data: dict) -> dict:
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Analyze this video production brief:\n{json.dumps(brief_data, indent=2)}"},
+                {
+                    "role": "user",
+                    "content": (
+                        "Analyze this video production"
+                        " brief:\n" + json.dumps(brief_data, indent=2)
+                    ),
+                },
             ],
             temperature=0.5,
             max_tokens=1000,
@@ -411,7 +507,9 @@ def analyze_brief(brief_data: dict) -> dict:
         }
 
 
-def analyze_comparison(brief_data: dict, comparison_data: dict, question: str | None = None) -> dict:
+def analyze_comparison(
+    brief_data: dict, comparison_data: dict, question: str | None = None
+) -> dict:
     """Analyze and compare vendor offers using AI.
 
     Args:
@@ -460,6 +558,8 @@ def analyze_comparison(brief_data: dict, comparison_data: dict, question: str | 
     except Exception:
         logger.exception("Error analyzing comparison")
         return {
-            "analysis": "Unable to analyze the comparison at this time. Please try again.",
+            "analysis": (
+                "Unable to analyze the comparison at this time. Please try again."
+            ),
             "highlights": [],
         }

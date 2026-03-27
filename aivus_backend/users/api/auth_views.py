@@ -14,9 +14,10 @@ from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.users.emails import send_confirmation_email
-from aivus_backend.users.emails import send_google_welcome_email
 from aivus_backend.users.emails import send_password_reset_email
-from aivus_backend.users.models import User, Vendor, Client
+from aivus_backend.users.models import Client
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
 
@@ -26,15 +27,17 @@ except ImportError:
     from django.conf import settings as django_settings
 
     if not django_settings.DEBUG:
-        raise ImportError(
+        msg = (
             "django-ratelimit is required in production but not installed. "
             "Run: pip install django-ratelimit"
         )
+        raise ImportError(msg) from None
 
     # Fallback: no-op decorator only in DEBUG mode
-    def ratelimit(**kwargs):  # noqa: ARG001
+    def ratelimit(**kwargs):
         def decorator(func):
             return func
+
         return decorator
 
 
@@ -42,6 +45,7 @@ def generate_temporary_password(length: int = 12) -> str:
     """Generate a secure temporary password."""
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +127,8 @@ def register(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Register error: %s", e)
+    except Exception:
+        logger.exception("Register error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -132,7 +136,7 @@ def register(request):
 @require_http_methods(["POST"])
 @public_endpoint
 @ratelimit(key="ip", rate="5/m", method="POST", block=True)
-def login(request):
+def login(request):  # noqa: C901
     """
     Login user.
 
@@ -166,24 +170,28 @@ def login(request):
         # Google authentication must go through OAuth flow, not direct login
         if auth_type == "GOOGLE":
             return JsonResponse(
-                {"error": "Google authentication must go through OAuth flow, not direct login"},
+                {
+                    "error": (
+                        "Google authentication must go through"
+                        " OAuth flow, not direct login"
+                    )
+                },
                 status=400,
             )
-        else:
-            # Handle credential login - require password
-            if not password:
-                logger.debug("No password provided for credential login")
-                return JsonResponse(
-                    {"error": "Password is required"},
-                    status=400,
-                )
-            logger.debug("Checking password for user: %s", user.email)
+        # Handle credential login - require password
+        if not password:
+            logger.debug("No password provided for credential login")
+            return JsonResponse(
+                {"error": "Password is required"},
+                status=400,
+            )
+        logger.debug("Checking password for user: %s", user.email)
 
-            password_valid = user.check_plain_password(password)
-            logger.debug("Password validation result: %s", password_valid)
+        password_valid = user.check_plain_password(password)
+        logger.debug("Password validation result: %s", password_valid)
 
-            if not password_valid:
-                return JsonResponse({"error": "Invalid credentials"}, status=401)
+        if not password_valid:
+            return JsonResponse({"error": "Invalid credentials"}, status=401)
 
         # Prepare common response data
         response_data = {
@@ -207,8 +215,8 @@ def login(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Login error: %s", e)
+    except Exception:
+        logger.exception("Login error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -266,8 +274,8 @@ def confirm_email(request):
             status=200,
         )
 
-    except Exception as e:
-        logger.exception("Confirm email error: %s", e)
+    except Exception:
+        logger.exception("Confirm email error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -313,8 +321,8 @@ def check_email(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Check email error: %s", e)
+    except Exception:
+        logger.exception("Check email error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -352,15 +360,18 @@ def forgot_password(request):
 
         return JsonResponse(
             {
-                "message": "If an account with that email exists, a password reset link has been sent.",
+                "message": (
+                    "If an account with that email exists,"
+                    " a password reset link has been sent."
+                ),
             },
             status=200,
         )
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Forgot password error: %s", e)
+    except Exception:
+        logger.exception("Forgot password error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -406,15 +417,19 @@ def resend_confirmation(request):
 
         return JsonResponse(
             {
-                "message": "If an account with that email exists and is unconfirmed, a confirmation email has been sent.",
+                "message": (
+                    "If an account with that email exists"
+                    " and is unconfirmed, a confirmation"
+                    " email has been sent."
+                ),
             },
             status=200,
         )
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Resend confirmation error: %s", e)
+    except Exception:
+        logger.exception("Resend confirmation error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 
@@ -473,6 +488,6 @@ def reset_password(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
-        logger.exception("Reset password error: %s", e)
+    except Exception:
+        logger.exception("Reset password error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)

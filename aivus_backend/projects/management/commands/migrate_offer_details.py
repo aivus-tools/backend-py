@@ -75,9 +75,7 @@ class Command(BaseCommand):
                 )
                 success += 1
             except Exception as e:
-                self.stdout.write(
-                    self.style.ERROR(f"  ERROR {offer.id}: {e}")
-                )
+                self.stdout.write(self.style.ERROR(f"  ERROR {offer.id}: {e}"))
                 logger.exception("Error migrating offer %s", offer.id)
                 errors += 1
 

@@ -244,9 +244,7 @@ class TestProjectsAPI:
     def test_get_project_detail(self, api_client, vendor_user, vendor, project):
         """GET /projects/<id> should return project details."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            f"/api/v1/projects/{project.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/projects/{project.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["id"] == str(project.id)
@@ -272,9 +270,7 @@ class TestProjectsAPI:
     def test_delete_project(self, api_client, vendor_user, vendor, project):
         """DELETE /projects/<id> should soft delete."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.delete(
-            f"/api/v1/projects/{project.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/projects/{project.id}", **headers)
         assert response.status_code == 200
         # Verify soft delete
         project.refresh_from_db()
@@ -287,14 +283,10 @@ class TestProjectsAPI:
         headers = _auth_headers(vendor_user, "VENDOR")
         project.deleted_at = timezone.now()
         project.save()
-        response = api_client.get(
-            f"/api/v1/projects/{project.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/projects/{project.id}", **headers)
         assert response.status_code == 404
 
-    def test_create_project_with_collaborators(
-        self, api_client, vendor_user, vendor
-    ):
+    def test_create_project_with_collaborators(self, api_client, vendor_user, vendor):
         """POST /projects with collaborators should create them."""
         headers = _auth_headers(vendor_user, "VENDOR")
         payload = {
@@ -324,9 +316,7 @@ class TestProjectsAPI:
         data = json.loads(response.content)
         assert len(data["collaborators"]) == 2
 
-    def test_create_project_with_client_managers(
-        self, api_client, vendor_user, vendor
-    ):
+    def test_create_project_with_client_managers(self, api_client, vendor_user, vendor):
         """POST /projects with client managers should create them."""
         headers = _auth_headers(vendor_user, "VENDOR")
         payload = {
@@ -352,9 +342,7 @@ class TestProjectsAPI:
         """GET /projects/<random-uuid> should return 404."""
         headers = _auth_headers(vendor_user, "VENDOR")
         fake_id = uuid.uuid4()
-        response = api_client.get(
-            f"/api/v1/projects/{fake_id}", **headers
-        )
+        response = api_client.get(f"/api/v1/projects/{fake_id}", **headers)
         assert response.status_code == 404
 
 
@@ -401,9 +389,7 @@ class TestOffersAPI:
     def test_get_offer_detail(self, api_client, vendor_user, vendor, offer):
         """GET /offers/<id> should return offer details."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            f"/api/v1/offers/{offer.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers/{offer.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["id"] == str(offer.id)
@@ -428,21 +414,15 @@ class TestOffersAPI:
     def test_delete_offer(self, api_client, vendor_user, vendor, offer):
         """DELETE /offers/<id> should soft delete."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.delete(
-            f"/api/v1/offers/{offer.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/offers/{offer.id}", **headers)
         assert response.status_code == 200
         offer.refresh_from_db()
         assert offer.deleted_at is not None
 
-    def test_offers_by_project(
-        self, api_client, vendor_user, vendor, project, offer
-    ):
+    def test_offers_by_project(self, api_client, vendor_user, vendor, project, offer):
         """GET /offers/project/<id> should return offers for project."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            f"/api/v1/offers/project/{project.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers/project/{project.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert isinstance(data, list)
@@ -453,9 +433,7 @@ class TestOffersAPI:
     ):
         """GET /offers?projectId=<id> should filter offers."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            f"/api/v1/offers?projectId={project.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers?projectId={project.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert all(o["projectId"] == str(project.id) for o in data)
@@ -510,9 +488,7 @@ class TestBriefsAPI:
     def test_get_brief_detail(self, api_client, client_user, client_entity, brief):
         """GET /briefs/<id> should return brief details (requires client ownership)."""
         headers = _auth_headers(client_user, "CLIENT")
-        response = api_client.get(
-            f"/api/v1/briefs/{brief.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/briefs/{brief.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["id"] == str(brief.id)
@@ -538,9 +514,7 @@ class TestBriefsAPI:
     def test_delete_brief(self, api_client, client_user, client_entity, brief):
         """DELETE /briefs/<id> should soft delete (requires client ownership)."""
         headers = _auth_headers(client_user, "CLIENT")
-        response = api_client.delete(
-            f"/api/v1/briefs/{brief.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/briefs/{brief.id}", **headers)
         assert response.status_code == 200
         brief.refresh_from_db()
         assert brief.deleted_at is not None

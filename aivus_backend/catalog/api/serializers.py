@@ -7,7 +7,9 @@ def serialize_category(category):
         "id": str(category.id),
         "name": category.name,
         "level": category.level,
-        "parentCategoryId": str(category.parent_category_id) if category.parent_category_id else None,
+        "parentCategoryId": str(category.parent_category_id)
+        if category.parent_category_id
+        else None,
         "tags": category.tags or [],
     }
 
@@ -34,7 +36,7 @@ def serialize_entry_unit(entry_unit):
     }
 
 
-def serialize_entry(entry, include_units=True):
+def serialize_entry(entry, include_units=True):  # noqa: FBT002
     """Serialize Entry model to dict."""
     data = {
         "id": str(entry.id),
@@ -64,4 +66,3 @@ def serialize_entry(entry, include_units=True):
         }
 
     return data
-

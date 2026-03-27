@@ -11,7 +11,6 @@ Tests cover:
 import json
 
 import pytest
-from django.conf import settings
 from django.test import Client as DjangoTestClient
 
 from aivus_backend.users.models import User
@@ -63,10 +62,12 @@ class TestGoogleOAuthLoginBypass:
         """Sending authType=GOOGLE should be rejected — not allow direct login."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": google_user.email,
-                "authType": "GOOGLE",
-            }),
+            data=json.dumps(
+                {
+                    "email": google_user.email,
+                    "authType": "GOOGLE",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -77,10 +78,12 @@ class TestGoogleOAuthLoginBypass:
         """Google auth without OAuth token should never return user data."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": google_user.email,
-                "authType": "GOOGLE",
-            }),
+            data=json.dumps(
+                {
+                    "email": google_user.email,
+                    "authType": "GOOGLE",
+                }
+            ),
             content_type="application/json",
         )
         data = json.loads(response.content)
@@ -92,11 +95,13 @@ class TestGoogleOAuthLoginBypass:
         """Attacker using Google auth type with victim's email must be rejected."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": google_user.email,
-                "authType": "GOOGLE",
-                "password": "",
-            }),
+            data=json.dumps(
+                {
+                    "email": google_user.email,
+                    "authType": "GOOGLE",
+                    "password": "",
+                }
+            ),
             content_type="application/json",
         )
         # Must NOT return 200 with user data
@@ -116,28 +121,34 @@ class TestRegistrationPasswordValidation:
         """Registration with empty password should return 400."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "newuser@example.com",
-                "password": "",
-                "name": "New User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "newuser@example.com",
+                    "password": "",
+                    "name": "New User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
         data = json.loads(response.content)
-        assert "password" in data.get("error", "").lower() or "8" in data.get("error", "")
+        assert "password" in data.get("error", "").lower() or "8" in data.get(
+            "error", ""
+        )
 
     def test_register_short_password_rejected(self, api_client, db):
         """Registration with password < 8 chars should return 400."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "shortpwd@example.com",
-                "password": "abc",
-                "name": "Short Pwd User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "shortpwd@example.com",
+                    "password": "abc",
+                    "name": "Short Pwd User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -146,11 +157,13 @@ class TestRegistrationPasswordValidation:
         """Registration without password field should return 400."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "nopwd@example.com",
-                "name": "No Pwd User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "nopwd@example.com",
+                    "name": "No Pwd User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -159,12 +172,14 @@ class TestRegistrationPasswordValidation:
         """Registration with password >= 8 chars should succeed."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "goodpwd@example.com",
-                "password": "validpass123",
-                "name": "Good Pwd User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "goodpwd@example.com",
+                    "password": "validpass123",
+                    "name": "Good Pwd User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 201
@@ -173,12 +188,14 @@ class TestRegistrationPasswordValidation:
         """Registration with exactly 7 chars should be rejected (boundary)."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "boundary@example.com",
-                "password": "1234567",
-                "name": "Boundary User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "boundary@example.com",
+                    "password": "1234567",
+                    "name": "Boundary User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -187,18 +204,20 @@ class TestRegistrationPasswordValidation:
         """Registration with a strong 8+ char password should succeed."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "eightchar@example.com",
-                "password": "Str0ngP@ss",
-                "name": "Eight Char User",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "eightchar@example.com",
+                    "password": "Str0ngP@ss",
+                    "name": "Eight Char User",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 201
 
 
-# ==================== BUG-019: User enumeration via forgot_password ====================
+# ==================== BUG-019: User enumeration ====================
 
 
 class TestForgotPasswordEnumeration:
@@ -208,7 +227,9 @@ class TestForgotPasswordEnumeration:
     The fix should return 200 with a generic message in both cases.
     """
 
-    def test_forgot_password_existing_email_returns_200(self, api_client, credentials_user):
+    def test_forgot_password_existing_email_returns_200(
+        self, api_client, credentials_user
+    ):
         """Existing email should return 200 with generic message."""
         response = api_client.post(
             "/api/v1/auth/forgot-password",
@@ -230,8 +251,10 @@ class TestForgotPasswordEnumeration:
         data = json.loads(response.content)
         assert "message" in data
 
-    def test_forgot_password_same_response_shape(self, api_client, credentials_user, db):
-        """Both existing and non-existing emails must return identical response structure."""
+    def test_forgot_password_same_response_shape(
+        self, api_client, credentials_user, db
+    ):
+        """Both existing and non-existing emails return identical response."""
         response_existing = api_client.post(
             "/api/v1/auth/forgot-password",
             data=json.dumps({"email": credentials_user.email}),
@@ -250,7 +273,7 @@ class TestForgotPasswordEnumeration:
         assert response_existing.status_code == response_nonexistent.status_code
 
 
-# ==================== BUG-034: reset_password minimum password length ====================
+# ==================== BUG-034: reset_password min length ====================
 
 
 class TestResetPasswordValidation:
@@ -329,11 +352,13 @@ class TestLoginCredentials:
         """Login with correct email/password should return 200 with user data."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": credentials_user.email,
-                "password": "securepass123",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": credentials_user.email,
+                    "password": "securepass123",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 200
@@ -345,11 +370,13 @@ class TestLoginCredentials:
         """Login with wrong password should return 401."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": credentials_user.email,
-                "password": "wrongpassword",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": credentials_user.email,
+                    "password": "wrongpassword",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 401
@@ -358,11 +385,13 @@ class TestLoginCredentials:
         """Login with non-existent email should return 401."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": "nonexistent@example.com",
-                "password": "anypassword",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "nonexistent@example.com",
+                    "password": "anypassword",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 401
@@ -371,10 +400,12 @@ class TestLoginCredentials:
         """Login without password should return 400."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": credentials_user.email,
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": credentials_user.email,
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -383,10 +414,12 @@ class TestLoginCredentials:
         """Login without email should return 400."""
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "password": "somepassword",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "password": "somepassword",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400

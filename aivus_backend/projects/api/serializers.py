@@ -1,7 +1,7 @@
 """Serializers for projects API."""
 
-from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import OfferDeliverable
@@ -48,7 +48,7 @@ def serialize_client_manager(manager: ClientManager) -> dict:
     }
 
 
-def serialize_project(project: Project, include_relations: bool = True) -> dict:
+def serialize_project(project: Project, include_relations: bool = True) -> dict:  # noqa: FBT001, FBT002
     """Serialize Project model to dict."""
     result = {
         "id": str(project.id),
@@ -61,7 +61,8 @@ def serialize_project(project: Project, include_relations: bool = True) -> dict:
         "crmId": project.crm_id,
         "description": project.description,
         "clientId": str(project.client_id) if project.client_id else None,
-        "clientName": project.client_name or (project.client.name if project.client else None),
+        "clientName": project.client_name
+        or (project.client.name if project.client else None),
         "irsEin": project.irs_ein,
         "brandName": project.brand_name,
         "agencyName": project.agency_name,
@@ -120,8 +121,14 @@ def _serialize_offer_meta_fields(offer: Offer) -> dict:
         "postMarkupPercent": str(offer.post_markup_percent),
         "postInsurancePercent": str(offer.post_insurance_percent),
         "postTaxPercent": str(offer.post_tax_percent),
-        "deliverables": [serialize_offer_deliverable(x) for x in offer.deliverables.filter(deleted_at__isnull=True)],
-        "scheduleEntries": [serialize_offer_schedule_entry(x) for x in offer.schedule_entries.filter(deleted_at__isnull=True)],
+        "deliverables": [
+            serialize_offer_deliverable(x)
+            for x in offer.deliverables.filter(deleted_at__isnull=True)
+        ],
+        "scheduleEntries": [
+            serialize_offer_schedule_entry(x)
+            for x in offer.schedule_entries.filter(deleted_at__isnull=True)
+        ],
     }
 
 
@@ -229,7 +236,9 @@ def serialize_brief_offer(brief_offer: BriefOffer) -> dict:
         "briefId": str(brief_offer.brief_id),
         "offerId": str(brief_offer.offer_id),
         "linkedBy": str(brief_offer.linked_by_id) if brief_offer.linked_by_id else None,
-        "createdAt": brief_offer.created_at.isoformat() if brief_offer.created_at else None,
+        "createdAt": brief_offer.created_at.isoformat()
+        if brief_offer.created_at
+        else None,
     }
 
 
@@ -239,7 +248,9 @@ def serialize_template(template: Template) -> dict:
         "id": str(template.id),
         "name": template.name,
         "vendorId": str(template.vendor_id),
-        "sourceOfferId": str(template.source_offer_id) if template.source_offer_id else None,
+        "sourceOfferId": str(template.source_offer_id)
+        if template.source_offer_id
+        else None,
         "details": template.details,
         "description": template.description,
         "metadata": template.metadata,
@@ -263,7 +274,7 @@ def serialize_rate_card_item(item: RateCardItem) -> dict:
     }
 
 
-def serialize_rate_card(rate_card: RateCard, include_items: bool = True) -> dict:
+def serialize_rate_card(rate_card: RateCard, include_items: bool = True) -> dict:  # noqa: FBT001, FBT002
     """Serialize RateCard model to dict."""
     result = {
         "id": str(rate_card.id),
@@ -342,4 +353,3 @@ def serialize_brief_detail(brief: Brief) -> dict:
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
     }
-

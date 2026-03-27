@@ -24,6 +24,8 @@ from .models import Share
 from .models import SimpleRate
 from .models import Template
 
+CONTENT_PREVIEW_LENGTH = 80
+
 
 @admin.register(Brief)
 class BriefAdmin(ModelAdmin):
@@ -72,22 +74,37 @@ class ProjectAdmin(ModelAdmin):
     ordering = ["-created_at"]
 
     fieldsets = (
-        ("Basic Info", {
-            "fields": ("name", "vendor", "status", "crm_id", "description"),
-        }),
-        ("Client Info", {
-            "fields": ("client", "irs_ein", "brand_name"),
-        }),
-        ("Media", {
-            "fields": ("thumbnail",),
-        }),
-        ("Relations", {
-            "fields": ("brief", "team"),
-        }),
-        ("Timestamps", {
-            "fields": ("created_at", "updated_at", "deleted_at"),
-            "classes": ("collapse",),
-        }),
+        (
+            "Basic Info",
+            {
+                "fields": ("name", "vendor", "status", "crm_id", "description"),
+            },
+        ),
+        (
+            "Client Info",
+            {
+                "fields": ("client", "irs_ein", "brand_name"),
+            },
+        ),
+        (
+            "Media",
+            {
+                "fields": ("thumbnail",),
+            },
+        ),
+        (
+            "Relations",
+            {
+                "fields": ("brief", "team"),
+            },
+        ),
+        (
+            "Timestamps",
+            {
+                "fields": ("created_at", "updated_at", "deleted_at"),
+                "classes": ("collapse",),
+            },
+        ),
     )
 
     inlines = [ProjectCollaboratorInline, ClientManagerInline]
@@ -152,21 +169,35 @@ class OfferAdminForm(forms.ModelForm):
 
     class Meta:
         model = Offer
-        fields = "__all__"
+        fields = "__all__"  # noqa: DJ007
 
 
 class OfferDeliverableInline(admin.TabularInline):
     model = OfferDeliverable
     extra = 0
     readonly_fields = ["created_at"]
-    fields = ["quantity", "duration", "duration_unit", "notes", "sort_order", "created_at"]
+    fields = [
+        "quantity",
+        "duration",
+        "duration_unit",
+        "notes",
+        "sort_order",
+        "created_at",
+    ]
 
 
 class OfferScheduleEntryInline(admin.TabularInline):
     model = OfferScheduleEntry
     extra = 0
     readonly_fields = ["created_at"]
-    fields = ["phase_type", "days", "hours_per_day", "notes", "sort_order", "created_at"]
+    fields = [
+        "phase_type",
+        "days",
+        "hours_per_day",
+        "notes",
+        "sort_order",
+        "created_at",
+    ]
 
 
 @admin.register(Offer)
@@ -207,10 +238,13 @@ class OfferAdmin(ModelAdmin):
 
     @admin.display(description="Details")
     def pretty_details(self, instance):
-        return mark_safe(
-            f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
-            f'{json.dumps(instance.details, indent=4, ensure_ascii=True)}'
-            f'</pre>'
+        pre_style = (
+            "background: #f1f1f1; padding: 10px;"
+            " border: 1px solid #ddd; border-radius: 4px;"
+        )
+        content = json.dumps(instance.details, indent=4, ensure_ascii=True)
+        return mark_safe(  # noqa: S308
+            f'<pre style="{pre_style}">{content}</pre>'
         )
 
 
@@ -218,7 +252,15 @@ class OfferAdmin(ModelAdmin):
 class OfferEntryAdmin(ModelAdmin):
     """OfferEntry admin configuration."""
 
-    list_display = ["offer", "item_name", "entry", "price", "cost", "sort_order", "created_at"]
+    list_display = [
+        "offer",
+        "item_name",
+        "entry",
+        "price",
+        "cost",
+        "sort_order",
+        "created_at",
+    ]
     search_fields = ["offer__project_name", "item_name", "frontend_id"]
     list_filter = ["show_tax", "is_linked_surcharge", "created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
@@ -243,7 +285,14 @@ class OfferRateAdmin(ModelAdmin):
 
 @admin.register(OfferDeliverable)
 class OfferDeliverableAdmin(ModelAdmin):
-    list_display = ["offer", "quantity", "duration", "duration_unit", "sort_order", "created_at"]
+    list_display = [
+        "offer",
+        "quantity",
+        "duration",
+        "duration_unit",
+        "sort_order",
+        "created_at",
+    ]
     search_fields = ["offer__project_name"]
     list_filter = ["created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
@@ -252,7 +301,14 @@ class OfferDeliverableAdmin(ModelAdmin):
 
 @admin.register(OfferScheduleEntry)
 class OfferScheduleEntryAdmin(ModelAdmin):
-    list_display = ["offer", "phase_type", "days", "hours_per_day", "sort_order", "created_at"]
+    list_display = [
+        "offer",
+        "phase_type",
+        "days",
+        "hours_per_day",
+        "sort_order",
+        "created_at",
+    ]
     search_fields = ["offer__project_name", "phase_type"]
     list_filter = ["created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
@@ -307,10 +363,13 @@ class TemplateAdmin(ModelAdmin):
 
     @admin.display(description="Details")
     def pretty_details(self, instance):
-        return mark_safe(
-            f'<pre style="background: #f1f1f1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">'
-            f'{json.dumps(instance.details, indent=4, ensure_ascii=True)}'
-            f'</pre>'
+        pre_style = (
+            "background: #f1f1f1; padding: 10px;"
+            " border: 1px solid #ddd; border-radius: 4px;"
+        )
+        content = json.dumps(instance.details, indent=4, ensure_ascii=True)
+        return mark_safe(  # noqa: S308
+            f'<pre style="{pre_style}">{content}</pre>'
         )
 
 
@@ -362,4 +421,8 @@ class ChatMessageAdmin(ModelAdmin):
 
     @admin.display(description="Content")
     def content_short(self, instance):
-        return instance.content[:80] + "..." if len(instance.content) > 80 else instance.content
+        return (
+            instance.content[:CONTENT_PREVIEW_LENGTH] + "..."
+            if len(instance.content) > CONTENT_PREVIEW_LENGTH
+            else instance.content
+        )

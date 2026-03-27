@@ -86,7 +86,9 @@ class HMACAuthenticationMiddleware(MiddlewareMixin):
         if request.META.get("QUERY_STRING"):
             path_with_query = f"{request.path}?{request.META['QUERY_STRING']}"
 
-        message = f"{request.method}:{path_with_query}:{timestamp}:{user_id}:{user_group}"
+        message = (
+            f"{request.method}:{path_with_query}:{timestamp}:{user_id}:{user_group}"
+        )
         expected_signature = hmac.new(
             settings.HMAC_SECRET.encode(),
             message.encode(),
@@ -110,9 +112,15 @@ class HMACAuthenticationMiddleware(MiddlewareMixin):
         signature = request.headers.get("X-Signature")
 
         # Try API Key authentication first
-        if api_key and user_id and hmac.compare_digest(
-            api_key.encode() if isinstance(api_key, str) else api_key,
-            settings.API_KEY.encode() if isinstance(settings.API_KEY, str) else settings.API_KEY,
+        if (
+            api_key
+            and user_id
+            and hmac.compare_digest(
+                api_key.encode() if isinstance(api_key, str) else api_key,
+                settings.API_KEY.encode()
+                if isinstance(settings.API_KEY, str)
+                else settings.API_KEY,
+            )
         ):
             try:
                 user = User.objects.get(id=user_id)

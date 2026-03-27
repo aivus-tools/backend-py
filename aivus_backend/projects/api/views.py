@@ -4,8 +4,8 @@ import json
 import logging
 import uuid as uuid_module
 from collections import defaultdict
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
 from decimal import Decimal
 
 import openpyxl
@@ -21,17 +21,25 @@ except ImportError:
     from django.conf import settings as django_settings
 
     if not django_settings.DEBUG:
-        raise ImportError(
+        msg = (
             "django-ratelimit is required in production but not installed. "
             "Run: pip install django-ratelimit"
         )
+        raise ImportError(msg) from None
 
     # Fallback: no-op decorator only in DEBUG mode
-    def ratelimit(**kwargs):  # noqa: ARG001
+    def ratelimit(**kwargs):
         def decorator(func):
             return func
+
         return decorator
 
+
+import contextlib
+
+from django.utils import timezone as tz
+
+from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.catalog.models import Unit
 from aivus_backend.core.decorators import public_endpoint
@@ -80,14 +88,17 @@ from aivus_backend.users.models import VendorSettings
 
 logger = logging.getLogger(__name__)
 
+MAX_REQUEST_BODY_SIZE = 1_000_000
+
 
 def _validate_uuid(value, field_name="id"):
     """Validate and return a UUID string. Raises ValueError if invalid."""
     try:
         uuid_module.UUID(str(value))
         return str(value)
-    except (ValueError, AttributeError):
-        raise ValueError(f"Invalid UUID format for {field_name}")
+    except (ValueError, AttributeError) as exc:
+        msg = f"Invalid UUID format for {field_name}"
+        raise ValueError(msg) from exc
 
 
 # ==================== Projects API ====================
@@ -96,7 +107,7 @@ def _validate_uuid(value, field_name="id"):
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def projects_list(request):
+def projects_list(request):  # noqa: C901, PLR0912, PLR0915
     """List all projects or create a new one."""
     if request.method == "GET":
         # QA3-009: Use authenticated user_data instead of raw header
@@ -104,9 +115,13 @@ def projects_list(request):
         if not vendor_id:
             return JsonResponse({"error": "Vendor ID required"}, status=400)
 
-        projects = Project.objects.filter(
-            vendor_id=vendor_id,
-        ).select_related("client").prefetch_related("collaborators", "client_managers")
+        projects = (
+            Project.objects.filter(
+                vendor_id=vendor_id,
+            )
+            .select_related("client")
+            .prefetch_related("collaborators", "client_managers")
+        )
         return JsonResponse([serialize_project(p) for p in projects], safe=False)
 
     if request.method == "POST":
@@ -122,7 +137,12 @@ def projects_list(request):
             valid_statuses = [s.value for s in ProjectStatus]
             if status not in valid_statuses:
                 return JsonResponse(
-                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    {
+                        "error": (
+                            f"Invalid status. Must be one of:"
+                            f" {', '.join(valid_statuses)}"
+                        )
+                    },
                     status=400,
                 )
 
@@ -172,7 +192,9 @@ def projects_list(request):
                 try:
                     team = Team.objects.get(id=team_id)
                 except Team.DoesNotExist:
-                    logger.warning("Team %s not found, creating project without team", team_id)
+                    logger.warning(
+                        "Team %s not found, creating project without team", team_id
+                    )
 
             # Verify brief exists if provided
             brief = None
@@ -210,10 +232,8 @@ def projects_list(request):
                 user = None
                 user_id = collab.get("userId")
                 if user_id:
-                    try:
+                    with contextlib.suppress(User.DoesNotExist):
                         user = User.objects.get(id=user_id)
-                    except User.DoesNotExist:
-                        pass  # Allow creating collaborator without user link
 
                 ProjectCollaborator.objects.create(
                     project=project,
@@ -235,7 +255,7 @@ def projects_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating project")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -251,9 +271,15 @@ def projects_archived(request):
     if not vendor_id:
         return JsonResponse({"error": "Vendor ID required"}, status=400)
 
-    projects = Project.objects.all_with_deleted().filter(
-        vendor_id=vendor_id, deleted_at__isnull=False,
-    ).select_related("client").prefetch_related("collaborators", "client_managers")
+    projects = (
+        Project.objects.all_with_deleted()
+        .filter(
+            vendor_id=vendor_id,
+            deleted_at__isnull=False,
+        )
+        .select_related("client")
+        .prefetch_related("collaborators", "client_managers")
+    )
     return JsonResponse([serialize_project(p) for p in projects], safe=False)
 
 
@@ -267,7 +293,9 @@ def project_restore(request, project_id):
         return JsonResponse({"error": "Vendor ID required"}, status=400)
     try:
         project = Project.objects.all_with_deleted().get(
-            id=project_id, vendor_id=vendor_id, deleted_at__isnull=False,
+            id=project_id,
+            vendor_id=vendor_id,
+            deleted_at__isnull=False,
         )
     except Project.DoesNotExist:
         return JsonResponse({"error": "Archived project not found"}, status=404)
@@ -278,7 +306,7 @@ def project_restore(request, project_id):
 @csrf_exempt
 @require_http_methods(["GET", "PUT", "PATCH", "DELETE"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def project_detail(request, project_id):
+def project_detail(request, project_id):  # noqa: C901, PLR0912, PLR0915
     """Get, update, or delete a specific project."""
     try:
         project = Project.objects.get(id=project_id)
@@ -304,7 +332,12 @@ def project_detail(request, project_id):
                 valid_statuses = [s.value for s in ProjectStatus]
                 if data["status"] not in valid_statuses:
                     return JsonResponse(
-                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        {
+                            "error": (
+                                f"Invalid status. Must be one of:"
+                                f" {', '.join(valid_statuses)}"
+                            )
+                        },
                         status=400,
                     )
                 project.status = data["status"]
@@ -359,10 +392,8 @@ def project_detail(request, project_id):
                         user = None
                         user_id = collab.get("userId")
                         if user_id:
-                            try:
+                            with contextlib.suppress(User.DoesNotExist):
                                 user = User.objects.get(id=user_id)
-                            except User.DoesNotExist:
-                                pass
 
                         ProjectCollaborator.objects.create(
                             project=project,
@@ -389,12 +420,12 @@ def project_detail(request, project_id):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error updating project")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
-        project.deleted_at = datetime.now(timezone.utc)
+        project.deleted_at = datetime.now(UTC)
         project.save()
         return JsonResponse({"message": "Project deleted"}, status=200)
 
@@ -436,9 +467,11 @@ def project_thumbnail(request, project_id):
     project.thumbnail = file
     project.save()
 
-    return JsonResponse({
-        "thumbnailUrl": project.thumbnail.url if project.thumbnail else None,
-    })
+    return JsonResponse(
+        {
+            "thumbnailUrl": project.thumbnail.url if project.thumbnail else None,
+        }
+    )
 
 
 # ==================== Briefs API ====================
@@ -455,7 +488,9 @@ def briefs_list(request):
         user_vendor_id = request.user_data.get("vendor_id")
 
         if user_group == "CLIENT" and user_client_id:
-            briefs = Brief.objects.filter(client_id=user_client_id, deleted_at__isnull=True)
+            briefs = Brief.objects.filter(
+                client_id=user_client_id, deleted_at__isnull=True
+            )
         elif user_group == "VENDOR" and user_vendor_id:
             briefs = Brief.objects.filter(
                 projects__vendor_id=user_vendor_id,
@@ -479,7 +514,12 @@ def briefs_list(request):
             valid_statuses = [s.value for s in BriefStatus]
             if status not in valid_statuses:
                 return JsonResponse(
-                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    {
+                        "error": (
+                            f"Invalid status. Must be one of:"
+                            f" {', '.join(valid_statuses)}"
+                        )
+                    },
                     status=400,
                 )
 
@@ -498,7 +538,7 @@ def briefs_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating brief")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -508,7 +548,7 @@ def briefs_list(request):
 @csrf_exempt
 @require_http_methods(["GET", "PUT", "PATCH", "DELETE"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def brief_detail(request, brief_id):
+def brief_detail(request, brief_id):  # noqa: C901, PLR0912
     """Get, update, or delete a specific brief."""
     try:
         brief = Brief.objects.get(id=brief_id, deleted_at__isnull=True)
@@ -523,7 +563,10 @@ def brief_detail(request, brief_id):
             return JsonResponse({"error": "Access denied"}, status=403)
     elif user_group == "VENDOR":
         user_vendor_id = request.user_data.get("vendor_id")
-        if not user_vendor_id or not brief.projects.filter(vendor_id=user_vendor_id).exists():
+        if (
+            not user_vendor_id
+            or not brief.projects.filter(vendor_id=user_vendor_id).exists()
+        ):
             return JsonResponse({"error": "Access denied"}, status=403)
     elif user_group != "SYSTEM":
         return JsonResponse({"error": "Access denied"}, status=403)
@@ -534,7 +577,7 @@ def brief_detail(request, brief_id):
     if request.method in ["PUT", "PATCH"]:
         try:
             # QA2-020: Reject excessively large request bodies
-            if len(request.body) > 1_000_000:
+            if len(request.body) > MAX_REQUEST_BODY_SIZE:
                 return JsonResponse({"error": "Request body too large"}, status=400)
 
             data = json.loads(request.body)
@@ -543,26 +586,31 @@ def brief_detail(request, brief_id):
                 valid_statuses = [s.value for s in BriefStatus]
                 if data["status"] not in valid_statuses:
                     return JsonResponse(
-                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        {
+                            "error": (
+                                f"Invalid status. Must be one of:"
+                                f" {', '.join(valid_statuses)}"
+                            )
+                        },
                         status=400,
                     )
                 brief.status = data["status"]
             if "details" in data:
                 brief.details = data["details"]
-            # QA2-009: Do NOT allow changing clientId via PATCH to prevent mass assignment
-            # data.pop("clientId", None) — simply not applying it
+            # QA2-009: Do NOT allow changing clientId via PATCH
+            # to prevent mass assignment
 
             brief.save()
             return JsonResponse(serialize_brief(brief))
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error updating brief")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
-        brief.deleted_at = datetime.now(timezone.utc)
+        brief.deleted_at = datetime.now(UTC)
         brief.save()
         return JsonResponse({"message": "Brief deleted"}, status=200)
 
@@ -575,7 +623,7 @@ def brief_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def offers_list(request):
+def offers_list(request):  # noqa: C901, PLR0912, PLR0915
     """List all offers or create a new one."""
     if request.method == "GET":
         user_vendor_id = request.user_data.get("vendor_id")
@@ -606,7 +654,7 @@ def offers_list(request):
     if request.method == "POST":
         try:
             # QA2-020: Reject excessively large request bodies
-            if len(request.body) > 1_000_000:
+            if len(request.body) > MAX_REQUEST_BODY_SIZE:
                 return JsonResponse({"error": "Request body too large"}, status=400)
 
             data = json.loads(request.body)
@@ -637,7 +685,12 @@ def offers_list(request):
             valid_statuses = [s.value for s in OfferStatus]
             if status not in valid_statuses:
                 return JsonResponse(
-                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    {
+                        "error": (
+                            f"Invalid status. Must be one of:"
+                            f" {', '.join(valid_statuses)}"
+                        )
+                    },
                     status=400,
                 )
 
@@ -674,9 +727,13 @@ def offers_list(request):
             if "bidDate" in data:
                 if data["bidDate"] is not None:
                     try:
-                        create_kwargs["bid_date"] = datetime.strptime(data["bidDate"], "%Y-%m-%d").date()
+                        create_kwargs["bid_date"] = datetime.strptime(  # noqa: DTZ007
+                            data["bidDate"], "%Y-%m-%d"
+                        ).date()
                     except (ValueError, AttributeError):
-                        return JsonResponse({"error": "Invalid bidDate format"}, status=400)
+                        return JsonResponse(
+                            {"error": "Invalid bidDate format"}, status=400
+                        )
             if "revision" in data:
                 create_kwargs["revision"] = data["revision"]
             if "term" in data:
@@ -688,15 +745,25 @@ def offers_list(request):
             if "coverPageNotes" in data:
                 create_kwargs["cover_page_notes"] = data["coverPageNotes"]
 
-            vendor_settings = VendorSettings.objects.filter(vendor=project.vendor).first()
+            vendor_settings = VendorSettings.objects.filter(
+                vendor=project.vendor
+            ).first()
             if vendor_settings:
                 create_kwargs["fringes_percent"] = vendor_settings.fringes_percent
                 create_kwargs["handling_percent"] = vendor_settings.handling_percent
                 create_kwargs["markup_percent"] = vendor_settings.markup_percent
-                create_kwargs["production_insurance_percent"] = vendor_settings.production_insurance_percent
-                create_kwargs["production_fee_percent"] = vendor_settings.production_fee_percent
-                create_kwargs["post_markup_percent"] = vendor_settings.post_markup_percent
-                create_kwargs["post_insurance_percent"] = vendor_settings.post_insurance_percent
+                create_kwargs["production_insurance_percent"] = (
+                    vendor_settings.production_insurance_percent
+                )
+                create_kwargs["production_fee_percent"] = (
+                    vendor_settings.production_fee_percent
+                )
+                create_kwargs["post_markup_percent"] = (
+                    vendor_settings.post_markup_percent
+                )
+                create_kwargs["post_insurance_percent"] = (
+                    vendor_settings.post_insurance_percent
+                )
                 create_kwargs["post_tax_percent"] = vendor_settings.post_tax_percent
 
             offer = Offer.objects.create(**create_kwargs)
@@ -705,7 +772,9 @@ def offers_list(request):
                 try:
                     parse_offer_details_to_entries(offer, details)
                 except Exception:
-                    logger.exception("Error parsing offer details to entries for offer %s", offer.id)
+                    logger.exception(
+                        "Error parsing offer details to entries for offer %s", offer.id
+                    )
 
             if "deliverables" in data:
                 _sync_offer_deliverables(offer, data["deliverables"])
@@ -716,7 +785,7 @@ def offers_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating offer")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -726,16 +795,22 @@ def offers_list(request):
 @csrf_exempt
 @require_http_methods(["GET", "PUT", "PATCH", "DELETE"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def offer_detail(request, offer_id):
+def offer_detail(request, offer_id):  # noqa: C901, PLR0912, PLR0915
     """Get, update, or delete a specific offer."""
     try:
-        offer = Offer.objects.select_related("project").get(id=offer_id, deleted_at__isnull=True)
+        offer = Offer.objects.select_related("project").get(
+            id=offer_id, deleted_at__isnull=True
+        )
     except Offer.DoesNotExist:
         return JsonResponse({"error": "Offer not found"}, status=404)
 
     # Verify ownership: offer's project vendor_id must match requesting user's vendor_id
     user_vendor_id = request.user_data.get("vendor_id")
-    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+    if (
+        not user_vendor_id
+        or not offer.project
+        or str(offer.project.vendor_id) != user_vendor_id
+    ):
         return JsonResponse({"error": "Access denied"}, status=403)
 
     if request.method == "GET":
@@ -744,8 +819,10 @@ def offer_detail(request, offer_id):
     if request.method in ["PUT", "PATCH"]:
         try:
             body_len = len(request.body)
-            if body_len > 1_000_000:
-                logger.warning("PATCH offer %s: body too large (%d bytes)", offer_id, body_len)
+            if body_len > MAX_REQUEST_BODY_SIZE:
+                logger.warning(
+                    "PATCH offer %s: body too large (%d bytes)", offer_id, body_len
+                )
                 return JsonResponse({"error": "Request body too large"}, status=400)
 
             data = json.loads(request.body)
@@ -758,7 +835,12 @@ def offer_detail(request, offer_id):
                 valid_statuses = [s.value for s in OfferStatus]
                 if data["status"] not in valid_statuses:
                     return JsonResponse(
-                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        {
+                            "error": (
+                                f"Invalid status. Must be one of:"
+                                f" {', '.join(valid_statuses)}"
+                            )
+                        },
                         status=400,
                     )
                 offer.status = data["status"]
@@ -779,7 +861,12 @@ def offer_detail(request, offer_id):
                 valid_sources = [s.value for s in OfferSource]
                 if data["source"] not in valid_sources:
                     return JsonResponse(
-                        {"error": f"Invalid source. Must be one of: {', '.join(valid_sources)}"},
+                        {
+                            "error": (
+                                "Invalid source. Must be one of: "
+                                f"{', '.join(valid_sources)}"
+                            )
+                        },
                         status=400,
                     )
                 offer.source = data["source"]
@@ -794,9 +881,13 @@ def offer_detail(request, offer_id):
                     offer.bid_date = None
                 else:
                     try:
-                        offer.bid_date = datetime.strptime(data["bidDate"], "%Y-%m-%d").date()
+                        offer.bid_date = datetime.strptime(  # noqa: DTZ007
+                            data["bidDate"], "%Y-%m-%d"
+                        ).date()
                     except (ValueError, AttributeError):
-                        return JsonResponse({"error": "Invalid bidDate format"}, status=400)
+                        return JsonResponse(
+                            {"error": "Invalid bidDate format"}, status=400
+                        )
             if "revision" in data:
                 offer.revision = data["revision"]
             if "term" in data:
@@ -834,7 +925,9 @@ def offer_detail(request, offer_id):
                 try:
                     parse_offer_details_to_entries(offer, data["details"])
                 except Exception:
-                    logger.exception("Error parsing offer details to entries for offer %s", offer.id)
+                    logger.exception(
+                        "Error parsing offer details to entries for offer %s", offer.id
+                    )
                     offer.save()
 
                 recalculate_offer_totals(offer)
@@ -843,15 +936,19 @@ def offer_detail(request, offer_id):
 
             return JsonResponse(serialize_offer(offer))
 
-        except json.JSONDecodeError as exc:
-            logger.error("PATCH offer %s: invalid JSON body (%d bytes): %s", offer_id, len(request.body), exc)
+        except json.JSONDecodeError:
+            logger.exception(
+                "PATCH offer %s: invalid JSON body (%d bytes)",
+                offer_id,
+                len(request.body),
+            )
             return JsonResponse({"error": "Invalid JSON"}, status=400)
         except Exception:
             logger.exception("Error updating offer %s", offer_id)
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
-        offer.deleted_at = datetime.now(timezone.utc)
+        offer.deleted_at = datetime.now(UTC)
         offer.save()
         return JsonResponse({"message": "Offer deleted"}, status=200)
 
@@ -878,17 +975,23 @@ def offers_by_project(request, project_id):
             return JsonResponse({"error": "Access denied"}, status=403)
     elif user_group == "CLIENT":
         # CLIENT can only see offers for projects linked to their briefs
-        has_access = Brief.objects.filter(
-            client_id=user_client_id,
-            projects=project,
-            deleted_at__isnull=True,
-        ).exists() if user_client_id else False
+        has_access = (
+            Brief.objects.filter(
+                client_id=user_client_id,
+                projects=project,
+                deleted_at__isnull=True,
+            ).exists()
+            if user_client_id
+            else False
+        )
         if not has_access:
             return JsonResponse({"error": "Access denied"}, status=403)
     elif user_group != "SYSTEM":
         return JsonResponse({"error": "Access denied"}, status=403)
 
-    offers = Offer.objects.filter(project=project, deleted_at__isnull=True).prefetch_related("offer_entries")
+    offers = Offer.objects.filter(
+        project=project, deleted_at__isnull=True
+    ).prefetch_related("offer_entries")
     return JsonResponse([serialize_offer(o) for o in offers], safe=False)
 
 
@@ -898,7 +1001,7 @@ def offers_by_project(request, project_id):
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_groups("VENDOR", "SYSTEM")
-def shares_create(request):
+def shares_create(request):  # noqa: C901, PLR0912
     """Create a share link for an offer, or find existing share by offerId.
 
     GET /api/v1/shares?offerId=uuid — find existing share for an offer
@@ -911,17 +1014,23 @@ def shares_create(request):
     if request.method == "GET":
         offer_id = request.GET.get("offerId")
         if not offer_id:
-            return JsonResponse({"error": "offerId query parameter is required"}, status=400)
+            return JsonResponse(
+                {"error": "offerId query parameter is required"}, status=400
+            )
         try:
             _validate_uuid(offer_id, "offerId")
         except ValueError as e:
             return JsonResponse({"error": str(e)}, status=400)
         # Verify the offer belongs to this vendor
         user_vendor_id = request.user_data.get("vendor_id")
-        share = Share.objects.filter(
-            offer_id=offer_id,
-            offer__project__vendor_id=user_vendor_id,
-        ).select_related("offer", "offer__project").first()
+        share = (
+            Share.objects.filter(
+                offer_id=offer_id,
+                offer__project__vendor_id=user_vendor_id,
+            )
+            .select_related("offer", "offer__project")
+            .first()
+        )
         if not share:
             return JsonResponse({"error": "Share not found"}, status=404)
         return JsonResponse(serialize_share(share))
@@ -948,7 +1057,11 @@ def shares_create(request):
 
         # Verify the requesting user owns the offer (via vendor)
         user_vendor_id = request.user_data.get("vendor_id")
-        if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+        if (
+            not user_vendor_id
+            or not offer.project
+            or str(offer.project.vendor_id) != user_vendor_id
+        ):
             return JsonResponse({"error": "Access denied"}, status=403)
 
         # Auto-publish offer if it's still DRAFT
@@ -965,10 +1078,8 @@ def shares_create(request):
         user_id = request.user_data.get("id")
         user = None
         if user_id:
-            try:
+            with contextlib.suppress(User.DoesNotExist):
                 user = User.objects.get(id=user_id)
-            except User.DoesNotExist:
-                pass
 
         # Create new share
         share = Share.objects.create(
@@ -980,7 +1091,7 @@ def shares_create(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error creating share")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1006,7 +1117,11 @@ def share_get_public(request, token):
         return JsonResponse({"error": "Share link is no longer active"}, status=410)
 
     # Block access to archived projects
-    if share.offer and share.offer.project and share.offer.project.deleted_at is not None:
+    if (
+        share.offer
+        and share.offer.project
+        and share.offer.project.deleted_at is not None
+    ):
         return JsonResponse({"error": "Project is archived"}, status=410)
 
     # QA2-019: Don't serve draft offers through share links
@@ -1058,7 +1173,7 @@ def share_manage(request, token):
             share.is_active = not share.is_active
             share.save(update_fields=["is_active", "updated_at"])
             return JsonResponse(serialize_share(share))
-        except Exception as e:
+        except Exception:
             logger.exception("Error toggling share")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1105,17 +1220,19 @@ def share_link_to_brief(request, token):
 
         # QA3-014: Positive assertion ownership check (no NULL bypass)
         user_client_id = request.user_data.get("client_id")
-        if not user_client_id or not brief.client_id or str(brief.client_id) != user_client_id:
+        if (
+            not user_client_id
+            or not brief.client_id
+            or str(brief.client_id) != user_client_id
+        ):
             return JsonResponse({"error": "Access denied"}, status=403)
 
         # Get linking user
         user_id = request.user_data.get("id")
         user = None
         if user_id:
-            try:
+            with contextlib.suppress(User.DoesNotExist):
                 user = User.objects.get(id=user_id)
-            except User.DoesNotExist:
-                pass
 
         # Create BriefOffer association (or return existing)
         try:
@@ -1133,7 +1250,7 @@ def share_link_to_brief(request, token):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error linking share to brief")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1160,7 +1277,11 @@ def offer_status_update(request, offer_id):
 
     # QA3-004: Positive assertion ownership check (no NULL bypass)
     user_vendor_id = request.user_data.get("vendor_id")
-    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+    if (
+        not user_vendor_id
+        or not offer.project
+        or str(offer.project.vendor_id) != user_vendor_id
+    ):
         return JsonResponse({"error": "Access denied"}, status=403)
 
     try:
@@ -1173,7 +1294,11 @@ def offer_status_update(request, offer_id):
         valid_statuses = [s.value for s in OfferStatus]
         if new_status not in valid_statuses:
             return JsonResponse(
-                {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                {
+                    "error": (
+                        f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                    )
+                },
                 status=400,
             )
 
@@ -1183,7 +1308,7 @@ def offer_status_update(request, offer_id):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error updating offer status")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1194,10 +1319,14 @@ def _sync_offer_deliverables(offer, deliverables_data):
         deliverable_id = d.get("id")
         if deliverable_id:
             try:
-                deliverable = OfferDeliverable.objects.get(id=deliverable_id, offer=offer, deleted_at__isnull=True)
+                deliverable = OfferDeliverable.objects.get(
+                    id=deliverable_id, offer=offer, deleted_at__isnull=True
+                )
                 deliverable.quantity = d.get("quantity", deliverable.quantity)
                 deliverable.duration = d.get("duration", deliverable.duration)
-                deliverable.duration_unit = d.get("durationUnit", deliverable.duration_unit)
+                deliverable.duration_unit = d.get(
+                    "durationUnit", deliverable.duration_unit
+                )
                 deliverable.notes = d.get("notes", deliverable.notes)
                 deliverable.sort_order = i
                 deliverable.save()
@@ -1214,8 +1343,10 @@ def _sync_offer_deliverables(offer, deliverables_data):
                 sort_order=i,
             )
             existing_ids.add(new_d.id)
-    from django.utils import timezone as tz
-    OfferDeliverable.objects.filter(offer=offer, deleted_at__isnull=True).exclude(id__in=existing_ids).update(deleted_at=tz.now())
+
+    OfferDeliverable.objects.filter(offer=offer, deleted_at__isnull=True).exclude(
+        id__in=existing_ids
+    ).update(deleted_at=tz.now())
 
 
 def _sync_offer_schedule_entries(offer, entries_data):
@@ -1224,7 +1355,9 @@ def _sync_offer_schedule_entries(offer, entries_data):
         entry_id = e.get("id")
         if entry_id:
             try:
-                entry = OfferScheduleEntry.objects.get(id=entry_id, offer=offer, deleted_at__isnull=True)
+                entry = OfferScheduleEntry.objects.get(
+                    id=entry_id, offer=offer, deleted_at__isnull=True
+                )
                 entry.phase_type = e.get("phaseType", entry.phase_type)
                 entry.days = e.get("days", entry.days)
                 entry.hours_per_day = e.get("hoursPerDay", entry.hours_per_day)
@@ -1244,8 +1377,10 @@ def _sync_offer_schedule_entries(offer, entries_data):
                 sort_order=i,
             )
             existing_ids.add(new_e.id)
-    from django.utils import timezone as tz
-    OfferScheduleEntry.objects.filter(offer=offer, deleted_at__isnull=True).exclude(id__in=existing_ids).update(deleted_at=tz.now())
+
+    OfferScheduleEntry.objects.filter(offer=offer, deleted_at__isnull=True).exclude(
+        id__in=existing_ids
+    ).update(deleted_at=tz.now())
 
 
 # ==================== Copy Offer ====================
@@ -1269,7 +1404,11 @@ def offer_copy(request, offer_id):
 
     # QA3-004: Positive assertion ownership check (no NULL bypass)
     user_vendor_id = request.user_data.get("vendor_id")
-    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+    if (
+        not user_vendor_id
+        or not offer.project
+        or str(offer.project.vendor_id) != user_vendor_id
+    ):
         return JsonResponse({"error": "Access denied"}, status=403)
 
     try:
@@ -1277,7 +1416,9 @@ def offer_copy(request, offer_id):
         with transaction.atomic():
             # Get all offer entries before creating the copy
             original_entries = list(
-                OfferEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order")
+                OfferEntry.objects.filter(
+                    offer=offer, deleted_at__isnull=True
+                ).order_by("sort_order")
             )
 
             new_offer = Offer.objects.create(
@@ -1322,7 +1463,9 @@ def offer_copy(request, offer_id):
                     sort_order=entry.sort_order,
                 )
 
-            for d in OfferDeliverable.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order"):
+            for d in OfferDeliverable.objects.filter(
+                offer=offer, deleted_at__isnull=True
+            ).order_by("sort_order"):
                 OfferDeliverable.objects.create(
                     offer=new_offer,
                     quantity=d.quantity,
@@ -1332,7 +1475,9 @@ def offer_copy(request, offer_id):
                     sort_order=d.sort_order,
                 )
 
-            for s in OfferScheduleEntry.objects.filter(offer=offer, deleted_at__isnull=True).order_by("sort_order"):
+            for s in OfferScheduleEntry.objects.filter(
+                offer=offer, deleted_at__isnull=True
+            ).order_by("sort_order"):
                 OfferScheduleEntry.objects.create(
                     offer=new_offer,
                     phase_type=s.phase_type,
@@ -1346,7 +1491,7 @@ def offer_copy(request, offer_id):
 
         return JsonResponse(serialize_offer(new_offer), status=201)
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error copying offer")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1394,7 +1539,7 @@ def templates_list(request):
             except Offer.DoesNotExist:
                 return JsonResponse({"error": "Offer not found"}, status=404)
 
-            # QA4-030: Positive assertion — offer must have a project owned by this vendor
+            # QA4-030: offer must have a project owned by this vendor
             if not offer.project or str(offer.project.vendor_id) != vendor_id:
                 return JsonResponse({"error": "Access denied"}, status=403)
 
@@ -1410,26 +1555,37 @@ def templates_list(request):
                 details = reconstruct_details_from_entries(offer)
 
                 # Snapshot OfferEntry data into the template for completeness
-                entries_snapshot = []
-                for entry in entries_qs:
-                    entries_snapshot.append({
+                entries_snapshot = [
+                    {
                         "frontendId": entry.frontend_id,
                         "itemName": entry.item_name,
                         "entryId": str(entry.entry_id) if entry.entry_id else None,
-                        "categoryId": str(entry.category_id) if entry.category_id else None,
+                        "categoryId": str(entry.category_id)
+                        if entry.category_id
+                        else None,
                         "price": str(entry.price) if entry.price is not None else None,
                         "cost": str(entry.cost) if entry.cost is not None else None,
-                        "clientPrice": str(entry.client_price) if entry.client_price is not None else None,
-                        "clientCost": str(entry.client_cost) if entry.client_cost is not None else None,
-                        "surcharge": str(entry.surcharge) if entry.surcharge is not None else None,
+                        "clientPrice": str(entry.client_price)
+                        if entry.client_price is not None
+                        else None,
+                        "clientCost": str(entry.client_cost)
+                        if entry.client_cost is not None
+                        else None,
+                        "surcharge": str(entry.surcharge)
+                        if entry.surcharge is not None
+                        else None,
                         "taxRate": str(entry.tax_rate),
-                        "taxPrice": str(entry.tax_price) if entry.tax_price is not None else None,
+                        "taxPrice": str(entry.tax_price)
+                        if entry.tax_price is not None
+                        else None,
                         "showTax": entry.show_tax,
                         "isLinkedSurcharge": entry.is_linked_surcharge,
                         "marketRange": entry.market_range,
                         "itemData": entry.item_data,
                         "sortOrder": entry.sort_order,
-                    })
+                    }
+                    for entry in entries_qs
+                ]
             else:
                 # Fallback: use raw offer.details if no OfferEntry records exist
                 details = offer.details if offer.details else {}
@@ -1455,7 +1611,7 @@ def templates_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating template")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1465,7 +1621,7 @@ def templates_list(request):
 @csrf_exempt
 @require_http_methods(["GET", "PATCH", "DELETE"])
 @require_groups("VENDOR", "SYSTEM")
-def template_detail(request, template_id):
+def template_detail(request, template_id):  # noqa: C901
     """Get, update, or delete a specific template."""
     vendor_id = request.user_data.get("vendor_id")
     if not vendor_id:
@@ -1506,31 +1662,55 @@ def template_detail(request, template_id):
             for idx, item in enumerate(offers_list):
                 # Extract known structured fields; everything else goes into itemData
                 known_keys = {
-                    "id", "item", "entryId", "categoryId",
-                    "price", "cost", "clientPrice", "clientCost",
-                    "surcharge", "taxRate", "taxPrice",
-                    "showTax", "isLinkedSurcharge", "marketRange",
+                    "id",
+                    "item",
+                    "entryId",
+                    "categoryId",
+                    "price",
+                    "cost",
+                    "clientPrice",
+                    "clientCost",
+                    "surcharge",
+                    "taxRate",
+                    "taxPrice",
+                    "showTax",
+                    "isLinkedSurcharge",
+                    "marketRange",
                 }
                 item_data = {k: v for k, v in item.items() if k not in known_keys}
 
-                entries_snapshot.append({
-                    "frontendId": item.get("id"),
-                    "itemName": item.get("item", ""),
-                    "entryId": item.get("entryId"),
-                    "categoryId": item.get("categoryId"),
-                    "price": str(item["price"]) if item.get("price") is not None else None,
-                    "cost": str(item["cost"]) if item.get("cost") is not None else None,
-                    "clientPrice": str(item["clientPrice"]) if item.get("clientPrice") is not None else None,
-                    "clientCost": str(item["clientCost"]) if item.get("clientCost") is not None else None,
-                    "surcharge": str(item["surcharge"]) if item.get("surcharge") is not None else None,
-                    "taxRate": str(item.get("taxRate", 0)),
-                    "taxPrice": str(item["taxPrice"]) if item.get("taxPrice") is not None else None,
-                    "showTax": item.get("showTax", False),
-                    "isLinkedSurcharge": item.get("isLinkedSurcharge", False),
-                    "marketRange": item.get("marketRange"),
-                    "itemData": item_data if item_data else None,
-                    "sortOrder": idx,
-                })
+                entries_snapshot.append(
+                    {
+                        "frontendId": item.get("id"),
+                        "itemName": item.get("item", ""),
+                        "entryId": item.get("entryId"),
+                        "categoryId": item.get("categoryId"),
+                        "price": str(item["price"])
+                        if item.get("price") is not None
+                        else None,
+                        "cost": str(item["cost"])
+                        if item.get("cost") is not None
+                        else None,
+                        "clientPrice": str(item["clientPrice"])
+                        if item.get("clientPrice") is not None
+                        else None,
+                        "clientCost": str(item["clientCost"])
+                        if item.get("clientCost") is not None
+                        else None,
+                        "surcharge": str(item["surcharge"])
+                        if item.get("surcharge") is not None
+                        else None,
+                        "taxRate": str(item.get("taxRate", 0)),
+                        "taxPrice": str(item["taxPrice"])
+                        if item.get("taxPrice") is not None
+                        else None,
+                        "showTax": item.get("showTax", False),
+                        "isLinkedSurcharge": item.get("isLinkedSurcharge", False),
+                        "marketRange": item.get("marketRange"),
+                        "itemData": item_data if item_data else None,
+                        "sortOrder": idx,
+                    }
+                )
 
             # Store entriesSnapshot inside metadata
             if not isinstance(template.metadata, dict):
@@ -1541,7 +1721,7 @@ def template_detail(request, template_id):
         return JsonResponse(serialize_template(template))
 
     if request.method == "DELETE":
-        template.deleted_at = datetime.now(timezone.utc)
+        template.deleted_at = datetime.now(UTC)
         template.save()
         return JsonResponse({"message": "Template deleted"}, status=200)
 
@@ -1603,12 +1783,20 @@ def template_apply(request, template_id):
             # Create OfferEntry records from entries snapshot
             entries_snapshot = template.metadata.get("entriesSnapshot", [])
 
-            # QA4-036: Bulk pre-fetch entries and categories to avoid N+1 queries
-            from aivus_backend.catalog.models import Category
             entry_ids = {e["entryId"] for e in entries_snapshot if e.get("entryId")}
-            category_ids = {e["categoryId"] for e in entries_snapshot if e.get("categoryId")}
-            entries_by_id = {str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)} if entry_ids else {}
-            categories_by_id = {str(c.id): c for c in Category.objects.filter(id__in=category_ids)} if category_ids else {}
+            category_ids = {
+                e["categoryId"] for e in entries_snapshot if e.get("categoryId")
+            }
+            entries_by_id = (
+                {str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)}
+                if entry_ids
+                else {}
+            )
+            categories_by_id = (
+                {str(c.id): c for c in Category.objects.filter(id__in=category_ids)}
+                if category_ids
+                else {}
+            )
 
             for entry_data in entries_snapshot:
                 entry_ref = entries_by_id.get(entry_data.get("entryId"))
@@ -1640,7 +1828,7 @@ def template_apply(request, template_id):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error applying template")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1691,17 +1879,13 @@ def rate_cards_list(request):
 
                     entry_ref = None
                     if entry_id:
-                        try:
+                        with contextlib.suppress(Entry.DoesNotExist):
                             entry_ref = Entry.objects.get(id=entry_id)
-                        except Entry.DoesNotExist:
-                            pass
 
                     unit_ref = None
                     if unit_id:
-                        try:
+                        with contextlib.suppress(Unit.DoesNotExist):
                             unit_ref = Unit.objects.get(id=unit_id)
-                        except Unit.DoesNotExist:
-                            pass
 
                     RateCardItem.objects.create(
                         rate_card=rate_card,
@@ -1716,7 +1900,7 @@ def rate_cards_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating rate card")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1726,7 +1910,7 @@ def rate_cards_list(request):
 @csrf_exempt
 @require_http_methods(["GET", "PATCH", "DELETE"])
 @require_groups("VENDOR", "SYSTEM")
-def rate_card_detail(request, rate_card_id):
+def rate_card_detail(request, rate_card_id):  # noqa: C901
     """Get, update, or delete a specific rate card."""
     vendor_id = request.user_data.get("vendor_id")
     if not vendor_id:
@@ -1766,17 +1950,13 @@ def rate_card_detail(request, rate_card_id):
 
                         entry_ref = None
                         if entry_id:
-                            try:
+                            with contextlib.suppress(Entry.DoesNotExist):
                                 entry_ref = Entry.objects.get(id=entry_id)
-                            except Entry.DoesNotExist:
-                                pass
 
                         unit_ref = None
                         if unit_id:
-                            try:
+                            with contextlib.suppress(Unit.DoesNotExist):
                                 unit_ref = Unit.objects.get(id=unit_id)
-                            except Unit.DoesNotExist:
-                                pass
 
                         RateCardItem.objects.create(
                             rate_card=rate_card,
@@ -1791,16 +1971,16 @@ def rate_card_detail(request, rate_card_id):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error updating rate card")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
-        rate_card.deleted_at = datetime.now(timezone.utc)
+        rate_card.deleted_at = datetime.now(UTC)
         rate_card.save()
         # Also soft-delete items
         rate_card.items.filter(deleted_at__isnull=True).update(
-            deleted_at=datetime.now(timezone.utc)
+            deleted_at=datetime.now(UTC)
         )
         return JsonResponse({"message": "Rate card deleted"}, status=200)
 
@@ -1822,7 +2002,9 @@ def rate_card_lookup(request):
 
     entry_id = request.GET.get("entryId")
     if not entry_id:
-        return JsonResponse({"error": "entryId query parameter is required"}, status=400)
+        return JsonResponse(
+            {"error": "entryId query parameter is required"}, status=400
+        )
 
     items = RateCardItem.objects.filter(
         rate_card__vendor_id=vendor_id,
@@ -1873,7 +2055,12 @@ def client_briefs_list(request):
             valid_statuses = [s.value for s in BriefStatus]
             if status not in valid_statuses:
                 return JsonResponse(
-                    {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                    {
+                        "error": (
+                            f"Invalid status. Must be one of:"
+                            f" {', '.join(valid_statuses)}"
+                        )
+                    },
                     status=400,
                 )
 
@@ -1891,7 +2078,7 @@ def client_briefs_list(request):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error creating brief")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -1901,7 +2088,7 @@ def client_briefs_list(request):
 @csrf_exempt
 @require_http_methods(["GET", "PATCH", "DELETE"])
 @require_groups("CLIENT", "SYSTEM")
-def client_brief_detail(request, brief_id):
+def client_brief_detail(request, brief_id):  # noqa: C901, PLR0912
     """Get, update, or delete a specific client brief."""
     client_id = request.user_data.get("client_id")
     if not client_id:
@@ -1934,7 +2121,12 @@ def client_brief_detail(request, brief_id):
                 valid_statuses = [s.value for s in BriefStatus]
                 if data["status"] not in valid_statuses:
                     return JsonResponse(
-                        {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                        {
+                            "error": (
+                                f"Invalid status. Must be one of:"
+                                f" {', '.join(valid_statuses)}"
+                            )
+                        },
                         status=400,
                     )
                 brief.status = data["status"]
@@ -1944,12 +2136,12 @@ def client_brief_detail(request, brief_id):
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
+        except Exception:
             logger.exception("Error updating brief")
             return JsonResponse({"error": "An internal error occurred"}, status=500)
 
     if request.method == "DELETE":
-        brief.deleted_at = datetime.now(timezone.utc)
+        brief.deleted_at = datetime.now(UTC)
         brief.save()
         return JsonResponse({"message": "Brief deleted"}, status=200)
 
@@ -2009,11 +2201,7 @@ def client_brief_offers(request, brief_id):
 @require_groups("CLIENT", "SYSTEM")
 @ratelimit(key="user_or_ip", rate="20/m", method="POST", block=True)
 def client_brief_chat(request):
-    """AI-powered chat for brief creation.
-
-    Body: {"message": "...", "history": [...], "brief_id": null|"uuid", "extracted_fields": {}}
-    Returns: {"reply": "...", "brief_data": null|{...}, "is_complete": false|true, "extracted_fields": {...}}
-    """
+    """AI-powered chat for brief creation."""
     try:
         data = json.loads(request.body)
         user_message = data.get("message", "")
@@ -2028,19 +2216,17 @@ def client_brief_chat(request):
         user_id = request.user_data.get("id")
         user = None
         if user_id:
-            try:
+            with contextlib.suppress(User.DoesNotExist):
                 user = User.objects.get(id=user_id)
-            except User.DoesNotExist:
-                pass
 
         # QA3-039: Get brief with ownership check
         client_id = request.user_data.get("client_id")
         brief = None
         if brief_id:
-            try:
-                brief = Brief.objects.get(id=brief_id, client_id=client_id, deleted_at__isnull=True)
-            except Brief.DoesNotExist:
-                pass
+            with contextlib.suppress(Brief.DoesNotExist):
+                brief = Brief.objects.get(
+                    id=brief_id, client_id=client_id, deleted_at__isnull=True
+                )
 
         # Store user message
         if user:
@@ -2072,7 +2258,7 @@ def client_brief_chat(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error in brief chat")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -2099,7 +2285,7 @@ def client_brief_chat_analyze(request):
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
-    except Exception as e:
+    except Exception:
         logger.exception("Error analyzing brief")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
@@ -2107,22 +2293,26 @@ def client_brief_chat_analyze(request):
 # ==================== Comparison API ====================
 
 
-def _build_comparison_data(brief):
+def _build_comparison_data(brief):  # noqa: C901
     """Build comparison data from all offers linked to a brief.
 
     Returns structured data with vendors, categories, items, and totals.
     """
     # QA3-036: prefetch offer entries to avoid N+1 queries
-    brief_offers = BriefOffer.objects.filter(
-        brief=brief,
-    ).select_related(
-        "offer",
-        "offer__project",
-        "offer__project__vendor",
-    ).prefetch_related(
-        "offer__offer_entries",
-        "offer__offer_entries__category",
-        "offer__offer_entries__entry",
+    brief_offers = (
+        BriefOffer.objects.filter(
+            brief=brief,
+        )
+        .select_related(
+            "offer",
+            "offer__project",
+            "offer__project__vendor",
+        )
+        .prefetch_related(
+            "offer__offer_entries",
+            "offer__offer_entries__category",
+            "offer__offer_entries__entry",
+        )
     )
 
     if not brief_offers.exists():
@@ -2155,23 +2345,25 @@ def _build_comparison_data(brief):
             key=lambda e: e.sort_order,
         )
 
-        vendor_total = sum(
-            (e.client_price or e.price or Decimal("0")) for e in entries
-        )
+        vendor_total = sum((e.client_price or e.price or Decimal("0")) for e in entries)
 
-        vendors.append({
-            "id": vendor_id,
-            "name": vendor_name,
-            "offerId": str(offer.id),
-            "total": float(vendor_total),
-        })
+        vendors.append(
+            {
+                "id": vendor_id,
+                "name": vendor_name,
+                "offerId": str(offer.id),
+                "total": float(vendor_total),
+            }
+        )
 
         vendor_entries[vendor_id] = list(entries)
 
     # Build categories with items and per-vendor values
     # Collect all unique categories across all vendors
     all_categories = {}  # category_id -> category_name
-    category_items = defaultdict(dict)  # category_id -> {item_name -> {vendor_id -> entry_data}}
+    category_items = defaultdict(
+        dict
+    )  # category_id -> {item_name -> {vendor_id -> entry_data}}
 
     for vendor_id, entries in vendor_entries.items():
         for entry in entries:
@@ -2179,7 +2371,9 @@ def _build_comparison_data(brief):
             cat_name = entry.category.name if entry.category else "Uncategorized"
             all_categories[cat_id] = cat_name
 
-            item_name = entry.item_name or (entry.entry.name if entry.entry else f"Item {entry.sort_order}")
+            item_name = entry.item_name or (
+                entry.entry.name if entry.entry else f"Item {entry.sort_order}"
+            )
             if item_name not in category_items[cat_id]:
                 category_items[cat_id][item_name] = {}
 
@@ -2200,36 +2394,40 @@ def _build_comparison_data(brief):
         for item_name, vendor_values in category_items[cat_id].items():
             values = []
             for v in vendors:
-                v_data = vendor_values.get(v["id"], {"vendor_id": v["id"], "price": 0, "cost": 0})
+                v_data = vendor_values.get(
+                    v["id"], {"vendor_id": v["id"], "price": 0, "cost": 0}
+                )
                 values.append(v_data)
                 subtotals[v["id"]] += v_data.get("price", 0)
 
-            items_data.append({
-                "name": item_name,
-                "values": values,
-            })
+            items_data.append(
+                {
+                    "name": item_name,
+                    "values": values,
+                }
+            )
 
         # Add subtotals to grand totals
         for v_id, subtotal in subtotals.items():
             grand_totals[v_id] += subtotal
 
-        categories.append({
-            "id": cat_id,
-            "name": cat_name,
-            "items": items_data,
-            "subtotals": [
-                {"vendor_id": v["id"], "total": subtotals[v["id"]]}
-                for v in vendors
-            ],
-        })
+        categories.append(
+            {
+                "id": cat_id,
+                "name": cat_name,
+                "items": items_data,
+                "subtotals": [
+                    {"vendor_id": v["id"], "total": subtotals[v["id"]]} for v in vendors
+                ],
+            }
+        )
 
     return {
         "brief": serialize_brief(brief),
         "vendors": vendors,
         "categories": categories,
         "grand_totals": [
-            {"vendor_id": v["id"], "total": grand_totals[v["id"]]}
-            for v in vendors
+            {"vendor_id": v["id"], "total": grand_totals[v["id"]]} for v in vendors
         ],
     }
 
@@ -2293,10 +2491,15 @@ def client_brief_comparison_analyze(request, brief_id):
     comparison_data = _build_comparison_data(brief)
 
     if not comparison_data.get("vendors"):
-        return JsonResponse({
-            "analysis": "No vendor offers are linked to this brief yet. Link some offers first to get a comparison analysis.",
-            "highlights": [],
-        })
+        return JsonResponse(
+            {
+                "analysis": (
+                    "No vendor offers are linked to this brief yet."
+                    " Link some offers first to get a comparison analysis."
+                ),
+                "highlights": [],
+            }
+        )
 
     # Use AI to analyze
     result = analyze_comparison(
@@ -2314,7 +2517,7 @@ def client_brief_comparison_analyze(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-def client_xlsx_upload(request):
+def client_xlsx_upload(request):  # noqa: C901, PLR0912
     """Upload XLSX file, find offer_id cell, return share info.
 
     Scans all cells in all sheets for a value that looks like a UUID.
@@ -2385,13 +2588,14 @@ def client_xlsx_upload(request):
             status=403,
         )
 
-    return JsonResponse({
-        "offer_id": offer_id,
-        "offer_name": offer.project_name,
-        "share_token": share.token if share else None,
-        "has_share": share is not None,
-    })
-
+    return JsonResponse(
+        {
+            "offer_id": offer_id,
+            "offer_name": offer.project_name,
+            "share_token": share.token if share else None,
+            "has_share": share is not None,
+        }
+    )
 
 
 def _build_offer_export_data(offer):
@@ -2429,11 +2633,14 @@ def _build_offer_export_data(offer):
         for x in client_managers
     ]
 
-    entries = OfferEntry.objects.filter(
-        offer=offer,
-        deleted_at__isnull=True,
-    ).select_related("category", "category__parent_category", "entry").order_by("sort_order")
-
+    entries = (
+        OfferEntry.objects.filter(
+            offer=offer,
+            deleted_at__isnull=True,
+        )
+        .select_related("category", "category__parent_category", "entry")
+        .order_by("sort_order")
+    )
 
     categories_map = {}
     for entry in entries:
@@ -2441,7 +2648,9 @@ def _build_offer_export_data(offer):
         if category_id not in categories_map:
             parent = entry.category.parent_category if entry.category else None
             categories_map[category_id] = {
-                "id": category_id if category_id != "uncategorized" else "uncategorized",
+                "id": category_id
+                if category_id != "uncategorized"
+                else "uncategorized",
                 "code": entry.category.code if entry.category else "",
                 "name": entry.category.name if entry.category else "Uncategorized",
                 "level": entry.category.level if entry.category else 0,
@@ -2454,30 +2663,37 @@ def _build_offer_export_data(offer):
                 "_raw_estimates": [],
             }
 
-        estimate = float(entry.client_cost) if entry.client_cost is not None else float(entry.cost or 0)
+        estimate = (
+            float(entry.client_cost)
+            if entry.client_cost is not None
+            else float(entry.cost or 0)
+        )
         rate = float(entry.price) if entry.price is not None else 0
 
-        units_list = []
         item_data = entry.item_data or {}
         raw_units = item_data.get("units") or []
-        for u in raw_units:
-            if u is not None:
-                units_list.append({
-                    "label": u.get("label", ""),
-                    "symbol": u.get("label", ""),
-                    "count": u.get("count", 0),
-                })
+        units_list = [
+            {
+                "label": u.get("label", ""),
+                "symbol": u.get("label", ""),
+                "count": u.get("count", 0),
+            }
+            for u in raw_units
+            if u is not None
+        ]
 
-        categories_map[category_id]["entries"].append({
-            "id": str(entry.id),
-            "entryId": str(entry.entry_id) if entry.entry_id else str(entry.id),
-            "code": entry.entry.code if entry.entry else "",
-            "name": entry.item_name,
-            "rate": rate,
-            "units": units_list,
-            "overtime": float(entry.overtime) if entry.overtime else 0,
-            "estimate": estimate,
-        })
+        categories_map[category_id]["entries"].append(
+            {
+                "id": str(entry.id),
+                "entryId": str(entry.entry_id) if entry.entry_id else str(entry.id),
+                "code": entry.entry.code if entry.entry else "",
+                "name": entry.item_name,
+                "rate": rate,
+                "units": units_list,
+                "overtime": float(entry.overtime) if entry.overtime else 0,
+                "estimate": estimate,
+            }
+        )
         categories_map[category_id]["_raw_estimates"].append(estimate)
 
     categories_list = []
@@ -2525,7 +2741,9 @@ def _build_offer_export_data(offer):
             "postInsurancePercent": str(offer.post_insurance_percent),
             "postTaxPercent": str(offer.post_tax_percent),
             "customFeeNames": (offer.details or {}).get("customFeeNames", {}),
-            "categoryExternalMarkup": (offer.details or {}).get("categoryExternalMarkup", {}),
+            "categoryExternalMarkup": (offer.details or {}).get(
+                "categoryExternalMarkup", {}
+            ),
             "deliverables": [
                 {
                     "id": str(x.id),
@@ -2553,7 +2771,8 @@ def _build_offer_export_data(offer):
             "id": str(project.id),
             "name": project.name,
             "agencyName": project.agency_name,
-            "clientName": project.client_name or (project.client.name if project.client else None),
+            "clientName": project.client_name
+            or (project.client.name if project.client else None),
             "brandName": project.brand_name,
             "clientManagers": client_managers_list,
         },
@@ -2582,7 +2801,11 @@ def offer_export_data(request, offer_id):
         return JsonResponse({"error": "Offer not found"}, status=404)
 
     user_vendor_id = request.user_data.get("vendor_id")
-    if not user_vendor_id or not offer.project or str(offer.project.vendor_id) != user_vendor_id:
+    if (
+        not user_vendor_id
+        or not offer.project
+        or str(offer.project.vendor_id) != user_vendor_id
+    ):
         return JsonResponse({"error": "Access denied"}, status=403)
 
     return JsonResponse(_build_offer_export_data(offer))

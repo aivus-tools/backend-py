@@ -9,7 +9,6 @@ from django.db.models import Sum
 
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
-from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import OfferEntry
 
 logger = logging.getLogger(__name__)
@@ -76,7 +75,7 @@ def _lookup_category(category_id):
         return None
 
 
-def parse_offer_details_to_entries(offer, details_dict):
+def parse_offer_details_to_entries(offer, details_dict):  # noqa: C901, PLR0912
     """
     Parse the Offer.details JSON into OfferEntry records.
 
@@ -116,19 +115,27 @@ def parse_offer_details_to_entries(offer, details_dict):
     4. Saves updated details JSON on the offer.
     """
     if not details_dict or not isinstance(details_dict, dict):
-        logger.warning("parse_offer_details_to_entries: empty or invalid details for offer %s", offer.id)
-        return
+        logger.warning(
+            "parse_offer_details_to_entries: empty or invalid details for offer %s",
+            offer.id,
+        )
+        return None
 
     offers_list = details_dict.get("offers", [])
     if not isinstance(offers_list, list):
-        logger.warning("parse_offer_details_to_entries: 'offers' is not a list for offer %s", offer.id)
-        return
+        logger.warning(
+            "parse_offer_details_to_entries: 'offers' is not a list for offer %s",
+            offer.id,
+        )
+        return None
 
     # QA2-022: Validate all items before deleting, and wrap in transaction
     # so rollback happens on any error
     for idx, item in enumerate(offers_list):
         if not isinstance(item, dict):
-            logger.warning("Invalid non-dict item at index %d for offer %s", idx, offer.id)
+            logger.warning(
+                "Invalid non-dict item at index %d for offer %s", idx, offer.id
+            )
 
     # QA3-037: Bulk pre-fetch entries and categories to avoid N+1 queries
     entry_ids = set()
@@ -143,9 +150,7 @@ def parse_offer_details_to_entries(offer, details_dict):
 
     entries_by_id = {}
     if entry_ids:
-        entries_by_id = {
-            str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)
-        }
+        entries_by_id = {str(e.id): e for e in Entry.objects.filter(id__in=entry_ids)}
     categories_by_id = {}
     if category_ids:
         categories_by_id = {
@@ -156,13 +161,16 @@ def parse_offer_details_to_entries(offer, details_dict):
         # Delete existing entries (full sync)
         deleted_count, _ = OfferEntry.objects.filter(offer=offer).delete()
         if deleted_count:
-            logger.info("Deleted %d existing OfferEntry records for offer %s", deleted_count, offer.id)
+            logger.info(
+                "Deleted %d existing OfferEntry records for offer %s",
+                deleted_count,
+                offer.id,
+            )
 
         # Extract top-level metadata (everything except 'offers' array)
-        metadata = {}
-        for key, value in details_dict.items():
-            if key != "offers":
-                metadata[key] = value
+        metadata = {
+            key: value for key, value in details_dict.items() if key != "offers"
+        }
 
         offer.metadata = metadata
         offer.details = details_dict
@@ -174,16 +182,27 @@ def parse_offer_details_to_entries(offer, details_dict):
             if not isinstance(item, dict):
                 continue
 
-            # Collect extra data (units, options, and anything not in the direct mapping)
+            # Collect extra data (units, options, etc.)
             mapped_keys = {
-                "id", "item", "entryId", "categoryId", "price", "cost",
-                "clientPrice", "clientCost", "surcharge", "taxRate", "taxPrice",
-                "showTax", "overtime", "isLinkedSurcharge", "marketRange",
+                "id",
+                "item",
+                "entryId",
+                "categoryId",
+                "price",
+                "cost",
+                "clientPrice",
+                "clientCost",
+                "surcharge",
+                "taxRate",
+                "taxPrice",
+                "showTax",
+                "overtime",
+                "isLinkedSurcharge",
+                "marketRange",
             }
-            item_data = {}
-            for key, value in item.items():
-                if key not in mapped_keys:
-                    item_data[key] = value
+            item_data = {
+                key: value for key, value in item.items() if key not in mapped_keys
+            }
 
             # QA3-037: Use pre-fetched lookups instead of per-item queries
             entry_ref = entries_by_id.get(str(item.get("entryId", "")))
@@ -219,7 +238,7 @@ def parse_offer_details_to_entries(offer, details_dict):
     return entries_created
 
 
-def reconstruct_details_from_entries(offer):
+def reconstruct_details_from_entries(offer):  # noqa: C901
     """
     Rebuild the details JSON dict from OfferEntry records.
 

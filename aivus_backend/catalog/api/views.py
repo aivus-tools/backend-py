@@ -7,11 +7,13 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.catalog.models import Category
-from aivus_backend.catalog.models import Entry, Unit
+from aivus_backend.catalog.models import Entry
+from aivus_backend.catalog.models import Unit
 from aivus_backend.core.decorators import require_groups
 
-from .serializers import serialize_category, serialize_unit
+from .serializers import serialize_category
 from .serializers import serialize_entry
+from .serializers import serialize_unit
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,9 @@ def get_categories(request):
     """
     try:
         # QA3-016: Filter out soft-deleted records
-        categories = Category.objects.filter(deleted_at__isnull=True).order_by("level", "name")
+        categories = Category.objects.filter(deleted_at__isnull=True).order_by(
+            "level", "name"
+        )
         data = [serialize_category(cat) for cat in categories]
         return JsonResponse(data, safe=False, status=200)
     except Exception:
@@ -48,9 +52,12 @@ def get_entries(request):
     """
     try:
         # QA3-016: Filter out soft-deleted records
-        entries = Entry.objects.select_related("category").prefetch_related(
-            "entry_units__unit"
-        ).filter(is_approved=True, deleted_at__isnull=True).order_by("name")
+        entries = (
+            Entry.objects.select_related("category")
+            .prefetch_related("entry_units__unit")
+            .filter(is_approved=True, deleted_at__isnull=True)
+            .order_by("name")
+        )
 
         # Check if full data requested
         full = request.GET.get("full", "false").lower() == "true"
@@ -74,9 +81,11 @@ def get_entry(request, entry_id):
     """
     try:
         # QA3-016: Filter out soft-deleted records
-        entry = Entry.objects.select_related("category").prefetch_related(
-            "entry_units__unit"
-        ).get(id=entry_id, deleted_at__isnull=True)
+        entry = (
+            Entry.objects.select_related("category")
+            .prefetch_related("entry_units__unit")
+            .get(id=entry_id, deleted_at__isnull=True)
+        )
 
         data = serialize_entry(entry, include_units=True)
         return JsonResponse(data, status=200)
@@ -105,4 +114,3 @@ def get_units(request):
     except Exception:
         logger.exception("Error getting units")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
-

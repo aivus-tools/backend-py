@@ -80,7 +80,9 @@ class Unit(models.Model):
     def save(self, *args, **kwargs):
         if self.is_default:
             # QA3-033: Scope is_default reset to same dimension only
-            Unit.objects.filter(dimension=self.dimension).exclude(pk=self.pk).update(is_default=False)
+            Unit.objects.filter(dimension=self.dimension).exclude(pk=self.pk).update(
+                is_default=False
+            )
         super().save(*args, **kwargs)
 
 
@@ -135,14 +137,13 @@ class EntryUnit(models.Model):
         unique_together = [["entry", "unit"]]
         ordering = ["-is_default", "unit__name"]
 
+    def __str__(self):
+        default = " (default)" if self.is_default else ""
+        return f"{self.entry.name} - {self.unit.symbol}{default}"
+
     def save(self, *args, **kwargs):
         if self.is_default:
-            # Set all other entry units for this entry to is_default=False
             EntryUnit.objects.filter(entry=self.entry).exclude(pk=self.pk).update(
                 is_default=False
             )
         super().save(*args, **kwargs)
-
-    def __str__(self):
-        default = " (default)" if self.is_default else ""
-        return f"{self.entry.name} - {self.unit.symbol}{default}"

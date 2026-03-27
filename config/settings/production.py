@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 import logging
 
 import sentry_sdk
@@ -122,15 +121,9 @@ ADMIN_URL = env("DJANGO_ADMIN_URL")
 # TODO: Uncomment this when we have a valid Brevo API key
 # ------------------------------------------------------------------------------
 # https://anymail.readthedocs.io/en/stable/installation/#installing-anymail
-# INSTALLED_APPS += ["anymail"]
 # https://docs.djangoproject.com/en/dev/ref/settings/#email-backend
 # https://anymail.readthedocs.io/en/stable/installation/#anymail-settings-reference
 # https://anymail.readthedocs.io/en/stable/esps/brevo/
-#EMAIL_BACKEND = "anymail.backends.brevo.EmailBackend"
-#ANYMAIL = {
-#    "BREVO_API_KEY": env("BREVO_API_KEY"),
-#    "BREVO_API_URL": env("BREVO_API_URL", default="https://api.brevo.com/v3/"),
-#}
 
 # Frontend URL for email links
 FRONTEND_URL = env("FRONTEND_URL", default="https://go.aivus.co")

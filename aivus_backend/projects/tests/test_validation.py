@@ -18,11 +18,11 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client as DjangoTestClient
 from django.utils import timezone
 
-from aivus_backend.users.models import User
-from aivus_backend.users.models import Vendor
-from aivus_backend.users.models import Client as ClientModel
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import Project
+from aivus_backend.users.models import Client as ClientModel
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 
 
 def _auth_headers(user, group=None):
@@ -118,25 +118,19 @@ class TestNonUUIDParams:
     def test_project_detail_non_uuid_returns_404(self, api_client, vendor_user, vendor):
         """Non-UUID in project URL should return 404 (caught by URL routing)."""
         headers = _vendor_headers(vendor_user, vendor.id)
-        response = api_client.get(
-            "/api/v1/projects/not-a-uuid", **headers
-        )
+        response = api_client.get("/api/v1/projects/not-a-uuid", **headers)
         assert response.status_code == 404
 
     def test_offer_detail_non_uuid_returns_404(self, api_client, vendor_user, vendor):
         """Non-UUID in offer URL should return 404."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            "/api/v1/offers/not-a-uuid", **headers
-        )
+        response = api_client.get("/api/v1/offers/not-a-uuid", **headers)
         assert response.status_code == 404
 
     def test_brief_detail_non_uuid_returns_404(self, api_client, vendor_user, vendor):
         """Non-UUID in brief URL should return 404."""
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            "/api/v1/briefs/not-a-uuid", **headers
-        )
+        response = api_client.get("/api/v1/briefs/not-a-uuid", **headers)
         assert response.status_code == 404
 
     def test_create_offer_non_uuid_project_id_returns_400(
@@ -185,9 +179,7 @@ class TestNonUUIDParams:
         """Valid UUID format but non-existent resource should return 404."""
         fake_id = uuid.uuid4()
         headers = _auth_headers(vendor_user, "VENDOR")
-        response = api_client.get(
-            f"/api/v1/offers/{fake_id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers/{fake_id}", **headers)
         assert response.status_code == 404
 
 
@@ -301,7 +293,9 @@ class TestFileUploadValidation:
         """Uploading an executable file should be rejected."""
         headers = _auth_headers(vendor_user, "VENDOR")
         exe_data = b"MZ" + b"\x00" * 100  # PE header start
-        upload = SimpleUploadedFile("malware.exe", exe_data, content_type="application/x-msdownload")
+        upload = SimpleUploadedFile(
+            "malware.exe", exe_data, content_type="application/x-msdownload"
+        )
         response = api_client.post(
             f"/api/v1/projects/{project.id}/thumbnail",
             {"thumbnail": upload},
@@ -386,6 +380,7 @@ class TestXLSXCellScanningBounds:
         headers = _auth_headers(client_user, "CLIENT")
         try:
             import openpyxl
+
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Empty"

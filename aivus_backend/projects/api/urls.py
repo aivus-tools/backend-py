@@ -11,7 +11,11 @@ urlpatterns = [
     path("projects", views.projects_list, name="projects_list"),
     path("projects/archived", views.projects_archived, name="projects_archived"),
     path("projects/<uuid:project_id>", views.project_detail, name="project_detail"),
-    path("projects/<uuid:project_id>/restore", views.project_restore, name="project_restore"),
+    path(
+        "projects/<uuid:project_id>/restore",
+        views.project_restore,
+        name="project_restore",
+    ),
     path(
         "projects/<uuid:project_id>/thumbnail",
         views.project_thumbnail,
@@ -44,8 +48,14 @@ urlpatterns = [
     path("shares", views.shares_create, name="shares_create"),
     path("shares/<str:token>", views.share_get_public, name="share_get_public"),
     path("shares/<str:token>/manage", views.share_manage, name="share_manage"),
-    path("shares/<str:token>/link", views.share_link_to_brief, name="share_link_to_brief"),
-    path("shares/<str:token>/export-data", views.share_export_data, name="share_export_data"),
+    path(
+        "shares/<str:token>/link", views.share_link_to_brief, name="share_link_to_brief"
+    ),
+    path(
+        "shares/<str:token>/export-data",
+        views.share_export_data,
+        name="share_export_data",
+    ),
     # Templates (Sprint 3)
     path("templates", views.templates_list, name="templates_list"),
     path("templates/<uuid:template_id>", views.template_detail, name="template_detail"),
@@ -60,7 +70,11 @@ urlpatterns = [
     path("rates/<uuid:rate_card_id>", views.rate_card_detail, name="rate_card_detail"),
     # Client Briefs (Sprint 3)
     path("client/briefs", views.client_briefs_list, name="client_briefs_list"),
-    path("client/briefs/<uuid:brief_id>", views.client_brief_detail, name="client_brief_detail"),
+    path(
+        "client/briefs/<uuid:brief_id>",
+        views.client_brief_detail,
+        name="client_brief_detail",
+    ),
     path(
         "client/briefs/<uuid:brief_id>/offers",
         views.client_brief_offers,
@@ -85,8 +99,11 @@ urlpatterns = [
         name="client_brief_comparison_analyze",
     ),
     # Export Data
-    path("offers/<uuid:offer_id>/export-data", views.offer_export_data, name="offer_export_data"),
+    path(
+        "offers/<uuid:offer_id>/export-data",
+        views.offer_export_data,
+        name="offer_export_data",
+    ),
     # XLSX Upload (Sprint 5)
     path("client/xlsx-upload", views.client_xlsx_upload, name="client_xlsx_upload"),
 ]
-

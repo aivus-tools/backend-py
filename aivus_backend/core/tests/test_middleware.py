@@ -107,6 +107,7 @@ class TestUserGroupHeaderSpoofing:
         the user_data reflects the DB group, not the spoofed header.
         """
         import uuid
+
         fake_vendor_id = str(uuid.uuid4())
         headers = {
             "HTTP_X_API_KEY": settings.API_KEY,
@@ -118,7 +119,7 @@ class TestUserGroupHeaderSpoofing:
         response = api_client.get("/api/v1/users/me", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
-        # After BUG-007 fix, the group should be CLIENT (from DB), not VENDOR (from header)
+        # BUG-007: group should be CLIENT (DB), not VENDOR (header)
         assert data["group"] == "CLIENT"
 
     def test_middleware_sets_correct_group_from_db(self, api_client, vendor_user):
@@ -217,6 +218,7 @@ class TestMissingAuthHeaders:
     def test_nonexistent_user_id_rejected(self, api_client, db):
         """API key with non-existent user ID should return 401."""
         import uuid
+
         headers = {
             "HTTP_X_API_KEY": settings.API_KEY,
             "HTTP_X_USER_ID": str(uuid.uuid4()),
@@ -290,12 +292,14 @@ class TestPublicEndpoints:
         """Registration endpoint should not require auth."""
         response = api_client.post(
             "/api/v1/auth/register",
-            data=json.dumps({
-                "email": "public-test@example.com",
-                "password": "validpass123",
-                "name": "Public Test",
-                "authType": "CREDENTIALS",
-            }),
+            data=json.dumps(
+                {
+                    "email": "public-test@example.com",
+                    "password": "validpass123",
+                    "name": "Public Test",
+                    "authType": "CREDENTIALS",
+                }
+            ),
             content_type="application/json",
         )
         # Should not return 401 (it's public)
@@ -309,18 +313,22 @@ class TestPublicEndpoints:
         """
         response = api_client.post(
             "/api/v1/auth/login",
-            data=json.dumps({
-                "email": "nobody@example.com",
-                "password": "whatever",
-            }),
+            data=json.dumps(
+                {
+                    "email": "nobody@example.com",
+                    "password": "whatever",
+                }
+            ),
             content_type="application/json",
         )
         # 401 from the view (invalid credentials) is different from
         # 401 from middleware (missing auth). The error message tells us:
         data = json.loads(response.content)
         assert "error" in data
-        # Should say "Invalid credentials" (from view), not "Missing authentication headers" (from middleware)
-        assert "credentials" in data["error"].lower() or "Missing" not in data.get("error", "")
+        # Should say "Invalid credentials" (view), not "Missing..." (mw)
+        assert "credentials" in data["error"].lower() or "Missing" not in data.get(
+            "error", ""
+        )
 
     def test_forgot_password_is_public(self, api_client, db):
         """Forgot password endpoint should not require auth."""

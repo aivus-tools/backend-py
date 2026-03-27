@@ -2,6 +2,7 @@
 
 import json
 import logging
+from decimal import Decimal
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -15,6 +16,10 @@ from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
+from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+
+MAX_NAME_LENGTH = 255
+MAX_LANGUAGE_LENGTH = 5
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +73,7 @@ def user_me(request):
 @csrf_exempt
 @require_http_methods(["PATCH"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM", "CONFIRMED")
-def change_user_group(request, user_id):
+def change_user_group(request, user_id):  # noqa: C901, PLR0912
     """
     Change user group.
 
@@ -78,9 +83,15 @@ def change_user_group(request, user_id):
     try:
         # Users can only change their own group
         if str(request.user_data["id"]) != str(user_id):
-            return JsonResponse({"error": "You can only change your own group"}, status=403)
+            return JsonResponse(
+                {"error": "You can only change your own group"}, status=403
+            )
 
-        body = request.body.decode() if isinstance(request.body, (bytes, bytearray)) else request.body
+        body = (
+            request.body.decode()
+            if isinstance(request.body, (bytes, bytearray))
+            else request.body
+        )
         data = json.loads(body or "{}")
         # Support both formats: new backend (group) and legacy (newGroup)
         new_group = data.get("group") or data.get("newGroup")
@@ -91,14 +102,24 @@ def change_user_group(request, user_id):
         # Validate new_group is a valid UserGroup value
         valid_groups = [g.value for g in UserGroup]
         if new_group not in valid_groups:
-            return JsonResponse({"error": f"Invalid group. Must be one of: {', '.join(valid_groups)}"}, status=400)
+            return JsonResponse(
+                {"error": f"Invalid group. Must be one of: {', '.join(valid_groups)}"},
+                status=400,
+            )
 
         user = User.objects.get(id=user_id)
 
         # Only allow CONFIRMED -> VENDOR or CONFIRMED -> CLIENT transitions
-        if user.group != UserGroup.CONFIRMED or new_group not in (UserGroup.VENDOR, UserGroup.CLIENT):
+        if user.group != UserGroup.CONFIRMED or new_group not in (
+            UserGroup.VENDOR,
+            UserGroup.CLIENT,
+        ):
             return JsonResponse(
-                {"error": "Group change only allowed from CONFIRMED to VENDOR or CLIENT"},
+                {
+                    "error": (
+                        "Group change only allowed from CONFIRMED to VENDOR or CLIENT"
+                    )
+                },
                 status=400,
             )
 
@@ -184,7 +205,7 @@ def get_users(request):
 @csrf_exempt
 @require_http_methods(["GET", "PATCH"])
 @require_groups("VENDOR", "CLIENT", "SYSTEM")
-def user_profile(request):
+def user_profile(request):  # noqa: C901
     """Get or update current user profile.
 
     GET /api/v1/users/profile - Returns user info + vendor/client data
@@ -207,8 +228,10 @@ def user_profile(request):
         data = json.loads(request.body)
 
         # Validate input lengths
-        if "name" in data and len(data["name"]) > 255:
-            return JsonResponse({"error": "Name must be 255 characters or fewer"}, status=400)
+        if "name" in data and len(data["name"]) > MAX_NAME_LENGTH:
+            return JsonResponse(
+                {"error": "Name must be 255 characters or fewer"}, status=400
+            )
 
         # Update User fields
         if "name" in data:
@@ -299,8 +322,10 @@ def user_settings(request):
         data = json.loads(request.body)
 
         if "language" in data:
-            if len(data["language"]) > 5:
-                return JsonResponse({"error": "Language must be 5 characters or fewer"}, status=400)
+            if len(data["language"]) > MAX_LANGUAGE_LENGTH:
+                return JsonResponse(
+                    {"error": "Language must be 5 characters or fewer"}, status=400
+                )
             settings.language = data["language"]
         if "nda_accepted" in data:
             settings.nda_accepted = bool(data["nda_accepted"])
@@ -445,7 +470,6 @@ def vendor_settings(request):
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
-    from aivus_backend.users.models import VendorSettings as VendorSettingsModel
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
 
     if request.method == "GET":
@@ -458,8 +482,6 @@ def vendor_settings(request):
             settings.company_name = data["companyName"]
         if "agencyName" in data:
             settings.agency_name = data["agencyName"]
-
-        from decimal import Decimal
 
         percent_fields_map = {
             "fringesPercent": "fringes_percent",
@@ -501,7 +523,6 @@ def vendor_settings_logo(request):
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
-    from aivus_backend.users.models import VendorSettings as VendorSettingsModel
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
 
     logo_file = request.FILES.get("logo")

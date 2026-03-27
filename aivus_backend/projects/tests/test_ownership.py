@@ -16,12 +16,12 @@ from django.conf import settings
 from django.test import Client as DjangoTestClient
 from django.utils import timezone
 
-from aivus_backend.users.models import Client as ClientModel
-from aivus_backend.users.models import User
-from aivus_backend.users.models import Vendor
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import Project
+from aivus_backend.users.models import Client as ClientModel
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 
 
 def _auth_headers(user, group=None):
@@ -49,13 +49,12 @@ def api_client():
 @pytest.fixture
 def vendor_user_a(db):
     """Vendor user A."""
-    user = User.objects.create_user(
+    return User.objects.create_user(
         email="vendor-a@example.com",
         password="testpass123",
         name="Vendor A",
         group="VENDOR",
     )
-    return user
 
 
 @pytest.fixture
@@ -67,13 +66,12 @@ def vendor_a(vendor_user_a):
 @pytest.fixture
 def vendor_user_b(db):
     """Vendor user B."""
-    user = User.objects.create_user(
+    return User.objects.create_user(
         email="vendor-b@example.com",
         password="testpass123",
         name="Vendor B",
         group="VENDOR",
     )
-    return user
 
 
 @pytest.fixture
@@ -85,13 +83,12 @@ def vendor_b(vendor_user_b):
 @pytest.fixture
 def client_user_a(db):
     """Client user A."""
-    user = User.objects.create_user(
+    return User.objects.create_user(
         email="client-a@example.com",
         password="testpass123",
         name="Client A",
         group="CLIENT",
     )
-    return user
 
 
 @pytest.fixture
@@ -103,13 +100,12 @@ def client_a(client_user_a):
 @pytest.fixture
 def client_user_b(db):
     """Client user B."""
-    user = User.objects.create_user(
+    return User.objects.create_user(
         email="client-b@example.com",
         password="testpass123",
         name="Client B",
         group="CLIENT",
     )
-    return user
 
 
 @pytest.fixture
@@ -193,12 +189,12 @@ class TestProjectOwnership:
     Previously, project_detail had no vendor ownership check.
     """
 
-    def test_vendor_a_can_access_own_project(self, api_client, vendor_user_a, vendor_a, project_a):
+    def test_vendor_a_can_access_own_project(
+        self, api_client, vendor_user_a, vendor_a, project_a
+    ):
         """Vendor A should be able to GET their own project."""
         headers = _vendor_headers(vendor_user_a, vendor_a.id)
-        response = api_client.get(
-            f"/api/v1/projects/{project_a.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/projects/{project_a.id}", **headers)
         assert response.status_code == 200
 
     def test_vendor_b_cannot_modify_vendor_a_project(
@@ -223,9 +219,7 @@ class TestProjectOwnership:
     ):
         """Vendor B should NOT be able to DELETE Vendor A's project."""
         headers = _vendor_headers(vendor_user_b, vendor_b.id)
-        response = api_client.delete(
-            f"/api/v1/projects/{project_a.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/projects/{project_a.id}", **headers)
         assert response.status_code in (403, 404)
         project_a.refresh_from_db()
         assert project_a.deleted_at is None
@@ -260,9 +254,7 @@ class TestOfferOwnership:
     ):
         """Vendor A should be able to GET their own offer."""
         headers = _vendor_headers(vendor_user_a, vendor_a.id)
-        response = api_client.get(
-            f"/api/v1/offers/{offer_a.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers/{offer_a.id}", **headers)
         assert response.status_code == 200
 
     def test_vendor_b_cannot_modify_vendor_a_offer(
@@ -285,9 +277,7 @@ class TestOfferOwnership:
     ):
         """Vendor B should NOT be able to DELETE Vendor A's offer."""
         headers = _vendor_headers(vendor_user_b, vendor_b.id)
-        response = api_client.delete(
-            f"/api/v1/offers/{offer_a.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/offers/{offer_a.id}", **headers)
         assert response.status_code in (403, 404)
         offer_a.refresh_from_db()
         assert offer_a.deleted_at is None
@@ -320,9 +310,7 @@ class TestBriefOwnership:
     ):
         """Client A should be able to GET their own brief."""
         headers = _auth_headers(client_user_a, "CLIENT")
-        response = api_client.get(
-            f"/api/v1/briefs/{brief_a.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/briefs/{brief_a.id}", **headers)
         assert response.status_code == 200
 
     def test_client_b_cannot_modify_client_a_brief(
@@ -345,9 +333,7 @@ class TestBriefOwnership:
     ):
         """Client B should NOT be able to DELETE Client A's brief."""
         headers = _auth_headers(client_user_b, "CLIENT")
-        response = api_client.delete(
-            f"/api/v1/briefs/{brief_a.id}", **headers
-        )
+        response = api_client.delete(f"/api/v1/briefs/{brief_a.id}", **headers)
         assert response.status_code in (403, 404)
         brief_a.refresh_from_db()
         assert brief_a.deleted_at is None
@@ -396,9 +382,7 @@ class TestOffersListFiltering:
     ):
         """Filtering by projectId should return offers for that project."""
         headers = _vendor_headers(vendor_user_a, vendor_a.id)
-        response = api_client.get(
-            f"/api/v1/offers?projectId={project_a.id}", **headers
-        )
+        response = api_client.get(f"/api/v1/offers?projectId={project_a.id}", **headers)
         assert response.status_code == 200
         data = json.loads(response.content)
         assert len(data) >= 1

@@ -52,7 +52,7 @@ class User(AbstractUser):
         db_index=True,
     )
     position = models.CharField(max_length=255, blank=True, default="")
-    avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
+    avatar = models.ImageField(upload_to="avatars/", null=True, blank=True)
     auth_type = models.CharField(
         max_length=20,
         choices=AuthType.choices,
@@ -231,10 +231,16 @@ class VendorSettings(models.Model):
     fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
-    production_insurance_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
-    production_fee_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    production_insurance_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
+    production_fee_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
     post_markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
-    post_insurance_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    post_insurance_percent = models.DecimalField(
+        max_digits=6, decimal_places=2, default=0
+    )
     post_tax_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
