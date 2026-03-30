@@ -776,6 +776,8 @@ def offers_list(request):  # noqa: C901, PLR0912, PLR0915
                         "Error parsing offer details to entries for offer %s", offer.id
                     )
 
+                recalculate_offer_totals(offer)
+
             if "deliverables" in data:
                 _sync_offer_deliverables(offer, data["deliverables"])
             if "scheduleEntries" in data:
