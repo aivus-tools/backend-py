@@ -36,19 +36,24 @@ def _calculate_category_client_fees(offer, details):
         direct = [x for x in offers_list if x.get("categoryId") == cat_id]
         client_sum = Decimal(str(sum(x.get("clientCost", 0) for x in direct)))
 
-        sub_ids = [s.get("id") for s in sub_categories if s.get("parentCategoryId") == cat_id]
+        sub_ids = [
+            s.get("id") for s in sub_categories if s.get("parentCategoryId") == cat_id
+        ]
         for sub_id in sub_ids:
             sub_offers = [x for x in offers_list if x.get("categoryId") == sub_id]
             client_sum += Decimal(str(sum(x.get("clientCost", 0) for x in sub_offers)))
 
-        ext = external_markup_map.get(cat_id) if isinstance(external_markup_map, dict) else None
+        ext = (
+            external_markup_map.get(cat_id)
+            if isinstance(external_markup_map, dict)
+            else None
+        )
         has_ext = bool(ext and ext.get("enabled") and (ext.get("percent") or 0) > 0)
 
-        if "production" in tags:
-            if prod_insurance > 0:
-                total_client_fees += client_sum * prod_insurance / 100
-            if prod_fee > 0 and not has_ext:
-                total_client_fees += client_sum * prod_fee / 100
+        if "production" in tags and prod_insurance > 0:
+            total_client_fees += client_sum * prod_insurance / 100
+        if "production" in tags and prod_fee > 0 and not has_ext:
+            total_client_fees += client_sum * prod_fee / 100
 
         if "post_production" in tags:
             if post_insurance > 0:
