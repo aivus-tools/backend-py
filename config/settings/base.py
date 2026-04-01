@@ -261,6 +261,9 @@ UNFOLD = {
     "SITE_TITLE": "Aivus Admin",
     "SITE_HEADER": "Aivus Admin",
     "SITE_LOGO": "images/favicons/favicon.ico",
+    "STYLES": [
+        lambda request: "/static/css/admin-custom.css",
+    ],
 }
 
 # LOGGING
