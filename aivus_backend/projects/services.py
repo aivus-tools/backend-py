@@ -14,13 +14,59 @@ from aivus_backend.projects.models import OfferEntry
 logger = logging.getLogger(__name__)
 
 
-def recalculate_offer_totals(offer):
-    """Recalculate offer.cost and offer.profit from OfferEntry records.
+def _calculate_category_client_fees(offer, details):
+    """Calculate total client-side category fees (insurance, markup, tax, external)."""
+    categories = details.get("categories", [])
+    sub_categories = details.get("subCategories", [])
+    offers_list = details.get("offers", [])
+    external_markup_map = details.get("categoryExternalMarkup", {})
 
-    Aggregates cost and client_cost from all active entries,
-    applies unforeseen expenses percentages from offer.details,
-    and saves the result.
-    """
+    prod_insurance = Decimal(str(offer.production_insurance_percent or 0))
+    prod_fee = Decimal(str(offer.production_fee_percent or 0))
+    post_markup = Decimal(str(offer.post_markup_percent or 0))
+    post_insurance = Decimal(str(offer.post_insurance_percent or 0))
+    post_tax = Decimal(str(offer.post_tax_percent or 0))
+
+    total_client_fees = Decimal("0")
+
+    for cat in categories:
+        cat_id = cat.get("id", "")
+        tags = cat.get("tags", [])
+
+        direct = [x for x in offers_list if x.get("categoryId") == cat_id]
+        client_sum = Decimal(str(sum(x.get("clientCost", 0) for x in direct)))
+
+        sub_ids = [s.get("id") for s in sub_categories if s.get("parentCategoryId") == cat_id]
+        for sub_id in sub_ids:
+            sub_offers = [x for x in offers_list if x.get("categoryId") == sub_id]
+            client_sum += Decimal(str(sum(x.get("clientCost", 0) for x in sub_offers)))
+
+        ext = external_markup_map.get(cat_id) if isinstance(external_markup_map, dict) else None
+        has_ext = bool(ext and ext.get("enabled") and (ext.get("percent") or 0) > 0)
+
+        if "production" in tags:
+            if prod_insurance > 0:
+                total_client_fees += client_sum * prod_insurance / 100
+            if prod_fee > 0 and not has_ext:
+                total_client_fees += client_sum * prod_fee / 100
+
+        if "post_production" in tags:
+            if post_insurance > 0:
+                total_client_fees += client_sum * post_insurance / 100
+            if post_markup > 0 and not has_ext:
+                total_client_fees += client_sum * post_markup / 100
+            if post_tax > 0:
+                total_client_fees += client_sum * post_tax / 100
+
+        if has_ext:
+            ext_percent = Decimal(str(ext.get("percent", 0)))
+            total_client_fees += client_sum * ext_percent / 100
+
+    return total_client_fees
+
+
+def recalculate_offer_totals(offer):
+    """Recalculate offer.cost and offer.profit from OfferEntry records."""
     entries_agg = OfferEntry.objects.filter(
         offer=offer, deleted_at__isnull=True
     ).aggregate(
@@ -31,15 +77,16 @@ def recalculate_offer_totals(offer):
     base_client_cost = entries_agg["total_client_cost"] or Decimal("0")
 
     details = offer.details if isinstance(offer.details, dict) else {}
+
     unforeseen = details.get("unforeseenExpenses", {})
     if unforeseen.get("isVisible", True):
         uf_percent = Decimal(str(unforeseen.get("percent", 0)))
-        uf_client_percent = Decimal(str(unforeseen.get("clientPercent", 0)))
         offer.cost = base_cost + base_cost * uf_percent / 100
-        client_total = base_client_cost + base_client_cost * uf_client_percent / 100
     else:
         offer.cost = base_cost
-        client_total = base_client_cost
+
+    client_fees = _calculate_category_client_fees(offer, details)
+    client_total = base_client_cost + client_fees
 
     offer.profit = client_total - offer.cost
     offer.save(update_fields=["cost", "profit", "updated_at"])
