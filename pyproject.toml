@@ -133,11 +133,14 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = [
     "PLR2004",
+    "PLR0913",
     "S106",
     "S308",
     "PLC0415",
     "FBT001",
     "FBT002",
+    "B017",
+    "PT011",
 ]
 "conftest.py" = ["PLR2004", "S106"]
 

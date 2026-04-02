@@ -1,32 +1,36 @@
-# ⚡ PRE-COMMIT DISABLED FOR FASTER DEVELOPMENT
-# Uncomment below to re-enable checks
+exclude: '^docs/|/migrations/|devcontainer.json'
+default_stages: [pre-commit]
+minimum_pre_commit_version: "3.2.0"
 
-# exclude: '^docs/|/migrations/|devcontainer.json'
-# default_stages: [pre-commit]
-# minimum_pre_commit_version: "3.2.0"
-#
-# default_language_version:
-#   python: python3.13
-#
-# repos:
-#   - repo: https://github.com/pre-commit/pre-commit-hooks
-#     rev: v6.0.0
-#     hooks:
-#       - id: trailing-whitespace
-#       - id: end-of-file-fixer
-#       - id: check-yaml
-#       - id: detect-private-key
-#
-#   - repo: https://github.com/astral-sh/ruff-pre-commit
-#     rev: v0.14.1
-#     hooks:
-#       - id: ruff-check
-#         args: [--fix, --exit-non-zero-on-fix]
-#       - id: ruff-format
-#
-#   - repo: https://github.com/Riverside-Healthcare/djLint
-#     rev: v1.36.4
-#     hooks:
-#       - id: djlint-reformat-django
+default_language_version:
+  python: python3.13
 
-repos: []  # Empty repos = no pre-commit checks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.1
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/Riverside-Healthcare/djLint
+    rev: v1.36.4
+    hooks:
+      - id: djlint-reformat-django
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: bash -c 'set -a && source .envs/.local/.django && set +a && DJANGO_SETTINGS_MODULE=config.settings.test uv run mypy aivus_backend'
+        language: system
+        types: [python]
+        pass_filenames: false

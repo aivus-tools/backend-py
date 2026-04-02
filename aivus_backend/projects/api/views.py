@@ -2362,10 +2362,8 @@ def _build_comparison_data(brief):  # noqa: C901
 
     # Build categories with items and per-vendor values
     # Collect all unique categories across all vendors
-    all_categories = {}  # category_id -> category_name
-    category_items = defaultdict(
-        dict
-    )  # category_id -> {item_name -> {vendor_id -> entry_data}}
+    all_categories: dict = {}
+    category_items: defaultdict[str, dict] = defaultdict(dict)
 
     for vendor_id, entries in vendor_entries.items():
         for entry in entries:
@@ -2644,7 +2642,7 @@ def _build_offer_export_data(offer):
         .order_by("sort_order")
     )
 
-    categories_map = {}
+    categories_map: dict[str, dict] = {}
     for entry in entries:
         category_id = str(entry.category_id) if entry.category_id else "uncategorized"
         if category_id not in categories_map:

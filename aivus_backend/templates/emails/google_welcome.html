@@ -86,19 +86,14 @@
       <h1>Welcome to Aivus! 👋</h1>
       <p>Hi {{ user.name }},</p>
       <p>You've successfully signed up with your Google account. We've generated a temporary password for you:</p>
-      
       <div class="password-box">
         <div class="password">{{ temporary_password }}</div>
       </div>
-      
       <div class="warning">
         <strong>⚠️ Important:</strong> Please change this password as soon as possible for security reasons.
       </div>
-      
       <p>You can change your password in your account settings or use the "Forgot Password" feature.</p>
-      
       <a href="{{ frontend_url }}/auth" class="button">Go to Aivus</a>
-      
       <div class="footer">
         <p>You can continue using Google to sign in, or use your email and this password.</p>
         <p>
@@ -110,5 +105,3 @@
     </div>
   </body>
 </html>
-
-

@@ -63,7 +63,7 @@ def _calculate_category_client_fees(offer, details):
             if post_tax > 0:
                 total_client_fees += client_sum * post_tax / 100
 
-        if has_ext:
+        if has_ext and ext is not None:
             ext_percent = Decimal(str(ext.get("percent", 0)))
             total_client_fees += client_sum * ext_percent / 100
 

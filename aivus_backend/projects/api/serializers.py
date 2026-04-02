@@ -276,7 +276,7 @@ def serialize_rate_card_item(item: RateCardItem) -> dict:
 
 def serialize_rate_card(rate_card: RateCard, include_items: bool = True) -> dict:  # noqa: FBT001, FBT002
     """Serialize RateCard model to dict."""
-    result = {
+    result: dict = {
         "id": str(rate_card.id),
         "vendorId": str(rate_card.vendor_id),
         "name": rate_card.name,
@@ -322,7 +322,7 @@ def serialize_brief_detail(brief: Brief) -> dict:
     for bo in brief_offers:
         offer = bo.offer
         # QA4-023: Exclude cost/profit from client-facing brief detail
-        offer_data = {
+        offer_data: dict = {
             "id": str(offer.id),
             "projectName": offer.project_name,
             "description": offer.description,
