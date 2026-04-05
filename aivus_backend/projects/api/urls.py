@@ -3,6 +3,7 @@
 from django.urls import path
 
 from . import views
+from . import views_brief_v2
 
 app_name = "projects_api"
 
@@ -106,4 +107,64 @@ urlpatterns = [
     ),
     # XLSX Upload (Sprint 5)
     path("client/xlsx-upload", views.client_xlsx_upload, name="client_xlsx_upload"),
+    path(
+        "client/briefs/ai/start",
+        views_brief_v2.client_brief_ai_start,
+        name="client_brief_ai_start",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/status",
+        views_brief_v2.client_brief_ai_status,
+        name="client_brief_ai_status",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/chat",
+        views_brief_v2.client_brief_ai_chat,
+        name="client_brief_ai_chat",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>",
+        views_brief_v2.client_brief_ai_detail,
+        name="client_brief_ai_detail",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/section",
+        views_brief_v2.client_brief_ai_section,
+        name="client_brief_ai_section",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/feedback",
+        views_brief_v2.client_brief_ai_feedback,
+        name="client_brief_ai_feedback",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/finalize",
+        views_brief_v2.client_brief_ai_finalize,
+        name="client_brief_ai_finalize",
+    ),
+    path(
+        "public/briefs/ai/start",
+        views_brief_v2.public_brief_ai_start,
+        name="public_brief_ai_start",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/status",
+        views_brief_v2.public_brief_ai_status,
+        name="public_brief_ai_status",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/chat",
+        views_brief_v2.public_brief_ai_chat,
+        name="public_brief_ai_chat",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>",
+        views_brief_v2.public_brief_ai_detail,
+        name="public_brief_ai_detail",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/claim",
+        views_brief_v2.public_brief_ai_claim,
+        name="public_brief_ai_claim",
+    ),
 ]

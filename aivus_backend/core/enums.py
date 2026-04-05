@@ -77,8 +77,24 @@ class ShareStatus(models.TextChoices):
     DELETED = "DELETED", "Deleted"
 
 
-class UnitDimension(models.TextChoices):
-    """Unit dimension choices."""
+class ConversationPhase(models.TextChoices):
+    INITIAL = "initial", "Initial"
+    QUESTIONING = "questioning", "Questioning"
+    REFINING = "refining", "Refining"
+    COMPLETE = "complete", "Complete"
 
+
+class SectionStatus(models.TextChoices):
+    EMPTY = "empty", "Empty"
+    DRAFT = "draft", "Draft"
+    COMPLETE = "complete", "Complete"
+
+
+class FeedbackRating(models.TextChoices):
+    UP = "up", "Thumbs Up"
+    DOWN = "down", "Thumbs Down"
+
+
+class UnitDimension(models.TextChoices):
     QUANTITY = "QUANTITY", "Quantity"
     TEMPORAL = "TEMPORAL", "Temporal"

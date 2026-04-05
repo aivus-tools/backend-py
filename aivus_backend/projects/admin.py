@@ -7,6 +7,8 @@ from tinymce.widgets import TinyMCE
 from unfold.admin import ModelAdmin
 
 from .models import Brief
+from .models import BriefFeedback
+from .models import BriefMethodology
 from .models import BriefOffer
 from .models import ChatMessage
 from .models import ClientManager
@@ -29,12 +31,28 @@ CONTENT_PREVIEW_LENGTH = 80
 
 @admin.register(Brief)
 class BriefAdmin(ModelAdmin):
-    """Brief admin configuration."""
-
-    list_display = ["id", "status", "client", "created_at"]
-    search_fields = ["id", "client__name"]
-    list_filter = ["status", "created_at"]
-    readonly_fields = ["created_at", "updated_at", "deleted_at"]
+    list_display = [
+        "id",
+        "status",
+        "conversation_phase",
+        "client",
+        "total_cost_usd",
+        "message_count",
+        "version",
+        "created_at",
+    ]
+    search_fields = ["id", "client__name", "anonymous_token"]
+    list_filter = ["status", "conversation_phase", "created_at"]
+    readonly_fields = [
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "version",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_cost_usd",
+        "message_count",
+    ]
     ordering = ["-created_at"]
 
 
@@ -411,12 +429,25 @@ class RateCardItemAdmin(ModelAdmin):
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(ModelAdmin):
-    """ChatMessage admin configuration."""
-
-    list_display = ["brief", "user", "role", "content_short", "created_at"]
+    list_display = [
+        "brief",
+        "user",
+        "role",
+        "model_used",
+        "cost_usd",
+        "content_short",
+        "created_at",
+    ]
     search_fields = ["content", "user__email", "brief__id"]
-    list_filter = ["role", "created_at"]
-    readonly_fields = ["created_at"]
+    list_filter = ["role", "model_used", "created_at"]
+    readonly_fields = [
+        "created_at",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd",
+        "model_used",
+        "sections_changed",
+    ]
     ordering = ["-created_at"]
 
     @admin.display(description="Content")
@@ -425,4 +456,44 @@ class ChatMessageAdmin(ModelAdmin):
             instance.content[:CONTENT_PREVIEW_LENGTH] + "..."
             if len(instance.content) > CONTENT_PREVIEW_LENGTH
             else instance.content
+        )
+
+
+@admin.register(BriefMethodology)
+class BriefMethodologyAdmin(ModelAdmin):
+    list_display = [
+        "title",
+        "archetype_code",
+        "section_key",
+        "priority",
+        "is_active",
+        "updated_at",
+    ]
+    search_fields = ["title", "content"]
+    list_filter = ["archetype_code", "section_key", "is_active"]
+    list_editable = ["priority", "is_active"]
+    ordering = ["priority"]
+
+
+@admin.register(BriefFeedback)
+class BriefFeedbackAdmin(ModelAdmin):
+    list_display = [
+        "brief",
+        "section_key",
+        "rating",
+        "user",
+        "comment_short",
+        "created_at",
+    ]
+    search_fields = ["comment", "brief__id"]
+    list_filter = ["rating", "section_key", "created_at"]
+    readonly_fields = ["created_at"]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Comment")
+    def comment_short(self, instance):
+        return (
+            instance.comment[:CONTENT_PREVIEW_LENGTH] + "..."
+            if len(instance.comment) > CONTENT_PREVIEW_LENGTH
+            else instance.comment
         )

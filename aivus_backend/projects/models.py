@@ -9,6 +9,8 @@ from django.db import models
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.core.enums import BriefStatus
+from aivus_backend.core.enums import ConversationPhase
+from aivus_backend.core.enums import FeedbackRating
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
 from aivus_backend.core.enums import ProjectStatus
@@ -20,13 +22,25 @@ from aivus_backend.users.models import Team
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
 
+BRIEF_SECTION_KEYS = [
+    "project_header",
+    "budget_timeline",
+    "strategic_foundation",
+    "creative_direction",
+    "scope_video",
+    "scope_photo",
+    "post_production",
+    "usage_rights",
+    "deliverables",
+]
+
+
+def _default_sections_status():
+    return dict.fromkeys(BRIEF_SECTION_KEYS, "empty")
+
 
 class Brief(models.Model):
-    """Brief/RFP model."""
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    # QA3-051: Use BriefStatus instead of ProjectStatus
-    # QA4-052: Add default status
     status = models.CharField(
         max_length=20, choices=BriefStatus.choices, default=BriefStatus.DRAFT
     )
@@ -38,6 +52,26 @@ class Brief(models.Model):
         blank=True,
         related_name="briefs",
     )
+
+    document_sections = models.JSONField(default=dict, blank=True)
+    structured_data = models.JSONField(default=dict, blank=True)
+    archetypes = models.JSONField(default=list, blank=True)
+    sections_status = models.JSONField(default=_default_sections_status, blank=True)
+    conversation_phase = models.CharField(
+        max_length=20,
+        choices=ConversationPhase.choices,
+        default=ConversationPhase.INITIAL,
+    )
+    version = models.IntegerField(default=0)
+    anonymous_token = models.CharField(
+        max_length=64, unique=True, null=True, blank=True, db_index=True
+    )
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    total_input_tokens = models.IntegerField(default=0)
+    total_output_tokens = models.IntegerField(default=0)
+    total_cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    message_count = models.IntegerField(default=0)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -48,6 +82,14 @@ class Brief(models.Model):
 
     def __str__(self):
         return f"Brief {self.id} - {self.status}"
+
+    def render_document_html(self) -> str:
+        parts = []
+        for key in BRIEF_SECTION_KEYS:
+            html = self.document_sections.get(key, "")
+            if html:
+                parts.append(f'<div data-section="{key}">{html}</div>')
+        return "\n<hr/>\n".join(parts)
 
 
 class Project(models.Model):
@@ -599,8 +641,6 @@ class RateCard(models.Model):
 
 
 class ChatMessage(models.Model):
-    """Chat message for AI-assisted brief creation."""
-
     ROLE_CHOICES = [
         ("user", "User"),
         ("assistant", "Assistant"),
@@ -616,12 +656,20 @@ class ChatMessage(models.Model):
     )
     user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="chat_messages",
     )
+    anonymous_token = models.CharField(max_length=64, blank=True, default="")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     content = models.TextField()
     metadata = models.JSONField(default=dict, blank=True)
+    input_tokens = models.IntegerField(default=0)
+    output_tokens = models.IntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    model_used = models.CharField(max_length=100, blank=True, default="")
+    sections_changed = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -668,3 +716,56 @@ class RateCardItem(models.Model):
 
     def __str__(self):
         return f"{self.item_name} - ${self.price}"
+
+
+class BriefMethodology(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    archetype_code = models.IntegerField(null=True, blank=True, db_index=True)
+    section_key = models.CharField(max_length=50, blank=True, default="", db_index=True)
+    title = models.CharField(max_length=255)
+    content = models.TextField()
+    priority = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_methodology"
+        ordering = ["priority"]
+
+    def __str__(self):
+        archetype = f"A{self.archetype_code}" if self.archetype_code else "all"
+        section = self.section_key or "general"
+        return f"{self.title} ({archetype}/{section})"
+
+
+class BriefFeedback(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.CASCADE,
+        related_name="feedbacks",
+    )
+    message = models.ForeignKey(
+        ChatMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="feedbacks",
+    )
+    section_key = models.CharField(max_length=50, blank=True, default="")
+    rating = models.CharField(max_length=10, choices=FeedbackRating.choices)
+    comment = models.TextField(blank=True, default="")
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="brief_feedbacks",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "brief_feedback"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.rating} on {self.brief_id} by {self.user_id}"

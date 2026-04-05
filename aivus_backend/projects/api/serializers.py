@@ -1,7 +1,9 @@
 """Serializers for projects API."""
 
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefOffer
+from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
 from aivus_backend.projects.models import OfferDeliverable
@@ -352,4 +354,57 @@ def serialize_brief_detail(brief: Brief) -> dict:
         "offersCount": len(linked_offers),
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
+    }
+
+
+def serialize_chat_message_v2(message: ChatMessage) -> dict:
+    feedback = message.feedbacks.first() if hasattr(message, "feedbacks") else None
+    return {
+        "id": str(message.id),
+        "role": message.role,
+        "content": message.content,
+        "sectionsChanged": message.sections_changed,
+        "modelUsed": message.model_used,
+        "inputTokens": message.input_tokens,
+        "outputTokens": message.output_tokens,
+        "feedback": serialize_brief_feedback(feedback) if feedback else None,
+        "createdAt": message.created_at.isoformat() if message.created_at else None,
+    }
+
+
+def serialize_brief_v2(brief: Brief) -> dict:
+    return {
+        "id": str(brief.id),
+        "status": brief.status,
+        "documentHtml": brief.render_document_html(),
+        "documentSections": brief.document_sections,
+        "structuredData": brief.structured_data,
+        "archetypes": brief.archetypes,
+        "sectionsStatus": brief.sections_status,
+        "conversationPhase": brief.conversation_phase,
+        "version": brief.version,
+        "totalInputTokens": brief.total_input_tokens,
+        "totalOutputTokens": brief.total_output_tokens,
+        "totalCostUsd": str(brief.total_cost_usd),
+        "messageCount": brief.message_count,
+        "createdAt": brief.created_at.isoformat() if brief.created_at else None,
+        "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
+    }
+
+
+def serialize_brief_v2_detail(brief: Brief) -> dict:
+    messages = brief.chat_messages.prefetch_related("feedbacks").all()
+    result = serialize_brief_v2(brief)
+    result["messages"] = [serialize_chat_message_v2(x) for x in messages]
+    return result
+
+
+def serialize_brief_feedback(feedback: BriefFeedback) -> dict:
+    return {
+        "id": str(feedback.id),
+        "sectionKey": feedback.section_key,
+        "rating": feedback.rating,
+        "comment": feedback.comment,
+        "userId": str(feedback.user_id),
+        "createdAt": feedback.created_at.isoformat() if feedback.created_at else None,
     }
