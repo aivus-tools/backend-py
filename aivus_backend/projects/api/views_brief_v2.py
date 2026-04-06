@@ -43,6 +43,7 @@ MAX_SECTION_HTML_LENGTH = 50000
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 BRIEF_SECTION_KEY_SET = set(BRIEF_SECTION_KEYS)
+SUPPORTED_LANGUAGES = {"en", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko"}
 
 
 def _get_brief_for_client(brief_id, request):
@@ -101,6 +102,15 @@ def _validate_message(body):
     if len(message) > MAX_MESSAGE_LENGTH:
         return None, JsonResponse({"error": "Message too long"}, status=400)
     return message, None
+
+
+def _normalize_document_language(language: str) -> str:
+    if not language:
+        return ""
+    lang = language.strip().lower()
+    if lang in SUPPORTED_LANGUAGES:
+        return lang
+    return ""
 
 
 @csrf_exempt
@@ -419,6 +429,8 @@ def public_brief_ai_start(request):
     if error:
         return error
 
+    document_language = _normalize_document_language(body.get("documentLanguage", ""))
+
     token = secrets.token_urlsafe(48)
     brief = Brief.objects.create(
         client=None,
@@ -434,7 +446,7 @@ def public_brief_ai_start(request):
         content=message,
     )
 
-    task = generate_brief_task.delay(str(brief.id), message)
+    task = generate_brief_task.delay(str(brief.id), message, document_language)
 
     return JsonResponse(
         {
@@ -501,6 +513,8 @@ def public_brief_ai_chat(request, brief_id):
     if error:
         return error
 
+    document_language = _normalize_document_language(body.get("documentLanguage", ""))
+
     token = request.headers.get("X-Brief-Token", "")
     ChatMessage.objects.create(
         brief=brief,
@@ -523,6 +537,7 @@ def public_brief_ai_chat(request, brief_id):
             conversation_phase=brief.conversation_phase,
             questions_asked=[],
             history=history,
+            document_language=document_language,
         )
     except Exception:
         logger.exception("process_brief_message failed: brief_id=%s", brief_id)
