@@ -158,6 +158,15 @@ def change_user_group(request, user_id):  # noqa: C901, PLR0912
             if client:
                 response_data["clientId"] = str(client.id)
 
+            if user.pending_brief_id:
+                from aivus_backend.users.api.auth_views import (  # noqa: PLC0415
+                    _try_claim_pending_brief,
+                )
+
+                claimed = _try_claim_pending_brief(user)
+                if claimed:
+                    response_data["claimedBriefId"] = claimed
+
         return JsonResponse(response_data, status=200)
 
     except User.DoesNotExist:

@@ -59,6 +59,11 @@ class User(AbstractUser):
         default=AuthType.CREDENTIALS,
     )
 
+    pending_brief_id = models.UUIDField(null=True, blank=True)
+    pending_brief_token = models.CharField(  # noqa: DJ001
+        max_length=64, null=True, blank=True
+    )
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 

@@ -4,11 +4,16 @@ import json
 import logging
 import secrets
 import string
+import uuid as uuid_module
+from hmac import compare_digest
 
+from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -49,12 +54,76 @@ def generate_temporary_password(length: int = 12) -> str:
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_SECRET_HEADER = "HTTP_X_INTERNAL_SECRET"  # noqa: S105
+
+
+def _is_internal_request(request):
+    secret = getattr(settings, "HMAC_SECRET", None)
+    if not secret:
+        return False
+    header_value = request.META.get(INTERNAL_SECRET_HEADER, "")
+    if not header_value:
+        return False
+    return compare_digest(str(secret), str(header_value))
+
+
+def _save_pending_brief(user, data):
+    brief_id = data.get("briefId")
+    brief_token = data.get("briefToken")
+    if not brief_id or not brief_token:
+        return
+    try:
+        uuid_module.UUID(str(brief_id))
+    except (ValueError, AttributeError):
+        return
+    from aivus_backend.projects.models import Brief  # noqa: PLC0415
+
+    exists = Brief.objects.filter(
+        id=brief_id,
+        anonymous_token=brief_token,
+        client__isnull=True,
+        deleted_at__isnull=True,
+    ).exists()
+    if exists:
+        user.pending_brief_id = brief_id
+        user.pending_brief_token = brief_token
+        user.save(update_fields=["pending_brief_id", "pending_brief_token"])
+
+
+def _try_claim_pending_brief(user):
+    if not user.pending_brief_id or not user.pending_brief_token:
+        return None
+    client = Client.objects.filter(owner=user).first()
+    if not client:
+        return None
+    from aivus_backend.projects.models import Brief  # noqa: PLC0415
+    from aivus_backend.projects.models import ChatMessage  # noqa: PLC0415
+
+    now = timezone.now()
+    with transaction.atomic():
+        rows = Brief.objects.filter(
+            id=user.pending_brief_id,
+            anonymous_token=user.pending_brief_token,
+            client__isnull=True,
+            deleted_at__isnull=True,
+        ).update(client=client, anonymous_token=None, claimed_at=now)
+        if rows > 0:
+            ChatMessage.objects.filter(
+                brief_id=user.pending_brief_id,
+                anonymous_token=user.pending_brief_token,
+            ).update(anonymous_token="")
+    brief_id = str(user.pending_brief_id)
+    user.pending_brief_id = None
+    user.pending_brief_token = None
+    user.save(update_fields=["pending_brief_id", "pending_brief_token"])
+    return brief_id if rows > 0 else None
+
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
 @ratelimit(key="ip", rate="5/m", method="POST", block=True)
-def register(request):
+def register(request):  # noqa: C901, PLR0912
     """
     Register a new user.
 
@@ -71,59 +140,75 @@ def register(request):
         if not email or not name:
             return JsonResponse({"error": "Email and name are required"}, status=400)
 
-        # QA2-001: Reject Google auth type through register endpoint
-        if auth_type == "GOOGLE":
+        is_internal = _is_internal_request(request)
+        is_google = auth_type == "GOOGLE"
+
+        if is_google and not is_internal:
             return JsonResponse(
                 {"error": "Google authentication must use OAuth flow"},
                 status=400,
             )
 
-        # Check if user exists
         if User.objects.filter(email=email).exists():
             return JsonResponse({"error": "Email already exists"}, status=400)
 
-        # QA2-012: Use Django's password validation instead of simple length check
-        if not password:
-            return JsonResponse(
-                {"error": "Password is required"},
-                status=400,
-            )
-        try:
-            validate_password(password)
-        except ValidationError as e:
-            return JsonResponse(
-                {"error": e.messages},
-                status=400,
-            )
-        hashed_password = make_password(password)
+        if is_google:
+            hashed_password = make_password(generate_temporary_password(32))
+        else:
+            if not password:
+                return JsonResponse(
+                    {"error": "Password is required"},
+                    status=400,
+                )
+            try:
+                validate_password(password)
+            except ValidationError as e:
+                return JsonResponse(
+                    {"error": e.messages},
+                    status=400,
+                )
+            hashed_password = make_password(password)
 
-        # Create user
+        group = "CONFIRMED" if is_google else "UNCONFIRMED"
+
         user = User.objects.create(
             email=email,
             name=name,
             password=hashed_password,
             auth_type=auth_type,
-            group="UNCONFIRMED",
+            group=group,
         )
 
-        # Send confirmation email for CREDENTIALS users
-        token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
+        _save_pending_brief(user, data)
 
-        # Send confirmation email
-        email_sent = send_confirmation_email(user, token_obj.token)
+        response_data = {
+            "id": str(user.id),
+            "message": "User registered.",
+            "group": user.group,
+        }
 
-        if email_sent:
-            logger.info("Confirmation email sent to %s", user.email)
+        if is_google:
+            if user.pending_brief_id:
+                user.group = "CLIENT"
+                user.save(update_fields=["group"])
+                client, _ = Client.objects.get_or_create(
+                    owner=user,
+                    defaults={"name": f"{user.name}'s Company", "ein": ""},
+                )
+                response_data["group"] = user.group
+                response_data["clientId"] = str(client.id)
+                claimed = _try_claim_pending_brief(user)
+                if claimed:
+                    response_data["claimedBriefId"] = claimed
         else:
-            logger.error("Failed to send confirmation email to %s", user.email)
+            token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
+            email_sent = send_confirmation_email(user, token_obj.token)
+            if email_sent:
+                logger.info("Confirmation email sent to %s", user.email)
+            else:
+                logger.error("Failed to send confirmation email to %s", user.email)
 
-        # QA4-049: Do not expose internal UUID in register response
-        return JsonResponse(
-            {
-                "message": "User registered. Check your email to confirm account.",
-            },
-            status=201,
-        )
+        return JsonResponse(response_data, status=201)
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -136,7 +221,7 @@ def register(request):
 @require_http_methods(["POST"])
 @public_endpoint
 @ratelimit(key="ip", rate="5/m", method="POST", block=True)
-def login(request):  # noqa: C901
+def login(request):  # noqa: C901, PLR0912
     """
     Login user.
 
@@ -167,31 +252,33 @@ def login(request):  # noqa: C901
         if not user:
             return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-        # Google authentication must go through OAuth flow, not direct login
+        is_internal = _is_internal_request(request)
+
         if auth_type == "GOOGLE":
-            return JsonResponse(
-                {
-                    "error": (
-                        "Google authentication must go through"
-                        " OAuth flow, not direct login"
-                    )
-                },
-                status=400,
-            )
-        # Handle credential login - require password
-        if not password:
-            logger.debug("No password provided for credential login")
-            return JsonResponse(
-                {"error": "Password is required"},
-                status=400,
-            )
-        logger.debug("Checking password for user: %s", user.email)
+            if not is_internal:
+                return JsonResponse(
+                    {"error": "Google authentication must go through OAuth flow"},
+                    status=400,
+                )
+            if user.auth_type != "GOOGLE":
+                return JsonResponse(
+                    {"error": "This account uses password authentication"},
+                    status=400,
+                )
+        else:
+            if not password:
+                logger.debug("No password provided for credential login")
+                return JsonResponse(
+                    {"error": "Password is required"},
+                    status=400,
+                )
+            logger.debug("Checking password for user: %s", user.email)
 
-        password_valid = user.check_plain_password(password)
-        logger.debug("Password validation result: %s", password_valid)
+            password_valid = user.check_plain_password(password)
+            logger.debug("Password validation result: %s", password_valid)
 
-        if not password_valid:
-            return JsonResponse({"error": "Invalid credentials"}, status=401)
+            if not password_valid:
+                return JsonResponse({"error": "Invalid credentials"}, status=401)
 
         # Prepare common response data
         response_data = {
@@ -210,6 +297,17 @@ def login(request):  # noqa: C901
             client = Client.objects.filter(owner=user).first()
             if client:
                 response_data["clientId"] = str(client.id)
+
+        brief_id = data.get("briefId")
+        brief_token = data.get("briefToken")
+        if brief_id and brief_token:
+            if user.group == "CLIENT":
+                _save_pending_brief(user, data)
+                claimed = _try_claim_pending_brief(user)
+                if claimed:
+                    response_data["claimedBriefId"] = claimed
+            elif user.group != "VENDOR":
+                _save_pending_brief(user, data)
 
         return JsonResponse(response_data, status=200)
 
@@ -258,21 +356,37 @@ def confirm_email(request):
                 status=400,
             )
 
-        user.group = "CONFIRMED"
-        user.save()
-        logger.info("Email confirmed for user: %s", user.email)
+        response_data = {}
 
+        if user.pending_brief_id:
+            user.group = "CLIENT"
+            user.save()
+            Client.objects.get_or_create(
+                owner=user,
+                defaults={"name": f"{user.name}'s Company", "ein": ""},
+            )
+            claimed = _try_claim_pending_brief(user)
+            if claimed:
+                response_data["claimedBriefId"] = claimed
+            client = Client.objects.filter(owner=user).first()
+            if client:
+                response_data["clientId"] = str(client.id)
+        else:
+            user.group = "CONFIRMED"
+            user.save()
+
+        logger.info("Email confirmed for user: %s (group=%s)", user.email, user.group)
         token_obj.delete()
 
-        return JsonResponse(
+        response_data.update(
             {
                 "id": str(user.id),
                 "email": user.email,
                 "name": user.name,
                 "group": user.group,
-            },
-            status=200,
+            }
         )
+        return JsonResponse(response_data, status=200)
 
     except Exception:
         logger.exception("Confirm email error")
@@ -430,6 +544,61 @@ def resend_confirmation(request):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception:
         logger.exception("Resend confirmation error")
+        return JsonResponse({"error": "An internal error occurred"}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@ratelimit(key="ip", rate="10/m", method="POST", block=True)
+def set_pending_brief(request):
+    """
+    Store pending brief for claiming after role assignment.
+
+    POST /api/v1/auth/set-pending-brief
+    Body: {"briefId": "...", "briefToken": "..."}
+    """
+    if not hasattr(request, "user_data") or not request.user_data:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        data = json.loads(request.body)
+        user_id = request.user_data.get("id")
+        user = User.objects.get(id=user_id)
+
+        _save_pending_brief(user, data)
+
+        if user.group == "CLIENT":
+            claimed = _try_claim_pending_brief(user)
+            if claimed:
+                return JsonResponse({"claimedBriefId": claimed}, status=200)
+
+        if user.group == "CONFIRMED":
+            user.group = "CLIENT"
+            user.save(update_fields=["group"])
+            Client.objects.get_or_create(
+                owner=user,
+                defaults={"name": f"{user.name}'s Company", "ein": ""},
+            )
+            claimed = _try_claim_pending_brief(user)
+            client_id = (
+                Client.objects.filter(owner=user).values_list("id", flat=True).first()
+            )
+            response_data = {
+                "group": user.group,
+                "clientId": str(client_id),
+            }
+            if claimed:
+                response_data["claimedBriefId"] = claimed
+            return JsonResponse(response_data, status=200)
+
+        return JsonResponse({"message": "Pending brief saved"}, status=200)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+    except Exception:
+        logger.exception("Set pending brief error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
 
 

@@ -19,4 +19,9 @@ urlpatterns = [
     path("check-email", auth_views.check_email, name="check-email"),
     path("forgot-password", auth_views.forgot_password, name="forgot-password"),
     path("reset-password", auth_views.reset_password, name="reset-password"),
+    path(
+        "set-pending-brief",
+        auth_views.set_pending_brief,
+        name="set-pending-brief",
+    ),
 ]
