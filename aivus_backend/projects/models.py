@@ -553,6 +553,32 @@ class Share(models.Model):
         return f"{self.offer.project_name} - token:{self.token[:8]}... ({status})"
 
 
+class BriefShare(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(Brief, on_delete=models.CASCADE, related_name="shares")
+    token = models.CharField(
+        max_length=64, unique=True, db_index=True, default=secrets.token_urlsafe
+    )
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_brief_shares",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_share"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        status = "active" if self.is_active else "inactive"
+        return f"Brief {self.brief_id} - token:{self.token[:8]}... ({status})"
+
+
 class BriefOffer(models.Model):
     """Links a shared offer to a client's brief."""
 

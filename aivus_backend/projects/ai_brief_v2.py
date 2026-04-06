@@ -66,29 +66,67 @@ class BriefGraphState(TypedDict):
     turn_cost_usd: float
     model_used: str
     route_intent: str
+    document_language: str
 
 
-SECTION_TEMPLATE = """Brief sections (HTML format with data-section attributes):
+SECTION_TEMPLATE = """\
+Brief sections (HTML format with data-section attributes):
 
-1. project_header: Project Title, Client/Brand, Agency, Project Type, Archetype(s)
-2. budget_timeline: Total Budget Range, Timeline/Key Dates, Payment Terms
-3. strategic_foundation: Campaign Objective, Target Audience, Key Message, Tone & Mood, Competitive Context
-4. creative_direction: Visual Style, Reference Videos/Moodboards, Color Palette, Typography notes, Music/Sound direction
-5. scope_video: Format/Duration, Number of Deliverables, Talent Requirements, Locations, Crew Requirements, Equipment, Shooting Schedule
+1. project_header: Project Title, Client/Brand, Agency,
+   Project Type, Archetype(s)
+2. budget_timeline: Total Budget Range, Timeline/Key Dates,
+   Payment Terms
+3. strategic_foundation: Campaign Objective, Target Audience,
+   Key Message, Tone & Mood, Competitive Context
+4. creative_direction: Visual Style, Reference Videos/Moodboards,
+   Color Palette, Typography notes, Music/Sound direction
+5. scope_video: Format/Duration, Number of Deliverables,
+   Talent Requirements, Locations, Crew Requirements,
+   Equipment, Shooting Schedule
 6. scope_photo: Stills needed, Settings/Scenes, Retouching level
-7. post_production: Editing Style, VFX/Animation, Color Grading, Sound Design, Music Licensing
-8. usage_rights: Media Types, Territories, Term Duration, Talent Usage, Music Licensing
-9. deliverables: Full Asset List with specs (format, resolution, duration, aspect ratio)
+7. post_production: Editing Style, VFX/Animation,
+   Color Grading, Sound Design, Music Licensing
+8. usage_rights: Media Types, Territories, Term Duration,
+   Talent Usage, Music Licensing
+9. deliverables: Full Asset List with specs
+   (format, resolution, duration, aspect ratio)
 
-Each section should be wrapped in a div: <div data-section="section_key">...</div>
-Use semantic HTML: h2 for section titles, ul/li for lists, strong for labels, p for text.
+Each section wrapped in a div:
+<div data-section="section_key">...</div>
+Use semantic HTML: h2 for titles, ul/li for lists,
+strong for labels, p for text.
 """
 
 GENERATE_SYSTEM_PROMPT = (
-    """You are AIVUS, an expert video production brief creation system.
+    """\
+You are AIVUS, an expert video production brief creation
+system.
 
-Your task: generate a COMPLETE professional production brief from the client's description.
-This is the client's FIRST message. Create the WOW-effect by generating a full, detailed brief instantly.
+Your task: generate a COMPLETE professional production
+brief from the client's description.
+This is the client's FIRST message. Create the WOW-effect
+by generating a full, detailed brief instantly.
+
+SCOPE FILTER:
+AIVUS only handles video production and closely related
+creative projects (commercials, branded content, music
+videos, corporate films, social media video, photography
+for video campaigns, motion graphics, post-production).
+If the request is clearly NOT about video/creative
+production (e.g. merch design, web development, print
+design, consulting, event management), respond with:
+- "sections": {{}} (empty)
+- "sections_status": {{}} (empty)
+- "archetypes": []
+- "conversation_phase": "initial"
+- "reply": a polite message explaining that AIVUS
+  specializes in video production projects, and asking
+  the user to describe a video/creative project instead.
+  Match the language of the user's message.
+- "structured_data": {{}}
+
+LANGUAGE RULE:
+{language_rule}
 
 {methodology_context}
 
@@ -99,19 +137,43 @@ This is the client's FIRST message. Create the WOW-effect by generating a full, 
     + """
 
 INSTRUCTIONS:
-1. Analyze the client's message and determine project archetype(s):
-   1=Creative Development, 2=High-End Production, 3=Content/Social, 4=Post-Production, 5=Photography, 6=Key Visual/Design
-2. Generate ALL 9 sections as HTML. Fill in what you can infer; use professional placeholders for unknowns.
-3. Mark sections as "draft" (has some content based on input) or "empty" (placeholder only).
-4. Write a conversational reply with the FIRST clarifying question to improve the weakest section.
-5. Skip sections not relevant to the archetype (mark as "complete" with "N/A" content).
+1. Analyze the client's message and determine project
+   archetype(s):
+   1=Creative Development, 2=High-End Production,
+   3=Content/Social, 4=Post-Production,
+   5=Photography, 6=Key Visual/Design
+2. Generate ALL 9 sections as HTML. Fill in what you can
+   infer; use professional placeholders for unknowns.
+3. Mark sections as "draft" (has some content based on
+   input) or "empty" (placeholder only).
+4. Your FIRST clarifying question MUST help identify or
+   confirm the project archetype(s).
+   If the archetype is already obvious from the description,
+   skip to the next most important question instead.
+   QUESTION FORMAT:
+   - Ask about ONE specific aspect, not a whole section.
+   - Always provide 2-4 concrete options the client can
+     choose from.
+   - Example: "What's the primary deliverable? Options:
+     brand/commercial video (TV/digital), social media
+     content package, post-production/editing of existing
+     footage, or photography/design campaign?"
+   - NEVER say "please fill in section X" or
+     "tell me about X section".
+5. Skip sections not relevant to the archetype
+   (mark as "complete" with "N/A" content).
 
 IMPORTANT:
-- Write from the perspective of a senior producer who understands video production deeply.
+- Write from the perspective of a senior producer who
+  understands video production deeply.
 - Use industry-standard terminology.
-- Be specific: instead of "various locations", write "2-3 indoor studio setups + 1 outdoor urban location".
-- Budget: if not mentioned, suggest a realistic range based on the project scope.
-- For unknown fields, write professional placeholders like "[To be confirmed - recommend discussing with talent agency]".
+- Be specific: instead of "various locations", write
+  "2-3 indoor studio setups + 1 outdoor urban location".
+- Budget: if not mentioned, suggest a realistic range
+  based on the project scope.
+- For unknown fields, write professional placeholders like
+  "[To be confirmed - recommend discussing with talent
+  agency]".
 
 Respond with JSON:
 {{
@@ -139,9 +201,26 @@ Respond with JSON:
 )
 
 UPDATE_SYSTEM_PROMPT = (
-    """You are AIVUS, an expert video production brief creation system.
+    """\
+You are AIVUS, an expert video production brief creation
+system.
 
-The client is refining their brief through conversation. You received their latest answer.
+The client is refining their brief through conversation.
+You received their latest answer.
+
+LANGUAGE RULE:
+{language_rule}
+
+HANDLING "I DON'T KNOW" / SKIP:
+When the user says they don't know, want to skip,
+or have no preference:
+- Fill the relevant fields with US industry standard
+  values for this type of project.
+- In your reply, explicitly explain what you filled in
+  and why it's a good default.
+- Mark the section as "draft" (not "complete") so the
+  user can revisit it.
+- Move on to the next question immediately.
 
 {methodology_context}
 
@@ -163,33 +242,61 @@ INSTRUCTIONS:
 1. Update the relevant sections based on the client's answer.
 2. Return ONLY the sections that changed (as section_patches).
 3. Update sections_status for changed sections.
-4. Determine the next most important question to ask (pick the weakest incomplete section).
-5. If ALL important sections are "complete", set conversation_phase to "complete" and write a closing message.
+4. Ask the NEXT most important question:
+   - Focus on ONE specific detail, not a whole section.
+   - Provide 2-4 concrete options based on industry standards.
+   - Example: "How many shooting days? For a project
+     like this, typically: 1 day (tight schedule),
+     2 days (standard), or 3+ days (complex
+     multi-location)?"
+   - NEVER say "please fill in section X" or
+     "tell me about X section".
+5. If ALL important sections are "complete", set
+   conversation_phase to "complete" and write a
+   closing message.
 
 Respond with JSON:
 {{
   "section_patches": {{
-    "scope_video": "<h2>5. Scope of Work: Video Production</h2>..."
+    "scope_video": "<h2>5. Scope of Work:
+      Video Production</h2>..."
   }},
   "sections_status": {{
     "scope_video": "complete"
   }},
-  "reply": "Your response acknowledging their input + next question OR completion message",
+  "reply": "Your response acknowledging their input
+    + next question OR completion message",
   "conversation_phase": "questioning" or "complete",
   "structured_data_updates": {{}}
 }}
 """
 )
 
-ANSWER_SYSTEM_PROMPT = """You are AIVUS, an expert video production brief assistant.
+ANSWER_SYSTEM_PROMPT = """\
+You are AIVUS, an expert video production brief assistant.
 
-The client asked a question or made a comment that doesn't directly update the brief content.
-Answer briefly and helpfully, then guide them back to completing the brief.
+The client asked a question or made a comment that does
+not directly update the brief content.
+Answer briefly and helpfully, then smoothly transition
+to the next clarifying question about the brief.
+
+LANGUAGE RULE:
+- Detect the language of the user's message.
+- Write your reply in that same language.
 
 Current conversation phase: {conversation_phase}
-Current sections needing work: {incomplete_sections}
+Sections still needing details: {incomplete_sections}
 
-Keep your response concise (2-4 sentences). Be professional and knowledgeable about video production.
+RULES FOR YOUR RESPONSE:
+- Keep it concise: 2-4 sentences.
+- After answering, ask ONE specific question about the
+  most important incomplete aspect of the brief.
+- Provide 2-4 concrete options for that question.
+- NEVER list section names or ask "fill in section X".
+- NEVER say "let's focus on sections X, Y, Z".
+- Example: "Great question! ... By the way, what shooting
+  locations do you have in mind? Options: studio setup,
+  outdoor urban, client's office, or a mix?"
 
 Respond with JSON:
 {{
@@ -197,12 +304,18 @@ Respond with JSON:
 }}
 """
 
-ROUTER_SYSTEM_PROMPT = """You are a message classifier for a video production brief creation system.
+ROUTER_SYSTEM_PROMPT = """\
+You are a message classifier for a video production
+brief creation system.
 
 Classify the user's message into one of these intents:
-- "first_generation": This is the first message describing a new project (only if conversation_phase is "initial")
-- "section_answer": The user is answering a question about specific brief sections or providing info that updates the brief
-- "question_or_chat": The user is asking a question, saying thanks, or chatting without providing brief-relevant info
+- "first_generation": This is the first message describing
+  a new project (only if conversation_phase is "initial")
+- "section_answer": The user is answering a question about
+  specific brief sections or providing info that updates
+  the brief
+- "question_or_chat": The user is asking a question, saying
+  thanks, or chatting without providing brief-relevant info
 
 Context:
 - conversation_phase: {conversation_phase}
@@ -210,16 +323,23 @@ Context:
 
 Respond with JSON:
 {{
-  "intent": "first_generation" | "section_answer" | "question_or_chat",
-  "affected_sections": ["section_key1", ...] (only for section_answer, empty list otherwise)
+  "intent": "first_generation" | "section_answer"
+    | "question_or_chat",
+  "affected_sections": ["section_key1", ...]
+    (only for section_answer, empty list otherwise)
 }}
 
-When in doubt, classify as "section_answer" (safest default).
+When in doubt, classify as "section_answer".
+"I don't know", "skip", "not sure", "no preference",
+"не знаю", "пропустить" -> classify as "section_answer".
 """
 
-EXTRACT_SYSTEM_PROMPT = """You are a structured data extractor for video production briefs.
+EXTRACT_SYSTEM_PROMPT = """\
+You are a structured data extractor for video production
+briefs.
 
-Given the brief sections (HTML), extract structured data for generating an offer/estimate.
+Given the brief sections (HTML), extract structured data
+for generating an offer/estimate.
 
 Respond with JSON:
 {{
@@ -260,6 +380,21 @@ def _build_methodology_context(archetypes: list[int], sections: list[str]) -> st
 
     parts = [f"### {x.title}\n{x.content}" for x in entries]
     return "METHODOLOGY:\n" + "\n\n".join(parts)
+
+
+def _build_language_rule(document_language: str) -> str:
+    if document_language:
+        return (
+            f"- Write ALL brief section content (HTML) in {document_language}.\n"
+            f"- Section headings, labels, lists, and body text must be in {document_language}.\n"
+            "- Your conversational reply should match the language of the user's message "
+            "(auto-detect)."
+        )
+    return (
+        "- Detect the language of the user's message.\n"
+        "- Write your reply AND all brief section content in that same language.\n"
+        "- Section HTML headings, labels, and content must all be in the detected language."
+    )
 
 
 def _build_feedback_context(sections: list[str]) -> str:
@@ -351,6 +486,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
     methodology = _build_methodology_context([], BRIEF_SECTION_KEYS)
     feedback = _build_feedback_context(BRIEF_SECTION_KEYS)
+    language_rule = _build_language_rule(state.get("document_language", ""))
 
     messages = [
         {
@@ -358,6 +494,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
             "content": GENERATE_SYSTEM_PROMPT.format(
                 methodology_context=methodology,
                 feedback_context=feedback,
+                language_rule=language_rule,
             ),
         },
         {"role": "user", "content": user_message},
@@ -386,6 +523,26 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     ]
     reply = parsed.get("reply", "")
     structured_data = parsed.get("structured_data", {})
+
+    returned_phase = parsed.get("conversation_phase", "")
+    is_off_topic = not sections and returned_phase == "initial"
+
+    if is_off_topic:
+        token_update = _accumulate_tokens(state, response)
+        return {
+            **token_update,
+            "document_sections": {},
+            "sections_status": dict.fromkeys(BRIEF_SECTION_KEYS, "empty"),
+            "archetypes": [],
+            "structured_data": {},
+            "conversation_phase": "initial",
+            "reply": reply,
+            "sections_changed": [],
+            "section_patches": {},
+            "pending_sections": list(BRIEF_SECTION_KEYS),
+            "questions_asked": [],
+            "messages": [{"role": "assistant", "content": reply}],
+        }
 
     for key in BRIEF_SECTION_KEYS:
         if key not in sections_status:
@@ -437,9 +594,12 @@ def update_and_respond(state: BriefGraphState) -> dict:
         for msg in state.get("messages", [])[-10:]
     ]
 
+    language_rule = _build_language_rule(state.get("document_language", ""))
+
     system_prompt = UPDATE_SYSTEM_PROMPT.format(
         methodology_context=methodology,
         feedback_context=feedback,
+        language_rule=language_rule,
         current_sections_html="\n\n".join(sections_html_parts),
         sections_status_json=json.dumps(sections_status),
         questions_asked=", ".join(questions_asked) if questions_asked else "none yet",
@@ -503,7 +663,9 @@ def update_and_respond(state: BriefGraphState) -> dict:
 def answer_or_chat(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
     sections_status = state.get("sections_status", {})
-    incomplete = [k for k, v in sections_status.items() if v != "complete"]
+    incomplete = [
+        SECTION_LABELS.get(k, k) for k, v in sections_status.items() if v != "complete"
+    ]
 
     messages = [
         {
@@ -614,6 +776,7 @@ def process_brief_message(  # noqa: PLR0913
     conversation_phase: str = "initial",
     questions_asked: list[str] | None = None,
     history: list | None = None,
+    document_language: str = "",
 ) -> dict:
     graph = _get_graph()
 
@@ -651,6 +814,7 @@ def process_brief_message(  # noqa: PLR0913
         "turn_cost_usd": 0.0,
         "model_used": "",
         "route_intent": "",
+        "document_language": document_language,
     }
 
     result = graph.invoke(initial_state)
@@ -699,6 +863,7 @@ def finalize_brief(
         "turn_cost_usd": 0.0,
         "model_used": "",
         "route_intent": "",
+        "document_language": "",
     }
 
     result = extract_structured(state)

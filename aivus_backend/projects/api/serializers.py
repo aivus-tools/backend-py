@@ -3,6 +3,7 @@
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefOffer
+from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
@@ -24,6 +25,7 @@ def serialize_brief(brief: Brief) -> dict:
         "uuid": str(brief.id),
         "status": brief.status,
         "details": brief.details,
+        "structuredData": brief.structured_data,
         "clientId": str(brief.client_id) if brief.client_id else None,
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
@@ -305,6 +307,7 @@ def serialize_brief_with_offers(brief: Brief) -> dict:
         "uuid": str(brief.id),
         "status": brief.status,
         "details": brief.details,
+        "structuredData": brief.structured_data,
         "clientId": str(brief.client_id) if brief.client_id else None,
         "offersCount": offers_count,
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
@@ -407,4 +410,32 @@ def serialize_brief_feedback(feedback: BriefFeedback) -> dict:
         "comment": feedback.comment,
         "userId": str(feedback.user_id),
         "createdAt": feedback.created_at.isoformat() if feedback.created_at else None,
+    }
+
+
+def serialize_brief_share(share: BriefShare) -> dict:
+    return {
+        "id": str(share.id),
+        "briefId": str(share.brief_id),
+        "token": share.token,
+        "isActive": share.is_active,
+        "createdBy": str(share.created_by_id) if share.created_by_id else None,
+        "createdAt": share.created_at.isoformat() if share.created_at else None,
+        "updatedAt": share.updated_at.isoformat() if share.updated_at else None,
+    }
+
+
+def serialize_brief_share_public(share: BriefShare) -> dict:
+    brief = share.brief
+    return {
+        "token": share.token,
+        "isActive": share.is_active,
+        "brief": {
+            "id": str(brief.id),
+            "status": brief.status,
+            "documentHtml": brief.render_document_html(),
+            "structuredData": brief.structured_data,
+            "sectionsStatus": brief.sections_status,
+            "createdAt": brief.created_at.isoformat() if brief.created_at else None,
+        },
     }

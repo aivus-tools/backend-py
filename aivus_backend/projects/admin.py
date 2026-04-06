@@ -10,6 +10,7 @@ from .models import Brief
 from .models import BriefFeedback
 from .models import BriefMethodology
 from .models import BriefOffer
+from .models import BriefShare
 from .models import ChatMessage
 from .models import ClientManager
 from .models import Offer
@@ -341,6 +342,19 @@ class ShareAdmin(ModelAdmin):
     search_fields = ["offer__project_name", "token"]
     list_filter = ["is_active", "created_at"]
     readonly_fields = ["token", "created_at", "updated_at", "deleted_at"]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Token")
+    def token_short(self, instance):
+        return f"{instance.token[:12]}..." if instance.token else ""
+
+
+@admin.register(BriefShare)
+class BriefShareAdmin(ModelAdmin):
+    list_display = ["brief", "token_short", "is_active", "created_by", "created_at"]
+    search_fields = ["brief__id", "token"]
+    list_filter = ["is_active", "created_at"]
+    readonly_fields = ["token", "created_at", "updated_at"]
     ordering = ["-created_at"]
 
     @admin.display(description="Token")

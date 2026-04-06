@@ -167,4 +167,29 @@ urlpatterns = [
         views_brief_v2.public_brief_ai_claim,
         name="public_brief_ai_claim",
     ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/share",
+        views_brief_v2.client_brief_share_create,
+        name="client_brief_share_create",
+    ),
+    path(
+        "public/brief-shares/<str:token>",
+        views_brief_v2.brief_share_get_public,
+        name="brief_share_get_public",
+    ),
+    path(
+        "client/brief-shares/<str:token>/manage",
+        views_brief_v2.brief_share_manage,
+        name="brief_share_manage",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/pdf",
+        views_brief_v2.client_brief_ai_pdf,
+        name="client_brief_ai_pdf",
+    ),
+    path(
+        "public/brief-shares/<str:token>/pdf",
+        views_brief_v2.brief_share_pdf,
+        name="brief_share_pdf",
+    ),
 ]

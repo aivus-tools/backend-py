@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
     retry_backoff=True,
     max_retries=1,
 )
-def generate_brief_task(brief_id: str, user_message: str) -> dict:
+def generate_brief_task(
+    brief_id: str, user_message: str, document_language: str = ""
+) -> dict:
     try:
         brief = Brief.objects.get(id=brief_id)
     except Brief.DoesNotExist:
@@ -43,6 +45,7 @@ def generate_brief_task(brief_id: str, user_message: str) -> dict:
             conversation_phase="initial",
             questions_asked=[],
             history=[],
+            document_language=document_language,
         )
     except Exception:
         logger.exception("Brief generation LLM call failed: brief_id=%s", brief_id)
