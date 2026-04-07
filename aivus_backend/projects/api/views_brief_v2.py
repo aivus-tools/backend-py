@@ -231,6 +231,10 @@ def client_brief_ai_chat(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
+    error = _check_brief_mutable(brief)
+    if error:
+        return error
+
     if brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
 
@@ -340,6 +344,10 @@ def client_brief_ai_section(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    error = _check_brief_mutable(brief)
+    if error:
+        return error
 
     body, error = _parse_json_body(request)
     if error:
@@ -547,6 +555,10 @@ def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    error = _check_brief_mutable(brief)
+    if error:
+        return error
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)
