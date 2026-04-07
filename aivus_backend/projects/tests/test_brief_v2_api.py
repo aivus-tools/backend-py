@@ -99,7 +99,7 @@ class TestClientBriefAiChat:
     def brief(self, client_profile):
         return Brief.objects.create(client=client_profile, status="DRAFT")
 
-    @patch("aivus_backend.projects.ai_brief_v2.process_brief_message")
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
     def test_sends_message_and_returns_response(
         self, mock_process, api_client, client_user, client_profile, brief
     ):
@@ -250,7 +250,7 @@ class TestPublicBriefAiChat:
             anonymous_token="test-anon-token-12345",
         )
 
-    @patch("aivus_backend.projects.ai_brief_v2.process_brief_message")
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
     def test_anonymous_chat(self, mock_process, api_client, anonymous_brief):
         mock_process.return_value = {
             "reply": "Sure, tell me about the budget.",
@@ -648,7 +648,7 @@ class TestClaimTokenCleanup:
 
 
 class TestLLMFailureHandling:
-    @patch("aivus_backend.projects.ai_brief_v2.process_brief_message")
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
     def test_auth_chat_returns_500_on_llm_failure(
         self, mock_process, api_client, client_user, client_profile, db
     ):
@@ -663,7 +663,7 @@ class TestLLMFailureHandling:
         )
         assert response.status_code == 500
 
-    @patch("aivus_backend.projects.ai_brief_v2.process_brief_message")
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
     def test_public_chat_returns_500_on_llm_failure(self, mock_process, api_client, db):
         mock_process.side_effect = RuntimeError("LLM timeout")
         brief = Brief.objects.create(
@@ -841,7 +841,7 @@ class TestFinalizeSuccess:
 
 
 class TestChatMessageSideEffects:
-    @patch("aivus_backend.projects.ai_brief_v2.process_brief_message")
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
     def test_chat_creates_both_messages(
         self, mock_process, api_client, client_user, client_profile, db
     ):
