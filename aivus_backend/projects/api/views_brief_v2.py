@@ -1,9 +1,11 @@
 import json
 import logging
+import re
 import secrets
 from decimal import Decimal
 
 from celery.result import AsyncResult
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.http import HttpResponse
@@ -44,6 +46,15 @@ VALID_FEEDBACK_RATINGS = {"up", "down"}
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 BRIEF_SECTION_KEY_SET = set(BRIEF_SECTION_KEYS)
 SUPPORTED_LANGUAGES = {"en", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko"}
+
+
+def conditional_ratelimit(**ratelimit_kwargs):
+    def decorator(func):
+        if getattr(settings, "RATELIMIT_ENABLE", True):
+            return ratelimit(**ratelimit_kwargs)(func)
+        return func
+
+    return decorator
 
 
 def _get_brief_for_client(brief_id, request):
@@ -113,10 +124,27 @@ def _normalize_document_language(language: str) -> str:
     return ""
 
 
+def _parse_document_html(html: str) -> dict:
+    if not html or not html.strip():
+        return {}
+
+    sections = {}
+    pattern = r'<div\s+data-section="([^"]+)">(.*?)</div>'
+
+    for match in re.finditer(pattern, html, re.DOTALL):
+        section_key = match.group(1)
+        inner_html = match.group(2).strip()
+
+        if section_key in BRIEF_SECTION_KEY_SET:
+            sections[section_key] = inner_html
+
+    return sections
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key="user", rate="20/m", method="POST")
 def client_brief_ai_start(request):
     body, error = _parse_json_body(request)
     if error:
@@ -197,7 +225,7 @@ def client_brief_ai_status(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key="user", rate="20/m", method="POST")
 def client_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -228,11 +256,17 @@ def client_brief_ai_chat(request, brief_id):
     history = list(brief.chat_messages.values("role", "content").order_by("created_at"))
     document_language = _get_user_document_language(user.id)
 
+    document_html = body.get("documentHtml", "")
+    if document_html and document_html.strip():
+        document_sections = _parse_document_html(document_html)
+    else:
+        document_sections = brief.document_sections
+
     try:
         result = process_brief_message(
             user_message=message,
             brief_id=str(brief.id),
-            document_sections=brief.document_sections,
+            document_sections=document_sections,
             sections_status=brief.sections_status,
             archetypes=brief.archetypes,
             structured_data=brief.structured_data,
@@ -402,7 +436,7 @@ def client_brief_ai_feedback(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@ratelimit(key="user", rate="5/m", method="POST")
+@conditional_ratelimit(key="user", rate="5/m", method="POST")
 def client_brief_ai_finalize(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -419,7 +453,7 @@ def client_brief_ai_finalize(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="3/h", method="POST")
+@conditional_ratelimit(key="ip", rate="3/h", method="POST")
 def public_brief_ai_start(request):
     body, error = _parse_json_body(request)
     if error:
@@ -461,7 +495,7 @@ def public_brief_ai_start(request):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key="ip", rate="60/m", method="GET")
 def public_brief_ai_status(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -472,16 +506,27 @@ def public_brief_ai_status(request, brief_id):
         return JsonResponse({"error": "taskId is required"}, status=400)
 
     result = AsyncResult(task_id)
+    logger.info(
+        "Polling status for task %s, brief %s, ready=%s",
+        task_id,
+        brief_id,
+        result.ready(),
+    )
 
     if result.ready():
         if result.successful():
             brief.refresh_from_db()
-            return JsonResponse(
-                {
-                    "status": "done",
-                    "result": serialize_brief_v2(brief),
-                }
+            response_data = {
+                "status": "done",
+                "result": serialize_brief_v2(brief),
+            }
+            logger.info(
+                "Task %s completed successfully for brief %s, returning done status",
+                task_id,
+                brief_id,
             )
+            return JsonResponse(response_data)
+        logger.warning("Task %s failed for brief %s", task_id, brief_id)
         return JsonResponse(
             {
                 "status": "failed",
@@ -490,13 +535,14 @@ def public_brief_ai_status(request, brief_id):
             status=500,
         )
 
+    logger.info("Task %s still pending for brief %s", task_id, brief_id)
     return JsonResponse({"status": "pending"})
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="5/m", method="POST")
+@conditional_ratelimit(key="ip", rate="5/m", method="POST")
 def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -526,11 +572,17 @@ def public_brief_ai_chat(request, brief_id):
 
     history = list(brief.chat_messages.values("role", "content").order_by("created_at"))
 
+    document_html = body.get("documentHtml", "")
+    if document_html and document_html.strip():
+        document_sections = _parse_document_html(document_html)
+    else:
+        document_sections = brief.document_sections
+
     try:
         result = process_brief_message(
             user_message=message,
             brief_id=str(brief.id),
-            document_sections=brief.document_sections,
+            document_sections=document_sections,
             sections_status=brief.sections_status,
             archetypes=brief.archetypes,
             structured_data=brief.structured_data,
@@ -590,7 +642,7 @@ def public_brief_ai_chat(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key="ip", rate="60/m", method="GET")
 def public_brief_ai_detail(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:

@@ -95,5 +95,10 @@ if GCS_BUCKET_NAME:
     }
     MEDIA_URL = f"https://storage.googleapis.com/{GS_BUCKET_NAME}/media/"
 
+# Rate Limiting
+# ------------------------------------------------------------------------------
+# Disable rate limiting for local development and E2E tests
+RATELIMIT_ENABLE = False
+
 # Your stuff...
 # ------------------------------------------------------------------------------
