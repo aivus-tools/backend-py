@@ -707,11 +707,22 @@ def client_brief_share_create(request, brief_id):
         return JsonResponse(serialize_brief_share(share))
 
     user = User.objects.filter(id=request.user_data["id"]).first()
-    share, _created = BriefShare.objects.get_or_create(
-        brief=brief,
-        defaults={"created_by": user},
-    )
-    return JsonResponse(serialize_brief_share(share), status=201 if _created else 200)
+    with transaction.atomic():
+        share, created = BriefShare.objects.select_for_update().get_or_create(
+            brief=brief,
+            defaults={"created_by": user},
+        )
+        share.capture_snapshot()
+        share.save(
+            update_fields=[
+                "snapshot_document_sections",
+                "snapshot_structured_data",
+                "snapshot_sections_status",
+                "snapshot_version",
+                "updated_at",
+            ]
+        )
+    return JsonResponse(serialize_brief_share(share), status=201 if created else 200)
 
 
 @csrf_exempt
@@ -763,14 +774,22 @@ def _safe_filename(name: str) -> str:
     return safe[:80] or "Brief"
 
 
-def _render_brief_pdf_response(brief):
+def _render_brief_pdf_response(brief, document_sections=None, structured_data=None):
     from urllib.parse import quote  # noqa: PLC0415
 
     from aivus_backend.projects.brief_pdf import render_brief_pdf  # noqa: PLC0415
 
-    pdf_bytes = render_brief_pdf(brief)
+    pdf_bytes = render_brief_pdf(
+        brief,
+        document_sections=document_sections,
+        structured_data=structured_data,
+    )
 
-    structured = brief.structured_data or {}
+    structured = (
+        structured_data
+        if structured_data is not None
+        else (brief.structured_data or {})
+    )
     name = _safe_filename(str(structured.get("projectName", "Brief")))
     filename = name + ".pdf"
     encoded = quote(filename)
@@ -812,4 +831,8 @@ def brief_share_pdf(request, token):
     if brief.status != "COMPLETED":
         return JsonResponse({"error": "Brief not available"}, status=400)
 
-    return _render_brief_pdf_response(brief)
+    return _render_brief_pdf_response(
+        brief,
+        document_sections=share.snapshot_document_sections,
+        structured_data=share.snapshot_structured_data,
+    )

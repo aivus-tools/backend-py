@@ -939,3 +939,102 @@ class TestSanitizationLinkRel:
         brief.refresh_from_db()
         saved = brief.document_sections["project_header"]
         assert 'rel="noopener noreferrer"' in saved
+
+
+class TestBriefShareSnapshot:
+    @pytest.fixture
+    def completed_brief(self, client_profile):
+        return Brief.objects.create(
+            client=client_profile,
+            status="COMPLETED",
+            document_sections={
+                "project_header": "<h2>Original Title</h2>",
+                "budget_timeline": "<p>Original budget</p>",
+            },
+            structured_data={"projectName": "Original Project"},
+            sections_status={"project_header": "complete"},
+            version=3,
+        )
+
+    def _create_share(self, api_client, client_user, client_profile, brief):
+        return api_client.post(
+            f"/api/v1/client/briefs/ai/{brief.id}/share",
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+
+    def test_share_freezes_brief_at_creation_time(
+        self, api_client, client_user, client_profile, completed_brief
+    ):
+        create_response = self._create_share(
+            api_client, client_user, client_profile, completed_brief
+        )
+        assert create_response.status_code in (200, 201)
+        token = create_response.json()["token"]
+
+        completed_brief.document_sections["project_header"] = "<h2>Edited Title</h2>"
+        completed_brief.structured_data["projectName"] = "Edited Project"
+        completed_brief.save(update_fields=["document_sections", "structured_data"])
+
+        public_response = api_client.get(f"/api/v1/public/brief-shares/{token}")
+        assert public_response.status_code == 200
+        body = public_response.json()
+        assert "Original Title" in body["brief"]["documentHtml"]
+        assert "Edited Title" not in body["brief"]["documentHtml"]
+        assert body["brief"]["structuredData"]["projectName"] == "Original Project"
+
+    def test_share_pdf_uses_snapshot(
+        self, api_client, client_user, client_profile, completed_brief
+    ):
+        create_response = self._create_share(
+            api_client, client_user, client_profile, completed_brief
+        )
+        token = create_response.json()["token"]
+
+        completed_brief.document_sections["project_header"] = "<h2>Edited Title</h2>"
+        completed_brief.save(update_fields=["document_sections"])
+
+        with patch("aivus_backend.projects.brief_pdf.weasyprint.HTML") as mock_html:
+            mock_html.return_value.write_pdf.return_value = b"PDF"
+            response = api_client.get(f"/api/v1/public/brief-shares/{token}/pdf")
+
+        assert response.status_code == 200
+        rendered_html = mock_html.call_args.kwargs.get("string", "")
+        assert "Original Title" in rendered_html
+        assert "Edited Title" not in rendered_html
+
+    def test_owner_pdf_uses_live_state(
+        self, api_client, client_user, client_profile, completed_brief
+    ):
+        completed_brief.document_sections["project_header"] = "<h2>Latest Title</h2>"
+        completed_brief.save(update_fields=["document_sections"])
+
+        with patch("aivus_backend.projects.brief_pdf.weasyprint.HTML") as mock_html:
+            mock_html.return_value.write_pdf.return_value = b"PDF"
+            response = api_client.get(
+                f"/api/v1/client/briefs/ai/{completed_brief.id}/pdf",
+                **_client_headers(client_user, client_profile.id),
+            )
+
+        assert response.status_code == 200
+        rendered_html = mock_html.call_args.kwargs.get("string", "")
+        assert "Latest Title" in rendered_html
+
+    def test_recreating_share_refreshes_snapshot(
+        self, api_client, client_user, client_profile, completed_brief
+    ):
+        first_response = self._create_share(
+            api_client, client_user, client_profile, completed_brief
+        )
+        token = first_response.json()["token"]
+
+        completed_brief.document_sections["project_header"] = "<h2>Refreshed Title</h2>"
+        completed_brief.save(update_fields=["document_sections"])
+
+        second_response = self._create_share(
+            api_client, client_user, client_profile, completed_brief
+        )
+        assert second_response.json()["token"] == token
+
+        public_response = api_client.get(f"/api/v1/public/brief-shares/{token}")
+        assert "Refreshed Title" in public_response.json()["brief"]["documentHtml"]

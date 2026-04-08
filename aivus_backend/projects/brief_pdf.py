@@ -148,14 +148,16 @@ def _escape(text: str) -> str:
     )
 
 
-def _build_pdf_html(brief: Brief) -> str:
-    structured = brief.structured_data or {}
+def _build_pdf_html(
+    brief: Brief, document_sections: dict, structured_data: dict
+) -> str:
+    structured = structured_data or {}
     project_name = _escape(str(structured.get("projectName", "Creative Brief")))
     client_name = _escape(str(structured.get("clientName", "")))
 
     sections_html = []
     for key in BRIEF_SECTION_KEYS:
-        html = brief.document_sections.get(key, "")
+        html = (document_sections or {}).get(key, "")
         if html:
             sections_html.append(f'<div class="section">{html}</div>')
 
@@ -187,6 +189,14 @@ def _build_pdf_html(brief: Brief) -> str:
 </html>"""
 
 
-def render_brief_pdf(brief: Brief) -> bytes:
-    html_string = _build_pdf_html(brief)
+def render_brief_pdf(
+    brief: Brief,
+    document_sections: dict | None = None,
+    structured_data: dict | None = None,
+) -> bytes:
+    sections = (
+        brief.document_sections if document_sections is None else document_sections
+    )
+    structured = brief.structured_data if structured_data is None else structured_data
+    html_string = _build_pdf_html(brief, sections, structured)
     return weasyprint.HTML(string=html_string).write_pdf()

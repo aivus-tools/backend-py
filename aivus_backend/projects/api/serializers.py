@@ -433,9 +433,9 @@ def serialize_brief_share_public(share: BriefShare) -> dict:
         "brief": {
             "id": str(brief.id),
             "status": brief.status,
-            "documentHtml": brief.render_document_html(),
-            "structuredData": brief.structured_data,
-            "sectionsStatus": brief.sections_status,
+            "documentHtml": share.render_snapshot_html(),
+            "structuredData": share.snapshot_structured_data,
+            "sectionsStatus": share.snapshot_sections_status,
             "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         },
     }

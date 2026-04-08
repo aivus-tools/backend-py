@@ -560,6 +560,10 @@ class BriefShare(models.Model):
         max_length=64, unique=True, db_index=True, default=secrets.token_urlsafe
     )
     is_active = models.BooleanField(default=True)
+    snapshot_document_sections = models.JSONField(default=dict, blank=True)
+    snapshot_structured_data = models.JSONField(default=dict, blank=True)
+    snapshot_sections_status = models.JSONField(default=dict, blank=True)
+    snapshot_version = models.IntegerField(default=0)
     created_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
@@ -577,6 +581,22 @@ class BriefShare(models.Model):
     def __str__(self):
         status = "active" if self.is_active else "inactive"
         return f"Brief {self.brief_id} - token:{self.token[:8]}... ({status})"
+
+    def capture_snapshot(self) -> None:
+        brief = self.brief
+        self.snapshot_document_sections = dict(brief.document_sections or {})
+        self.snapshot_structured_data = dict(brief.structured_data or {})
+        self.snapshot_sections_status = dict(brief.sections_status or {})
+        self.snapshot_version = brief.version
+
+    def render_snapshot_html(self) -> str:
+        parts = []
+        sections = self.snapshot_document_sections or {}
+        for key in BRIEF_SECTION_KEYS:
+            html = sections.get(key, "")
+            if html:
+                parts.append(f'<div data-section="{key}">{html}</div>')
+        return "\n<hr/>\n".join(parts)
 
 
 class BriefOffer(models.Model):
