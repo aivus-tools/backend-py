@@ -86,12 +86,6 @@ def _get_client_safe(request):
     return Client.objects.filter(id=client_id).first()
 
 
-def _check_brief_mutable(brief):
-    if brief.status == "COMPLETED":
-        return JsonResponse({"error": "Brief is already finalized"}, status=409)
-    return None
-
-
 def _get_user_document_language(user_id) -> str:
     settings = UserSettings.objects.filter(user_id=user_id).first()
     if settings and settings.language:
@@ -231,10 +225,6 @@ def client_brief_ai_chat(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    error = _check_brief_mutable(brief)
-    if error:
-        return error
-
     if brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
 
@@ -345,10 +335,6 @@ def client_brief_ai_section(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    error = _check_brief_mutable(brief)
-    if error:
-        return error
-
     body, error = _parse_json_body(request)
     if error:
         return error
@@ -450,9 +436,8 @@ def client_brief_ai_finalize(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    error = _check_brief_mutable(brief)
-    if error:
-        return error
+    if brief.status == "COMPLETED":
+        return JsonResponse({"error": "Brief is already finalized"}, status=409)
 
     task = finalize_brief_task.delay(str(brief.id))
     return JsonResponse({"taskId": task.id})
@@ -555,10 +540,6 @@ def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
-
-    error = _check_brief_mutable(brief)
-    if error:
-        return error
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)

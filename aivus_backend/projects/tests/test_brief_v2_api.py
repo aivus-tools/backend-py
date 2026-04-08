@@ -390,7 +390,7 @@ class TestSanitization:
         assert "Safe" in brief.document_sections["project_header"]
 
 
-class TestFinalizedBriefRejection:
+class TestCompletedBriefBehavior:
     @pytest.fixture
     def completed_brief(self, client_profile):
         return Brief.objects.create(
@@ -400,18 +400,34 @@ class TestFinalizedBriefRejection:
             version=5,
         )
 
-    def test_chat_rejected_on_completed_brief(
-        self, api_client, client_user, client_profile, completed_brief
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
+    def test_chat_allowed_on_completed_brief(
+        self, mock_process, api_client, client_user, client_profile, completed_brief
     ):
+        mock_process.return_value = {
+            "reply": "Updated the budget section.",
+            "document_sections": {"project_header": "<h2>Done</h2>"},
+            "sections_status": {},
+            "archetypes": [],
+            "structured_data": {},
+            "conversation_phase": "complete",
+            "sections_changed": [],
+            "section_patches": {},
+            "input_tokens": 50,
+            "output_tokens": 25,
+            "cost_usd": 0.0003,
+            "model_used": "gpt-4o-mini",
+        }
+
         response = api_client.post(
             f"/api/v1/client/briefs/ai/{completed_brief.id}/chat",
             data=json.dumps({"message": "change the budget"}),
             content_type="application/json",
             **_client_headers(client_user, client_profile.id),
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
 
-    def test_section_edit_rejected_on_completed_brief(
+    def test_section_edit_allowed_on_completed_brief(
         self, api_client, client_user, client_profile, completed_brief
     ):
         response = api_client.patch(
@@ -426,7 +442,7 @@ class TestFinalizedBriefRejection:
             content_type="application/json",
             **_client_headers(client_user, client_profile.id),
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
 
     def test_finalize_rejected_on_completed_brief(
         self, api_client, client_user, client_profile, completed_brief
@@ -438,7 +454,23 @@ class TestFinalizedBriefRejection:
         )
         assert response.status_code == 409
 
-    def test_public_chat_rejected_on_completed_brief(self, api_client, db):
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
+    def test_public_chat_allowed_on_completed_brief(self, mock_process, api_client, db):
+        mock_process.return_value = {
+            "reply": "Got it.",
+            "document_sections": {},
+            "sections_status": {},
+            "archetypes": [],
+            "structured_data": {},
+            "conversation_phase": "complete",
+            "sections_changed": [],
+            "section_patches": {},
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost_usd": 0.0001,
+            "model_used": "gpt-4o-mini",
+        }
+
         brief = Brief.objects.create(
             client=None,
             status="COMPLETED",
@@ -450,7 +482,7 @@ class TestFinalizedBriefRejection:
             content_type="application/json",
             HTTP_X_BRIEF_TOKEN="completed-token",
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
 
 
 class TestInvalidSectionKey:
