@@ -128,6 +128,8 @@ design, consulting, event management), respond with:
 LANGUAGE RULE:
 {language_rule}
 
+{market_rule}
+
 {methodology_context}
 
 {feedback_context}
@@ -211,6 +213,8 @@ You received their latest answer.
 LANGUAGE RULE:
 {language_rule}
 
+{market_rule}
+
 HANDLING "I DON'T KNOW" / SKIP:
 When the user says they don't know, want to skip,
 or have no preference:
@@ -283,6 +287,8 @@ to the next clarifying question about the brief.
 LANGUAGE RULE:
 - Detect the language of the user's message.
 - Write your reply in that same language.
+
+{market_rule}
 
 Current conversation phase: {conversation_phase}
 Sections still needing details: {incomplete_sections}
@@ -397,6 +403,40 @@ def _build_language_rule(document_language: str) -> str:
     )
 
 
+def _build_market_rule(document_language: str) -> str:
+    lang = (document_language or "").strip().lower()
+    if lang == "ru":
+        return (
+            "MARKET CONTEXT:\n"
+            "- Target market: Russian Federation.\n"
+            "- Use rubles (RUB, ₽) for any monetary values, ranges, and budget defaults.\n"
+            "- Reference Russian production realities: typical talent rates, day rates, "
+            "locations, equipment, post-production vendors, and legal/usage frameworks "
+            "common in the RF market.\n"
+            "- Questions, suggested options, and default placeholders must reflect the RF "
+            "market specifics (cities, agencies, platforms, regulators).\n"
+            "- Never quote USD or US-specific platforms unless the user explicitly asks."
+        )
+    if lang == "en":
+        return (
+            "MARKET CONTEXT:\n"
+            "- Target market: United States.\n"
+            "- Use US dollars (USD, $) for any monetary values, ranges, and budget defaults.\n"
+            "- Reference US production realities: SAG/non-union talent, IATSE crew norms, "
+            "common shoot locations (LA, NYC, ATL), standard post vendors, and US legal/"
+            "usage frameworks.\n"
+            "- Questions, suggested options, and default placeholders must reflect the US "
+            "market specifics (cities, agencies, platforms, regulators).\n"
+            "- Never quote rubles or RF-specific platforms unless the user explicitly asks."
+        )
+    return (
+        "MARKET CONTEXT:\n"
+        "- Detect the user's market from the language of their message.\n"
+        "- For Russian, default to the RF market (rubles, RU production realities).\n"
+        "- For English, default to the US market (USD, US production realities)."
+    )
+
+
 def _build_feedback_context(sections: list[str]) -> str:
     from django.db.models import Q  # noqa: PLC0415
 
@@ -487,6 +527,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     methodology = _build_methodology_context([], BRIEF_SECTION_KEYS)
     feedback = _build_feedback_context(BRIEF_SECTION_KEYS)
     language_rule = _build_language_rule(state.get("document_language", ""))
+    market_rule = _build_market_rule(state.get("document_language", ""))
 
     messages = [
         {
@@ -495,6 +536,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
                 methodology_context=methodology,
                 feedback_context=feedback,
                 language_rule=language_rule,
+                market_rule=market_rule,
             ),
         },
         {"role": "user", "content": user_message},
@@ -595,11 +637,13 @@ def update_and_respond(state: BriefGraphState) -> dict:
     ]
 
     language_rule = _build_language_rule(state.get("document_language", ""))
+    market_rule = _build_market_rule(state.get("document_language", ""))
 
     system_prompt = UPDATE_SYSTEM_PROMPT.format(
         methodology_context=methodology,
         feedback_context=feedback,
         language_rule=language_rule,
+        market_rule=market_rule,
         current_sections_html="\n\n".join(sections_html_parts),
         sections_status_json=json.dumps(sections_status),
         questions_asked=", ".join(questions_asked) if questions_asked else "none yet",
@@ -666,6 +710,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
     incomplete = [
         SECTION_LABELS.get(k, k) for k, v in sections_status.items() if v != "complete"
     ]
+    market_rule = _build_market_rule(state.get("document_language", ""))
 
     messages = [
         {
@@ -673,6 +718,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
             "content": ANSWER_SYSTEM_PROMPT.format(
                 conversation_phase=state.get("conversation_phase", "questioning"),
                 incomplete_sections=", ".join(incomplete) if incomplete else "none",
+                market_rule=market_rule,
             ),
         },
         {"role": "user", "content": user_message},
