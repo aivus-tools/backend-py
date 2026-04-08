@@ -218,10 +218,11 @@ LANGUAGE RULE:
 HANDLING "I DON'T KNOW" / SKIP:
 When the user says they don't know, want to skip,
 or have no preference:
-- Fill the relevant fields with US industry standard
-  values for this type of project.
+- Fill the relevant fields with industry standard values
+  for this type of project, following the MARKET CONTEXT
+  above (RF or US conventions, currency, vendors).
 - In your reply, explicitly explain what you filled in
-  and why it's a good default.
+  and why it's a good default for that market.
 - Mark the section as "draft" (not "complete") so the
   user can revisit it.
 - Move on to the next question immediately.
