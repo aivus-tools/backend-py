@@ -560,6 +560,8 @@ class BriefShare(models.Model):
         max_length=64, unique=True, db_index=True, default=secrets.token_urlsafe
     )
     is_active = models.BooleanField(default=True)
+    view_count = models.IntegerField(default=0)
+    last_viewed_at = models.DateTimeField(null=True, blank=True)
     snapshot_document_sections = models.JSONField(default=dict, blank=True)
     snapshot_structured_data = models.JSONField(default=dict, blank=True)
     snapshot_sections_status = models.JSONField(default=dict, blank=True)
