@@ -149,6 +149,68 @@ class TestClientBriefAiChat:
         )
         assert response.status_code == 404
 
+    @patch("aivus_backend.projects.api.views_brief_v2.process_brief_message")
+    def test_questions_asked_persisted_across_chat_calls(
+        self, mock_process, api_client, client_user, client_profile, brief
+    ):
+        # First call: AI tracks one question
+        mock_process.return_value = {
+            "reply": "ok",
+            "document_sections": {},
+            "sections_status": {},
+            "archetypes": [],
+            "structured_data": {},
+            "conversation_phase": "questioning",
+            "sections_changed": [],
+            "section_patches": {},
+            "questions_asked": ["budget_timeline"],
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost_usd": 0.0001,
+            "model_used": "gpt-4o-mini",
+        }
+        api_client.post(
+            f"/api/v1/client/briefs/ai/{brief.id}/chat",
+            data=json.dumps({"message": "first"}),
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        brief.refresh_from_db()
+        assert brief.questions_asked == ["budget_timeline"]
+
+        # Second call: stub records what was passed in via questions_asked arg
+        captured = {}
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return {
+                "reply": "ok2",
+                "document_sections": {},
+                "sections_status": {},
+                "archetypes": [],
+                "structured_data": {},
+                "conversation_phase": "questioning",
+                "sections_changed": [],
+                "section_patches": {},
+                "questions_asked": ["budget_timeline", "scope_video"],
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cost_usd": 0.0001,
+                "model_used": "gpt-4o-mini",
+            }
+
+        mock_process.side_effect = capture
+        api_client.post(
+            f"/api/v1/client/briefs/ai/{brief.id}/chat",
+            data=json.dumps({"message": "second"}),
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+
+        assert captured["questions_asked"] == ["budget_timeline"]
+        brief.refresh_from_db()
+        assert brief.questions_asked == ["budget_timeline", "scope_video"]
+
 
 class TestClientBriefAiSection:
     @pytest.fixture

@@ -267,7 +267,7 @@ def client_brief_ai_chat(request, brief_id):
             archetypes=brief.archetypes,
             structured_data=brief.structured_data,
             conversation_phase=brief.conversation_phase,
-            questions_asked=[],
+            questions_asked=brief.questions_asked,
             history=history,
             document_language=document_language,
         )
@@ -281,6 +281,7 @@ def client_brief_ai_chat(request, brief_id):
         archetypes=result["archetypes"],
         structured_data=result["structured_data"],
         conversation_phase=result["conversation_phase"],
+        questions_asked=result.get("questions_asked", brief.questions_asked),
         version=F("version") + 1,
         total_input_tokens=F("total_input_tokens") + result["input_tokens"],
         total_output_tokens=F("total_output_tokens") + result["output_tokens"],
@@ -653,7 +654,7 @@ def public_brief_ai_chat(request, brief_id):
             archetypes=brief.archetypes,
             structured_data=brief.structured_data,
             conversation_phase=brief.conversation_phase,
-            questions_asked=[],
+            questions_asked=brief.questions_asked,
             history=history,
             document_language=document_language,
         )
@@ -667,6 +668,7 @@ def public_brief_ai_chat(request, brief_id):
         archetypes=result["archetypes"],
         structured_data=result["structured_data"],
         conversation_phase=result["conversation_phase"],
+        questions_asked=result.get("questions_asked", brief.questions_asked),
         version=F("version") + 1,
         total_input_tokens=F("total_input_tokens") + result["input_tokens"],
         total_output_tokens=F("total_output_tokens") + result["output_tokens"],

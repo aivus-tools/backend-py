@@ -57,6 +57,7 @@ class Brief(models.Model):
     structured_data = models.JSONField(default=dict, blank=True)
     archetypes = models.JSONField(default=list, blank=True)
     sections_status = models.JSONField(default=_default_sections_status, blank=True)
+    questions_asked = models.JSONField(default=list, blank=True)
     conversation_phase = models.CharField(
         max_length=20,
         choices=ConversationPhase.choices,
