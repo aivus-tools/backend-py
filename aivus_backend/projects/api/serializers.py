@@ -392,6 +392,52 @@ def serialize_brief_v2(brief: Brief) -> dict:
         "messageCount": brief.message_count,
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
+        "claimedAt": brief.claimed_at.isoformat() if brief.claimed_at else None,
+    }
+
+
+def serialize_brief_v2_list_item(brief: Brief) -> dict:
+    structured = brief.structured_data or {}
+    project_name = structured.get("projectName") or ""
+
+    active_share = next(
+        (share for share in brief.shares.all() if share.is_active),
+        None,
+    )
+    if active_share is not None:
+        share_status = "active"
+        share_view_count = active_share.view_count
+        share_last_viewed_at = (
+            active_share.last_viewed_at.isoformat()
+            if active_share.last_viewed_at
+            else None
+        )
+    elif brief.shares.exists():
+        share_status = "inactive"
+        share_view_count = 0
+        share_last_viewed_at = None
+    else:
+        share_status = "none"
+        share_view_count = 0
+        share_last_viewed_at = None
+
+    offers_count = brief.brief_offers.count()
+
+    return {
+        "id": str(brief.id),
+        "status": brief.status,
+        "projectName": project_name,
+        "version": brief.version,
+        "messageCount": brief.message_count,
+        "totalCostUsd": str(brief.total_cost_usd),
+        "conversationPhase": brief.conversation_phase,
+        "createdAt": brief.created_at.isoformat() if brief.created_at else None,
+        "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
+        "claimedAt": brief.claimed_at.isoformat() if brief.claimed_at else None,
+        "shareStatus": share_status,
+        "shareViewCount": share_view_count,
+        "shareLastViewedAt": share_last_viewed_at,
+        "offersCount": offers_count,
     }
 
 
@@ -419,6 +465,10 @@ def serialize_brief_share(share: BriefShare) -> dict:
         "briefId": str(share.brief_id),
         "token": share.token,
         "isActive": share.is_active,
+        "viewCount": share.view_count,
+        "lastViewedAt": share.last_viewed_at.isoformat()
+        if share.last_viewed_at
+        else None,
         "createdBy": str(share.created_by_id) if share.created_by_id else None,
         "createdAt": share.created_at.isoformat() if share.created_at else None,
         "updatedAt": share.updated_at.isoformat() if share.updated_at else None,

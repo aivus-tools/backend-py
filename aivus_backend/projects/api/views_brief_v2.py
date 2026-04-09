@@ -24,6 +24,7 @@ from aivus_backend.projects.api.serializers import serialize_brief_share
 from aivus_backend.projects.api.serializers import serialize_brief_share_public
 from aivus_backend.projects.api.serializers import serialize_brief_v2
 from aivus_backend.projects.api.serializers import serialize_brief_v2_detail
+from aivus_backend.projects.api.serializers import serialize_brief_v2_list_item
 from aivus_backend.projects.api.serializers import serialize_chat_message_v2
 from aivus_backend.projects.models import BRIEF_SECTION_KEYS
 from aivus_backend.projects.models import Brief
@@ -44,6 +45,7 @@ MAX_MESSAGE_LENGTH = 10000
 MAX_SECTION_HTML_LENGTH = 50000
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
+MAX_PROJECT_NAME_LENGTH = 255
 BRIEF_SECTION_KEY_SET = set(BRIEF_SECTION_KEYS)
 SUPPORTED_LANGUAGES = {"en", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko"}
 
@@ -317,14 +319,85 @@ def client_brief_ai_chat(request, brief_id):
 
 
 @csrf_exempt
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "PATCH", "DELETE"])
 @require_groups("CLIENT")
 def client_brief_ai_detail(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    return JsonResponse(serialize_brief_v2_detail(brief))
+    if request.method == "GET":
+        return JsonResponse(serialize_brief_v2_detail(brief))
+
+    if request.method == "DELETE":
+        brief.deleted_at = timezone.now()
+        brief.save(update_fields=["deleted_at", "updated_at"])
+        return JsonResponse({"deleted": True}, status=200)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    project_name = body.get("projectName")
+    if not isinstance(project_name, str):
+        return JsonResponse({"error": "projectName is required"}, status=400)
+
+    project_name = project_name.strip()
+    if not project_name:
+        return JsonResponse({"error": "projectName cannot be empty"}, status=400)
+
+    if len(project_name) > MAX_PROJECT_NAME_LENGTH:
+        return JsonResponse({"error": "projectName too long"}, status=400)
+
+    structured = dict(brief.structured_data or {})
+    structured["projectName"] = project_name
+    brief.structured_data = structured
+    brief.save(update_fields=["structured_data", "updated_at"])
+
+    return JsonResponse(serialize_brief_v2_list_item(brief))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT")
+def client_brief_ai_list(request):
+    client_id = request.user_data.get("client_id")
+    if not client_id:
+        return JsonResponse([], safe=False)
+
+    briefs = (
+        Brief.objects.filter(client_id=client_id, deleted_at__isnull=True)
+        .prefetch_related("shares", "brief_offers")
+        .order_by("-created_at")
+    )
+    return JsonResponse([serialize_brief_v2_list_item(b) for b in briefs], safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT")
+def client_brief_ai_duplicate(request, brief_id):
+    source = _get_brief_for_client(brief_id, request)
+    if not source:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    structured = dict(source.structured_data or {})
+    original_name = structured.get("projectName") or ""
+    structured["projectName"] = (
+        f"{original_name} (copy)".strip() if original_name else "(copy)"
+    )
+
+    duplicate = Brief.objects.create(
+        client_id=source.client_id,
+        status="DRAFT",
+        document_sections=dict(source.document_sections or {}),
+        structured_data=structured,
+        sections_status=dict(source.sections_status or {}),
+        archetypes=list(source.archetypes or []),
+        conversation_phase=source.conversation_phase,
+    )
+
+    return JsonResponse({"briefId": str(duplicate.id)}, status=201)
 
 
 @csrf_exempt
@@ -739,6 +812,13 @@ def brief_share_get_public(request, token):
     )
     if not share:
         return JsonResponse({"error": "Share not found or inactive"}, status=404)
+
+    BriefShare.objects.filter(id=share.id).update(
+        view_count=F("view_count") + 1,
+        last_viewed_at=timezone.now(),
+    )
+    share.refresh_from_db(fields=["view_count", "last_viewed_at"])
+
     return JsonResponse(serialize_brief_share_public(share))
 
 

@@ -1038,3 +1038,317 @@ class TestBriefShareSnapshot:
 
         public_response = api_client.get(f"/api/v1/public/brief-shares/{token}")
         assert "Refreshed Title" in public_response.json()["brief"]["documentHtml"]
+
+
+class TestBriefShareViewTracking:
+    @pytest.fixture
+    def shared_brief(self, client_profile):
+        return Brief.objects.create(
+            client=client_profile,
+            status="COMPLETED",
+            document_sections={"project_header": "<h2>Title</h2>"},
+            structured_data={"projectName": "Tracked Project"},
+            version=1,
+        )
+
+    def _create_share(self, api_client, client_user, client_profile, brief):
+        return api_client.post(
+            f"/api/v1/client/briefs/ai/{brief.id}/share",
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+
+    def test_public_get_increments_view_count(
+        self, api_client, client_user, client_profile, shared_brief
+    ):
+        create_response = self._create_share(
+            api_client, client_user, client_profile, shared_brief
+        )
+        token = create_response.json()["token"]
+        share_id = create_response.json()["id"]
+
+        api_client.get(f"/api/v1/public/brief-shares/{token}")
+        api_client.get(f"/api/v1/public/brief-shares/{token}")
+        api_client.get(f"/api/v1/public/brief-shares/{token}")
+
+        from aivus_backend.projects.models import BriefShare
+
+        share = BriefShare.objects.get(id=share_id)
+        assert share.view_count == 3
+        assert share.last_viewed_at is not None
+
+    def test_share_view_count_exposed_via_owner_serializer(
+        self, api_client, client_user, client_profile, shared_brief
+    ):
+        create_response = self._create_share(
+            api_client, client_user, client_profile, shared_brief
+        )
+        token = create_response.json()["token"]
+
+        api_client.get(f"/api/v1/public/brief-shares/{token}")
+        api_client.get(f"/api/v1/public/brief-shares/{token}")
+
+        owner_response = api_client.get(
+            f"/api/v1/client/briefs/ai/{shared_brief.id}/share",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert owner_response.status_code == 200
+        body = owner_response.json()
+        assert body["viewCount"] == 2
+        assert body["lastViewedAt"] is not None
+
+    def test_pdf_does_not_increment_view_count(
+        self, api_client, client_user, client_profile, shared_brief
+    ):
+        create_response = self._create_share(
+            api_client, client_user, client_profile, shared_brief
+        )
+        token = create_response.json()["token"]
+        share_id = create_response.json()["id"]
+
+        with patch("aivus_backend.projects.brief_pdf.weasyprint.HTML") as mock_html:
+            mock_html.return_value.write_pdf.return_value = b"PDF"
+            api_client.get(f"/api/v1/public/brief-shares/{token}/pdf")
+
+        from aivus_backend.projects.models import BriefShare
+
+        share = BriefShare.objects.get(id=share_id)
+        assert share.view_count == 0
+
+
+class TestBriefAiList:
+    def test_returns_only_clients_briefs(
+        self, api_client, client_user, client_profile, db
+    ):
+        Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Mine"},
+        )
+        Brief.objects.create(
+            client=None,
+            status="DRAFT",
+            structured_data={"projectName": "Anonymous"},
+        )
+
+        response = api_client.get(
+            "/api/v1/client/briefs/ai",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["projectName"] == "Mine"
+
+    def test_excludes_soft_deleted(self, api_client, client_user, client_profile, db):
+        from django.utils import timezone
+
+        Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Active"},
+        )
+        Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Trashed"},
+            deleted_at=timezone.now(),
+        )
+
+        response = api_client.get(
+            "/api/v1/client/briefs/ai",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 200
+        names = [b["projectName"] for b in response.json()]
+        assert "Active" in names
+        assert "Trashed" not in names
+
+    def test_share_status_and_offers_count_in_list(
+        self, api_client, client_user, client_profile, db
+    ):
+        from aivus_backend.projects.models import BriefShare
+
+        brief = Brief.objects.create(
+            client=client_profile,
+            status="COMPLETED",
+            structured_data={"projectName": "WithShare"},
+        )
+        BriefShare.objects.create(brief=brief, view_count=5, is_active=True)
+
+        response = api_client.get(
+            "/api/v1/client/briefs/ai",
+            **_client_headers(client_user, client_profile.id),
+        )
+        body = response.json()
+        item = next(x for x in body if x["projectName"] == "WithShare")
+        assert item["shareStatus"] == "active"
+        assert item["shareViewCount"] == 5
+        assert item["offersCount"] == 0
+
+    def test_inactive_share_status(self, api_client, client_user, client_profile, db):
+        from aivus_backend.projects.models import BriefShare
+
+        brief = Brief.objects.create(
+            client=client_profile,
+            status="COMPLETED",
+            structured_data={"projectName": "InactiveShare"},
+        )
+        BriefShare.objects.create(brief=brief, is_active=False)
+
+        response = api_client.get(
+            "/api/v1/client/briefs/ai",
+            **_client_headers(client_user, client_profile.id),
+        )
+        body = response.json()
+        item = next(x for x in body if x["projectName"] == "InactiveShare")
+        assert item["shareStatus"] == "inactive"
+
+
+class TestBriefAiDuplicate:
+    def test_duplicate_copies_content_and_resets_state(
+        self, api_client, client_user, client_profile, db
+    ):
+        source = Brief.objects.create(
+            client=client_profile,
+            status="COMPLETED",
+            document_sections={"project_header": "<h2>Original</h2>"},
+            structured_data={"projectName": "Original"},
+            sections_status={"project_header": "complete"},
+            archetypes=[2],
+            conversation_phase="complete",
+            version=5,
+            message_count=12,
+            total_cost_usd="0.05",
+        )
+
+        response = api_client.post(
+            f"/api/v1/client/briefs/ai/{source.id}/duplicate",
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 201
+        new_id = response.json()["briefId"]
+        assert new_id != str(source.id)
+
+        copy = Brief.objects.get(id=new_id)
+        assert copy.status == "DRAFT"
+        assert copy.document_sections == source.document_sections
+        assert copy.sections_status == source.sections_status
+        assert copy.archetypes == source.archetypes
+        assert copy.conversation_phase == source.conversation_phase
+        assert copy.structured_data["projectName"] == "Original (copy)"
+        assert copy.version == 0
+        assert copy.message_count == 0
+        assert str(copy.total_cost_usd) == "0.000000"
+
+    def test_duplicate_rejects_other_clients_brief(
+        self, api_client, client_user, client_profile, db
+    ):
+        other_client_user = User.objects.create_user(
+            email="other-client@example.com",
+            password="testpass",
+            name="Other",
+            group="CLIENT",
+        )
+        other_profile = ClientModel.objects.create(
+            name="Other", owner=other_client_user
+        )
+        other_brief = Brief.objects.create(
+            client=other_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Foreign"},
+        )
+
+        response = api_client.post(
+            f"/api/v1/client/briefs/ai/{other_brief.id}/duplicate",
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 404
+
+
+class TestBriefAiDelete:
+    def test_soft_deletes_brief(self, api_client, client_user, client_profile, db):
+        brief = Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "ToDelete"},
+        )
+
+        response = api_client.delete(
+            f"/api/v1/client/briefs/ai/{brief.id}",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 200
+
+        brief.refresh_from_db()
+        assert brief.deleted_at is not None
+
+        list_response = api_client.get(
+            "/api/v1/client/briefs/ai",
+            **_client_headers(client_user, client_profile.id),
+        )
+        names = [x["projectName"] for x in list_response.json()]
+        assert "ToDelete" not in names
+
+    def test_get_deleted_brief_returns_404(
+        self, api_client, client_user, client_profile, db
+    ):
+        from django.utils import timezone
+
+        brief = Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Gone"},
+            deleted_at=timezone.now(),
+        )
+        response = api_client.get(
+            f"/api/v1/client/briefs/ai/{brief.id}",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 404
+
+
+class TestBriefAiRename:
+    @pytest.fixture
+    def brief(self, client_profile):
+        return Brief.objects.create(
+            client=client_profile,
+            status="DRAFT",
+            structured_data={"projectName": "Old Name"},
+        )
+
+    def test_rename_updates_project_name(
+        self, api_client, client_user, client_profile, brief
+    ):
+        response = api_client.patch(
+            f"/api/v1/client/briefs/ai/{brief.id}",
+            data=json.dumps({"projectName": "Brand New"}),
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 200
+        assert response.json()["projectName"] == "Brand New"
+        brief.refresh_from_db()
+        assert brief.structured_data["projectName"] == "Brand New"
+
+    def test_rename_rejects_empty(self, api_client, client_user, client_profile, brief):
+        response = api_client.patch(
+            f"/api/v1/client/briefs/ai/{brief.id}",
+            data=json.dumps({"projectName": "   "}),
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 400
+
+    def test_rename_rejects_too_long(
+        self, api_client, client_user, client_profile, brief
+    ):
+        response = api_client.patch(
+            f"/api/v1/client/briefs/ai/{brief.id}",
+            data=json.dumps({"projectName": "x" * 300}),
+            content_type="application/json",
+            **_client_headers(client_user, client_profile.id),
+        )
+        assert response.status_code == 400

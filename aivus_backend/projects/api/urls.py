@@ -108,6 +108,11 @@ urlpatterns = [
     # XLSX Upload (Sprint 5)
     path("client/xlsx-upload", views.client_xlsx_upload, name="client_xlsx_upload"),
     path(
+        "client/briefs/ai",
+        views_brief_v2.client_brief_ai_list,
+        name="client_brief_ai_list",
+    ),
+    path(
         "client/briefs/ai/start",
         views_brief_v2.client_brief_ai_start,
         name="client_brief_ai_start",
@@ -141,6 +146,11 @@ urlpatterns = [
         "client/briefs/ai/<uuid:brief_id>/finalize",
         views_brief_v2.client_brief_ai_finalize,
         name="client_brief_ai_finalize",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/duplicate",
+        views_brief_v2.client_brief_ai_duplicate,
+        name="client_brief_ai_duplicate",
     ),
     path(
         "public/briefs/ai/start",
