@@ -286,6 +286,7 @@ def login(request):  # noqa: C901, PLR0912
             "email": user.email,
             "name": user.name,
             "group": user.group,
+            "isStaff": bool(user.is_staff),
         }
 
         # Add vendor_id or client_id if applicable

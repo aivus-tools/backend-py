@@ -365,6 +365,35 @@ class TestLoginCredentials:
         data = json.loads(response.content)
         assert data["id"] == str(credentials_user.id)
         assert data["email"] == credentials_user.email
+        assert data["isStaff"] is False
+
+    def test_login_returns_is_staff_true_for_staff_user(self, api_client, db):
+        """Staff users should be flagged via isStaff in login response."""
+        from aivus_backend.users.models import User
+
+        staff = User.objects.create_user(
+            email="staffer@example.com",
+            password="securepass123",
+            name="Staffer",
+            group="CLIENT",
+        )
+        staff.is_staff = True
+        staff.save(update_fields=["is_staff"])
+
+        response = api_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps(
+                {
+                    "email": staff.email,
+                    "password": "securepass123",
+                    "authType": "CREDENTIALS",
+                }
+            ),
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["isStaff"] is True
 
     def test_login_wrong_password(self, api_client, credentials_user):
         """Login with wrong password should return 401."""

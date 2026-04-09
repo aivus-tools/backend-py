@@ -282,6 +282,7 @@ def _build_profile_response(user):
         "authType": user.auth_type,
         "avatar_url": user.avatar.url if user.avatar else None,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
+        "isStaff": bool(user.is_staff),
     }
 
     if user.group == "VENDOR":
