@@ -388,30 +388,75 @@ def _build_methodology_context(archetypes: list[int], sections: list[str]) -> st
     return "METHODOLOGY:\n" + "\n\n".join(parts)
 
 
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "ru": "Russian",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+}
+
+
+def _resolve_language_name(document_language: str) -> str:
+    code = (document_language or "").strip().lower()
+    return _LANGUAGE_NAMES.get(code, code or "")
+
+
 def _build_language_rule(document_language: str) -> str:
-    if document_language:
+    name = _resolve_language_name(document_language)
+    if name:
         return (
-            "TWO INDEPENDENT LANGUAGES (CRITICAL — never confuse them):\n"
-            f"1. BRIEF DOCUMENT LANGUAGE = {document_language}. This is FROZEN and "
-            f"NEVER changes. ALL section HTML content (headings, labels, lists, body "
-            f"text, every word inside <div data-section=...>) MUST be written in "
-            f"{document_language}, regardless of what language the user writes in.\n"
-            f"2. REPLY LANGUAGE = the language of the user's LAST message (auto-detect "
-            f"per turn). If the user writes in Russian, reply in Russian. If they "
-            f"switch to English, reply in English. The 'reply' field follows the user "
-            f"every turn.\n"
-            f"DO NOT translate sections to match the user's reply language. DO NOT "
-            f"mix languages inside one section. The brief is in {document_language}, "
-            f"period."
+            "TWO INDEPENDENT LANGUAGES — DO NOT CONFUSE THEM:\n"
+            f"1. BRIEF DOCUMENT LANGUAGE = {name}. FROZEN. NEVER changes. EVERY "
+            f"single word inside any <div data-section=...> block MUST be written "
+            f"in {name}. Section headings, field labels, list items, body text, "
+            f"placeholders — all in {name}, ALWAYS, no matter what language the "
+            f"user writes in this turn or any future turn.\n"
+            f"2. REPLY LANGUAGE = the language of the user's LAST message "
+            f"(auto-detect every turn). If the user writes in Russian this turn, "
+            f"reply in Russian. If they switch back to English, reply in English. "
+            f"The 'reply' field follows the user message every turn.\n"
+            f"\n"
+            f"CRITICAL: When the user replies in a language other than {name}, "
+            f"you must STILL write section_patches in {name}. The user message "
+            f"language has ZERO effect on section content language.\n"
+            f"\n"
+            f"EXAMPLE (brief language is {name}):\n"
+            f"  User: «Бюджет 500000 рублей»\n"
+            f'  CORRECT section_patches: {{"budget_timeline": "<h2>Budget & '
+            f'Timeline</h2><ul><li>Total Budget: up to 500,000 RUB</li></ul>"}}\n'
+            f'  WRONG: {{"budget_timeline": "<h2>Бюджет и сроки</h2><ul><li>'
+            f'Общий бюджет: до 500,000 рублей</li></ul>"}}\n'
+            f"  CORRECT reply: «Записал бюджет до 500 000 рублей. Дальше: какие "
+            f"даты?»  (reply in Russian because the user wrote Russian)\n"
+            f"\n"
+            f"NEVER mix languages inside a section. NEVER translate existing "
+            f"sections. The brief stays in {name}, period."
         )
     return (
         "TWO INDEPENDENT LANGUAGES:\n"
         "1. BRIEF DOCUMENT LANGUAGE = detect from the FIRST user message and KEEP "
         "IT FROZEN for the entire conversation. All section HTML content stays in "
-        "that language no matter what.\n"
+        "that language no matter what the user writes later.\n"
         "2. REPLY LANGUAGE = the language of the user's LAST message (auto-detect "
         "per turn). The 'reply' field follows the user every turn.\n"
         "DO NOT translate sections when the user switches reply language."
+    )
+
+
+def _build_language_reminder(document_language: str) -> str:
+    name = _resolve_language_name(document_language)
+    if not name:
+        return ""
+    return (
+        f"REMINDER: brief sections must stay in {name} regardless of the language "
+        f"of the user message below. Reply field still follows the user message "
+        f"language."
     )
 
 
@@ -652,6 +697,7 @@ def update_and_respond(state: BriefGraphState) -> dict:
 
     language_rule = _build_language_rule(state.get("document_language", ""))
     market_rule = _build_market_rule(state.get("document_language", ""))
+    language_reminder = _build_language_reminder(state.get("document_language", ""))
 
     system_prompt = UPDATE_SYSTEM_PROMPT.format(
         methodology_context=methodology,
@@ -664,6 +710,8 @@ def update_and_respond(state: BriefGraphState) -> dict:
     )
 
     messages = [{"role": "system", "content": system_prompt}, *history_messages]
+    if language_reminder:
+        messages.append({"role": "system", "content": language_reminder})
 
     parsed, response = call_llm_json(
         model=MODEL_GENERATION,
@@ -726,6 +774,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
     ]
     language_rule = _build_language_rule(state.get("document_language", ""))
     market_rule = _build_market_rule(state.get("document_language", ""))
+    language_reminder = _build_language_reminder(state.get("document_language", ""))
 
     messages = [
         {
@@ -737,8 +786,10 @@ def answer_or_chat(state: BriefGraphState) -> dict:
                 market_rule=market_rule,
             ),
         },
-        {"role": "user", "content": user_message},
     ]
+    if language_reminder:
+        messages.append({"role": "system", "content": language_reminder})
+    messages.append({"role": "user", "content": user_message})
 
     parsed, response = call_llm_json(
         model=MODEL_CHAT,
