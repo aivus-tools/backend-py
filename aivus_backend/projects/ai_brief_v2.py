@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Annotated
 
 from langgraph.graph import END
@@ -173,9 +174,28 @@ IMPORTANT:
   "2-3 indoor studio setups + 1 outdoor urban location".
 - Budget: if not mentioned, suggest a realistic range
   based on the project scope.
-- For unknown fields, write professional placeholders like
-  "[To be confirmed - recommend discussing with talent
+- DO NOT INVENT real-sounding names. Never make up
+  client/brand/agency/talent/vendor names. If the user did
+  not give a name — use a clearly bracketed placeholder
+  like "[Client name TBD]", "[Brand TBD]", "[Agency TBD]"
+  or leave the field empty. NEVER write fake names like
+  "Sani Web Flowafid" or "Acme Studios". Same rule for
+  structured_data: clientName / brandName must be empty
+  string or a bracketed placeholder, never a fabricated name.
+- For other unknown fields, write professional placeholders
+  like "[To be confirmed - recommend discussing with talent
   agency]".
+
+SCOPE_PHOTO RULE:
+- The scope_photo section ONLY applies if archetypes contain
+  5 (Photography) or 6 (Key Visual/Design).
+- For pure video projects (archetypes are some subset of
+  1, 2, 3, 4 ONLY) — DO NOT include scope_photo in the
+  "sections" object at all. Omit the key entirely. Do NOT
+  write "N/A" for scope_photo, do NOT include the key with
+  empty content. Just leave it out.
+- Only include scope_photo when 5 or 6 is present, and then
+  fill it with real photo-production fields.
 
 Respond with JSON:
 {{
@@ -246,8 +266,23 @@ Already asked about: {questions_asked}
 INSTRUCTIONS:
 1. Update the relevant sections based on the client's answer.
 2. Return ONLY the sections that changed (as section_patches).
-3. Update sections_status for changed sections.
-4. Ask the NEXT most important question:
+3. CRITICAL: When you patch a section, you MUST include the
+   COMPLETE new HTML for that section — every existing field
+   plus your changes. Look at the "Current sections being
+   discussed" block above and copy ALL fields you see there
+   into your patch, then apply the user's change on top.
+   NEVER drop existing data. NEVER replace concrete values
+   like "Bookme" or "$50,000" with placeholders like
+   "[Your Project Title]" or "[To be confirmed]". If you
+   only need to change one field, KEEP every other field
+   exactly as it was.
+4. Update sections_status for changed sections.
+5. Track questions you've already asked. NEVER ask the
+   same question twice. The "Already asked about" list
+   below is your memory — consult it before every question.
+   If a topic is in that list and the user already answered,
+   move to the NEXT incomplete area, do not re-ask.
+6. Ask the NEXT most important question:
    - Focus on ONE specific detail, not a whole section.
    - Provide 2-4 concrete options based on industry standards.
    - Example: "How many shooting days? For a project
@@ -256,9 +291,17 @@ INSTRUCTIONS:
      multi-location)?"
    - NEVER say "please fill in section X" or
      "tell me about X section".
-5. If ALL important sections are "complete", set
+7. If ALL important sections are "complete", set
    conversation_phase to "complete" and write a
    closing message.
+
+SCOPE_PHOTO RULE:
+- The scope_photo section ONLY applies if archetypes contain
+  5 (Photography) or 6 (Key Visual/Design).
+- For pure video projects (only archetypes 1-4) — never
+  emit scope_photo in your patches. Do not write "N/A". Do
+  not include the key with empty content. The server will
+  drop it anyway.
 
 Respond with JSON:
 {{
@@ -581,6 +624,63 @@ def _route_decision(state: BriefGraphState) -> str:
     return "update"
 
 
+_CYRILLIC_RE = re.compile(r"[\u0410-\u044f\u0401\u0451]")
+_LETTER_RE = re.compile(r"[A-Za-z\u0410-\u044f\u0401\u0451]")
+_PHOTO_ARCHETYPES = {5, 6}
+
+
+def strip_wrong_language_patches(patches: dict, document_language: str) -> dict:
+    """Drop patches whose content is in the wrong language.
+
+    The brief document language is frozen — if the LLM accidentally
+    generated section content in the user's reply language instead, we
+    refuse to apply that patch so the brief stays consistent.
+    """
+    lang = (document_language or "").strip().lower()
+    if lang not in ("en", "ru"):
+        return patches
+
+    cleaned = {}
+    for key, html in patches.items():
+        if not html:
+            cleaned[key] = html
+            continue
+        has_cyrillic = bool(_CYRILLIC_RE.search(html))
+        if lang == "en" and has_cyrillic:
+            logger.warning(
+                "Dropping wrong-language patch for %s: expected en, got cyrillic",
+                key,
+            )
+            continue
+        if lang == "ru":
+            letters = _LETTER_RE.findall(html)
+            if letters and not has_cyrillic:
+                logger.warning(
+                    "Dropping wrong-language patch for %s: expected ru, got latin only",
+                    key,
+                )
+                continue
+        cleaned[key] = html
+    return cleaned
+
+
+def filter_scope_photo(sections: dict, archetypes: list | None) -> dict:
+    """Remove scope_photo for non-photo archetypes.
+
+    The section is only meaningful when archetypes 5 (Photography) or
+    6 (Key Visual/Design) are involved. For pure video projects we drop
+    it entirely so the UI doesn't show "N/A".
+    """
+    if not sections or "scope_photo" not in sections:
+        return sections
+    archetype_set = {int(a) for a in (archetypes or []) if isinstance(a, int)}
+    if archetype_set & _PHOTO_ARCHETYPES:
+        return sections
+    cleaned = dict(sections)
+    cleaned.pop("scope_photo", None)
+    return cleaned
+
+
 def generate_full_brief(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
     methodology = _build_methodology_context([], BRIEF_SECTION_KEYS)
@@ -611,6 +711,9 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     sections = parsed.get("sections", {})
     sections = {k: v for k, v in sections.items() if k in BRIEF_SECTION_KEYS}
     sections = sanitize_sections(sections)
+    sections = strip_wrong_language_patches(
+        sections, state.get("document_language", "")
+    )
     sections_status = parsed.get("sections_status", {})
     sections_status = {
         k: v
@@ -622,6 +725,9 @@ def generate_full_brief(state: BriefGraphState) -> dict:
         for x in parsed.get("archetypes", [])
         if isinstance(x, int) and 1 <= x <= MAX_ARCHETYPE_CODE
     ]
+    sections = filter_scope_photo(sections, archetypes)
+    if "scope_photo" not in sections:
+        sections_status.pop("scope_photo", None)
     reply = parsed.get("reply", "")
     structured_data = parsed.get("structured_data", {})
 
@@ -669,7 +775,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     }
 
 
-def update_and_respond(state: BriefGraphState) -> dict:
+def update_and_respond(state: BriefGraphState) -> dict:  # noqa: PLR0915
     current_sections = state.get("document_sections", {})
     sections_status = state.get("sections_status", {})
     archetypes = state.get("archetypes", [])
@@ -680,8 +786,15 @@ def update_and_respond(state: BriefGraphState) -> dict:
         incomplete = [k for k, v in sections_status.items() if v != "complete"]
         affected = incomplete[:3] if incomplete else list(current_sections.keys())[:3]
 
-    sections_html_parts = []
+    # Show ALL non-empty sections to the model so it always has the full
+    # picture and never accidentally drops fields when patching one section.
+    context_keys = [k for k in BRIEF_SECTION_KEYS if current_sections.get(k)]
     for key in affected:
+        if key not in context_keys and current_sections.get(key):
+            context_keys.append(key)
+
+    sections_html_parts = []
+    for key in context_keys:
         html = current_sections.get(key, "")
         if html:
             label = SECTION_LABELS.get(key, key)
@@ -692,7 +805,7 @@ def update_and_respond(state: BriefGraphState) -> dict:
 
     history_messages = [
         {"role": msg["role"], "content": msg["content"]}
-        for msg in state.get("messages", [])[-10:]
+        for msg in state.get("messages", [])
     ]
 
     language_rule = _build_language_rule(state.get("document_language", ""))
@@ -725,6 +838,9 @@ def update_and_respond(state: BriefGraphState) -> dict:
         k: v for k, v in section_patches.items() if k in BRIEF_SECTION_KEYS
     }
     section_patches = sanitize_sections(section_patches)
+    section_patches = strip_wrong_language_patches(
+        section_patches, state.get("document_language", "")
+    )
     new_status = parsed.get("sections_status", {})
     new_status = {
         k: v
@@ -739,9 +855,12 @@ def update_and_respond(state: BriefGraphState) -> dict:
 
     merged_sections = dict(current_sections)
     merged_sections.update(section_patches)
+    merged_sections = filter_scope_photo(merged_sections, archetypes)
 
     merged_status = dict(sections_status)
     merged_status.update(new_status)
+    if "scope_photo" not in merged_sections:
+        merged_status.pop("scope_photo", None)
 
     merged_structured = dict(state.get("structured_data", {}))
     merged_structured.update(structured_updates)
