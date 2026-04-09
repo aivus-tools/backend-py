@@ -148,12 +148,29 @@ def _escape(text: str) -> str:
     )
 
 
+def _is_real_name(value: str) -> bool:
+    if not value:
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return False
+    return stripped.lower() not in {"tbd", "n/a", "na", "to be confirmed"}
+
+
 def _build_pdf_html(
     brief: Brief, document_sections: dict, structured_data: dict
 ) -> str:
     structured = structured_data or {}
-    project_name = _escape(str(structured.get("projectName", "Creative Brief")))
-    client_name = _escape(str(structured.get("clientName", "")))
+    raw_project_name = str(structured.get("projectName", "")).strip()
+    project_name = (
+        _escape(raw_project_name)
+        if _is_real_name(raw_project_name)
+        else "Creative Brief"
+    )
+    raw_client_name = str(structured.get("clientName", "")).strip()
+    client_name = _escape(raw_client_name) if _is_real_name(raw_client_name) else ""
 
     sections_html = []
     for key in BRIEF_SECTION_KEYS:
