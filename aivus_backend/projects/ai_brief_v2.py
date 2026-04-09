@@ -286,8 +286,7 @@ Answer briefly and helpfully, then smoothly transition
 to the next clarifying question about the brief.
 
 LANGUAGE RULE:
-- Detect the language of the user's message.
-- Write your reply in that same language.
+{language_rule}
 
 {market_rule}
 
@@ -392,15 +391,27 @@ def _build_methodology_context(archetypes: list[int], sections: list[str]) -> st
 def _build_language_rule(document_language: str) -> str:
     if document_language:
         return (
-            f"- Write ALL brief section content (HTML) in {document_language}.\n"
-            f"- Section headings, labels, lists, and body text must be in {document_language}.\n"
-            "- Your conversational reply should match the language of the user's message "
-            "(auto-detect)."
+            "TWO INDEPENDENT LANGUAGES (CRITICAL — never confuse them):\n"
+            f"1. BRIEF DOCUMENT LANGUAGE = {document_language}. This is FROZEN and "
+            f"NEVER changes. ALL section HTML content (headings, labels, lists, body "
+            f"text, every word inside <div data-section=...>) MUST be written in "
+            f"{document_language}, regardless of what language the user writes in.\n"
+            f"2. REPLY LANGUAGE = the language of the user's LAST message (auto-detect "
+            f"per turn). If the user writes in Russian, reply in Russian. If they "
+            f"switch to English, reply in English. The 'reply' field follows the user "
+            f"every turn.\n"
+            f"DO NOT translate sections to match the user's reply language. DO NOT "
+            f"mix languages inside one section. The brief is in {document_language}, "
+            f"period."
         )
     return (
-        "- Detect the language of the user's message.\n"
-        "- Write your reply AND all brief section content in that same language.\n"
-        "- Section HTML headings, labels, and content must all be in the detected language."
+        "TWO INDEPENDENT LANGUAGES:\n"
+        "1. BRIEF DOCUMENT LANGUAGE = detect from the FIRST user message and KEEP "
+        "IT FROZEN for the entire conversation. All section HTML content stays in "
+        "that language no matter what.\n"
+        "2. REPLY LANGUAGE = the language of the user's LAST message (auto-detect "
+        "per turn). The 'reply' field follows the user every turn.\n"
+        "DO NOT translate sections when the user switches reply language."
     )
 
 
@@ -408,33 +419,35 @@ def _build_market_rule(document_language: str) -> str:
     lang = (document_language or "").strip().lower()
     if lang == "ru":
         return (
-            "MARKET CONTEXT:\n"
+            "MARKET CONTEXT (about money and production realities only — does NOT "
+            "affect any language rule above):\n"
             "- Target market: Russian Federation.\n"
-            "- Use rubles (RUB, ₽) for any monetary values, ranges, and budget defaults.\n"
+            "- Use rubles (RUB, ₽) for monetary values, ranges, and budget defaults.\n"
             "- Reference Russian production realities: typical talent rates, day rates, "
-            "locations, equipment, post-production vendors, and legal/usage frameworks "
+            "locations, equipment, post-production vendors, legal/usage frameworks "
             "common in the RF market.\n"
-            "- Questions, suggested options, and default placeholders must reflect the RF "
-            "market specifics (cities, agencies, platforms, regulators).\n"
+            "- Suggested options and default placeholders should reflect RF specifics "
+            "(cities, agencies, platforms, regulators).\n"
             "- Never quote USD or US-specific platforms unless the user explicitly asks."
         )
     if lang == "en":
         return (
-            "MARKET CONTEXT:\n"
+            "MARKET CONTEXT (about money and production realities only — does NOT "
+            "affect any language rule above):\n"
             "- Target market: United States.\n"
-            "- Use US dollars (USD, $) for any monetary values, ranges, and budget defaults.\n"
+            "- Use US dollars (USD, $) for monetary values, ranges, and budget defaults.\n"
             "- Reference US production realities: SAG/non-union talent, IATSE crew norms, "
-            "common shoot locations (LA, NYC, ATL), standard post vendors, and US legal/"
+            "common shoot locations (LA, NYC, ATL), standard post vendors, US legal/"
             "usage frameworks.\n"
-            "- Questions, suggested options, and default placeholders must reflect the US "
-            "market specifics (cities, agencies, platforms, regulators).\n"
+            "- Suggested options and default placeholders should reflect US specifics "
+            "(cities, agencies, platforms, regulators).\n"
             "- Never quote rubles or RF-specific platforms unless the user explicitly asks."
         )
     return (
-        "MARKET CONTEXT:\n"
-        "- Detect the user's market from the language of their message.\n"
-        "- For Russian, default to the RF market (rubles, RU production realities).\n"
-        "- For English, default to the US market (USD, US production realities)."
+        "MARKET CONTEXT (money and production realities only — does NOT affect any "
+        "language rule above):\n"
+        "- Pick the market from the brief document language: Russian = RF (rubles), "
+        "English = US (USD)."
     )
 
 
@@ -711,6 +724,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
     incomplete = [
         SECTION_LABELS.get(k, k) for k, v in sections_status.items() if v != "complete"
     ]
+    language_rule = _build_language_rule(state.get("document_language", ""))
     market_rule = _build_market_rule(state.get("document_language", ""))
 
     messages = [
@@ -719,6 +733,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
             "content": ANSWER_SYSTEM_PROMPT.format(
                 conversation_phase=state.get("conversation_phase", "questioning"),
                 incomplete_sections=", ".join(incomplete) if incomplete else "none",
+                language_rule=language_rule,
                 market_rule=market_rule,
             ),
         },
