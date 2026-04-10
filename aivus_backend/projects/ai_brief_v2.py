@@ -537,6 +537,48 @@ def _build_methodology_context(archetypes: list[int], sections: list[str]) -> st
     return "METHODOLOGY:\n" + "\n\n".join(parts)
 
 
+_CYRILLIC_RE = re.compile(r"[\u0430-\u044f\u0410-\u042f\u0451\u0401]")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
+_HANGUL_RE = re.compile(r"[\uac00-\ud7af\u1100-\u11ff]")
+
+
+def _detect_language_from_text(text: str) -> str:
+    if not text:
+        return ""
+    if _CYRILLIC_RE.search(text):
+        return "ru"
+    if _HIRAGANA_KATAKANA_RE.search(text):
+        return "ja"
+    if _HANGUL_RE.search(text):
+        return "ko"
+    if _CJK_RE.search(text):
+        return "zh"
+    return ""
+
+
+def _resolve_document_language(
+    user_message: str,
+    history: list,
+    passed_language: str,
+) -> str:
+    detected = _detect_language_from_text(user_message)
+    if detected and detected in _LANGUAGE_NAMES:
+        return detected
+
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            detected = _detect_language_from_text(msg.get("content", ""))
+            if detected and detected in _LANGUAGE_NAMES:
+                return detected
+            break
+
+    if passed_language:
+        return passed_language
+
+    return "en"
+
+
 _LANGUAGE_NAMES = {
     "en": "English",
     "ru": "Russian",
@@ -791,8 +833,11 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
     methodology = ""
     feedback = _build_feedback_context(BRIEF_SECTION_KEYS)
-    language_rule = _build_language_rule(state.get("document_language", ""))
-    market_rule = _build_market_rule(state.get("document_language", ""))
+    doc_lang = _resolve_document_language(
+        user_message, [], state.get("document_language", "")
+    )
+    language_rule = _build_language_rule(doc_lang)
+    market_rule = _build_market_rule(doc_lang)
 
     messages = [
         {
@@ -914,9 +959,13 @@ def update_and_respond(state: BriefGraphState) -> dict:  # noqa: PLR0915
         for msg in state.get("messages", [])
     ]
 
-    language_rule = _build_language_rule(state.get("document_language", ""))
-    market_rule = _build_market_rule(state.get("document_language", ""))
-    language_reminder = _build_language_reminder(state.get("document_language", ""))
+    user_message = history_messages[-1]["content"] if history_messages else ""
+    doc_lang = _resolve_document_language(
+        user_message, history_messages, state.get("document_language", "")
+    )
+    language_rule = _build_language_rule(doc_lang)
+    market_rule = _build_market_rule(doc_lang)
+    language_reminder = _build_language_reminder(doc_lang)
 
     system_prompt = UPDATE_SYSTEM_PROMPT.format(
         methodology_context=methodology,
@@ -997,9 +1046,16 @@ def answer_or_chat(state: BriefGraphState) -> dict:
     incomplete = [
         SECTION_LABELS.get(k, k) for k, v in sections_status.items() if v != "complete"
     ]
-    language_rule = _build_language_rule(state.get("document_language", ""))
-    market_rule = _build_market_rule(state.get("document_language", ""))
-    language_reminder = _build_language_reminder(state.get("document_language", ""))
+    history_messages = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in state.get("messages", [])
+    ]
+    doc_lang = _resolve_document_language(
+        user_message, history_messages, state.get("document_language", "")
+    )
+    language_rule = _build_language_rule(doc_lang)
+    market_rule = _build_market_rule(doc_lang)
+    language_reminder = _build_language_reminder(doc_lang)
 
     messages = [
         {
