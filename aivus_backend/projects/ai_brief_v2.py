@@ -645,9 +645,15 @@ def _build_language_reminder(document_language: str) -> str:
     if not name:
         return ""
     return (
-        f"REMINDER: brief sections must stay in {name} regardless of the language "
-        f"of the user message below. Reply field still follows the user message "
-        f"language."
+        f"MANDATORY LANGUAGE CHECK before generating section_patches:\n"
+        f"- section_patches content language: {name} ONLY. "
+        f"Even if the user wrote in another language, every word in "
+        f"section_patches MUST be in {name}. Translate user input into "
+        f"{name} before placing it into sections.\n"
+        f"- reply language: match the user's message language (NOT {name} "
+        f"unless the user wrote in {name}).\n"
+        f"VIOLATION = outputting section_patches in any language other than "
+        f"{name}."
     )
 
 
@@ -833,9 +839,8 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
     methodology = ""
     feedback = _build_feedback_context(BRIEF_SECTION_KEYS)
-    doc_lang = _resolve_document_language(
-        user_message, [], state.get("document_language", "")
-    )
+    passed_lang = state.get("document_language", "")
+    doc_lang = passed_lang or _resolve_document_language(user_message, [], "")
     language_rule = _build_language_rule(doc_lang)
     market_rule = _build_market_rule(doc_lang)
 
@@ -862,9 +867,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
     sections = parsed.get("sections", {})
     sections = {k: v for k, v in sections.items() if k in BRIEF_SECTION_KEYS}
     sections = sanitize_sections(sections)
-    sections = strip_wrong_language_patches(
-        sections, state.get("document_language", "")
-    )
+    sections = strip_wrong_language_patches(sections, doc_lang)
     sections_status = parsed.get("sections_status", {})
     sections_status = {
         k: v
@@ -959,13 +962,9 @@ def update_and_respond(state: BriefGraphState) -> dict:  # noqa: PLR0915
         for msg in state.get("messages", [])
     ]
 
-    user_message = history_messages[-1]["content"] if history_messages else ""
-    doc_lang = _resolve_document_language(
-        user_message, history_messages, state.get("document_language", "")
-    )
-    language_rule = _build_language_rule(doc_lang)
-    market_rule = _build_market_rule(doc_lang)
-    language_reminder = _build_language_reminder(doc_lang)
+    language_rule = _build_language_rule(state.get("document_language", ""))
+    market_rule = _build_market_rule(state.get("document_language", ""))
+    language_reminder = _build_language_reminder(state.get("document_language", ""))
 
     system_prompt = UPDATE_SYSTEM_PROMPT.format(
         methodology_context=methodology,
@@ -1046,16 +1045,9 @@ def answer_or_chat(state: BriefGraphState) -> dict:
     incomplete = [
         SECTION_LABELS.get(k, k) for k, v in sections_status.items() if v != "complete"
     ]
-    history_messages = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in state.get("messages", [])
-    ]
-    doc_lang = _resolve_document_language(
-        user_message, history_messages, state.get("document_language", "")
-    )
-    language_rule = _build_language_rule(doc_lang)
-    market_rule = _build_market_rule(doc_lang)
-    language_reminder = _build_language_reminder(doc_lang)
+    language_rule = _build_language_rule(state.get("document_language", ""))
+    market_rule = _build_market_rule(state.get("document_language", ""))
+    language_reminder = _build_language_reminder(state.get("document_language", ""))
 
     messages = [
         {
