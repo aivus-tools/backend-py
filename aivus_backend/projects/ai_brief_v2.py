@@ -789,7 +789,7 @@ def filter_scope_photo(sections: dict, archetypes: list | None) -> dict:
 
 def generate_full_brief(state: BriefGraphState) -> dict:
     user_message = state["messages"][-1]["content"]
-    methodology = _build_methodology_context([], BRIEF_SECTION_KEYS)
+    methodology = ""
     feedback = _build_feedback_context(BRIEF_SECTION_KEYS)
     language_rule = _build_language_rule(state.get("document_language", ""))
     market_rule = _build_market_rule(state.get("document_language", ""))
