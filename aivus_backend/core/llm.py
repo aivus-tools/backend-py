@@ -19,13 +19,17 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.0},
+    "gemini-3.1-pro-preview": {"input": 0.0, "output": 0.0},
+    "gemini-3.1-flash-lite-preview": {"input": 0.0, "output": 0.0},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
 
 FALLBACK_CHAIN: dict[str, str] = {
-    "claude-sonnet-4-5-20250929": "gemini-2.5-pro",
+    "claude-sonnet-4-5-20250929": "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview": "gemini-2.5-pro",
+    "gemini-3.1-flash-lite-preview": "gemini-2.5-flash-lite",
     "gemini-2.5-pro": "gemini-2.5-flash",
     "gemini-2.5-flash": "gemini-2.5-flash-lite",
     "gpt-4o": "gpt-4o-mini",

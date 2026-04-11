@@ -30,7 +30,7 @@ DJANGO_GCP_STORAGE_BUCKET_NAME=aivus-production-media
 # WARNING: The previously exposed OpenAI key MUST be revoked at
 # https://platform.openai.com/api-keys
 GOOGLE_CLOUD_PROJECT=pioneering-flag-476313-u2
-GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_CLOUD_LOCATION=global
 # Optional: separate service account JSON for Vertex AI.
 # If empty, Application Default Credentials are used (same SA as GCS storage).
 VERTEX_CREDENTIALS_PATH=/app/vertex-credentials.json

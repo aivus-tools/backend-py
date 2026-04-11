@@ -18,7 +18,7 @@ from aivus_backend.core.llm import call_llm_json
 
 MODEL_CHAT = "gemini-2.5-flash"
 MODEL_ANALYSIS = "gemini-2.5-flash"
-MODEL_COMPARISON = "gemini-2.5-pro"
+MODEL_COMPARISON = "gemini-3.1-pro-preview"
 
 logger = logging.getLogger(__name__)
 
