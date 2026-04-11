@@ -143,6 +143,11 @@ urlpatterns = [
         name="client_brief_ai_feedback",
     ),
     path(
+        "client/briefs/ai/<uuid:brief_id>/messages/<uuid:message_id>/trace",
+        views_brief_v2.client_brief_ai_message_trace,
+        name="client_brief_ai_message_trace",
+    ),
+    path(
         "client/briefs/ai/<uuid:brief_id>/finalize",
         views_brief_v2.client_brief_ai_finalize,
         name="client_brief_ai_finalize",

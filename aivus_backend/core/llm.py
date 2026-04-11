@@ -4,6 +4,7 @@ import os
 import re as _re
 import time
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import cast
 
@@ -19,8 +20,8 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.0},
-    "gemini-3.1-pro-preview": {"input": 0.0, "output": 0.0},
-    "gemini-3.1-flash-lite-preview": {"input": 0.0, "output": 0.0},
+    "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.0},
+    "gemini-3.1-flash-lite-preview": {"input": 0.10, "output": 0.40},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
@@ -47,6 +48,8 @@ class LLMResponse:
     cost_usd: float
     model_used: str
     latency_ms: int
+    request_messages: list[dict[str, str]] = field(default_factory=list)
+    request_params: dict[str, Any] = field(default_factory=dict)
 
 
 def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -158,6 +161,13 @@ def _call_gemini(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
+        request_messages=list(messages),
+        request_params={
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "json_mode": json_mode,
+            "engine": "gemini",
+        },
     )
 
 
@@ -195,6 +205,13 @@ def _call_openai(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
+        request_messages=list(messages),
+        request_params={
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "json_mode": json_mode,
+            "engine": "openai",
+        },
     )
 
 
@@ -242,6 +259,13 @@ def _call_anthropic(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
+        request_messages=list(messages),
+        request_params={
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "json_mode": json_mode,
+            "engine": "anthropic",
+        },
     )
 
 

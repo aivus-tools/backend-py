@@ -31,6 +31,7 @@ from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import LLMCallTrace
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_brief_task
 from aivus_backend.users.models import Client
@@ -48,6 +49,28 @@ MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_PROJECT_NAME_LENGTH = 255
 BRIEF_SECTION_KEY_SET = set(BRIEF_SECTION_KEYS)
 SUPPORTED_LANGUAGES = {"en", "ru", "es", "fr", "de", "it", "pt", "zh", "ja", "ko"}
+
+
+def _persist_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
+    if not traces:
+        return
+    rows = [
+        LLMCallTrace(
+            message=chat_message,
+            purpose=str(entry.get("purpose", "")),
+            model=str(entry.get("model", "")),
+            request_messages=entry.get("request_messages") or [],
+            request_params=entry.get("request_params") or {},
+            response_raw=str(entry.get("response_raw", "")),
+            input_tokens=int(entry.get("input_tokens", 0) or 0),
+            output_tokens=int(entry.get("output_tokens", 0) or 0),
+            cost_usd=Decimal(str(entry.get("cost_usd", 0) or 0)),
+            latency_ms=int(entry.get("latency_ms", 0) or 0),
+            sequence=index,
+        )
+        for index, entry in enumerate(traces)
+    ]
+    LLMCallTrace.objects.bulk_create(rows)
 
 
 def conditional_ratelimit(**ratelimit_kwargs):
@@ -290,7 +313,7 @@ def client_brief_ai_chat(request, brief_id):
     )
     brief.refresh_from_db()
 
-    ChatMessage.objects.create(
+    chat_message = ChatMessage.objects.create(
         brief=brief,
         user=None,
         role="assistant",
@@ -301,6 +324,7 @@ def client_brief_ai_chat(request, brief_id):
         model_used=result["model_used"],
         sections_changed=result["sections_changed"],
     )
+    _persist_traces(chat_message, result.get("traces", []))
 
     return JsonResponse(
         {
@@ -502,6 +526,56 @@ def client_brief_ai_feedback(request, brief_id):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT")
+def client_brief_ai_message_trace(request, brief_id, message_id):
+    user = User.objects.filter(id=request.user_data["id"]).first()
+    if not user or not user.is_staff:
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    brief = _get_brief_for_client(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    chat_message = ChatMessage.objects.filter(id=message_id, brief=brief).first()
+    if not chat_message:
+        return JsonResponse({"error": "Message not found"}, status=404)
+
+    traces = list(chat_message.llm_traces.order_by("sequence", "created_at"))
+    return JsonResponse(
+        {
+            "messageId": str(chat_message.id),
+            "modelUsed": chat_message.model_used,
+            "inputTokens": chat_message.input_tokens,
+            "outputTokens": chat_message.output_tokens,
+            "costUsd": str(chat_message.cost_usd),
+            "createdAt": chat_message.created_at.isoformat()
+            if chat_message.created_at
+            else None,
+            "traces": [
+                {
+                    "id": str(trace.id),
+                    "sequence": trace.sequence,
+                    "purpose": trace.purpose,
+                    "model": trace.model,
+                    "requestMessages": trace.request_messages,
+                    "requestParams": trace.request_params,
+                    "responseRaw": trace.response_raw,
+                    "inputTokens": trace.input_tokens,
+                    "outputTokens": trace.output_tokens,
+                    "costUsd": str(trace.cost_usd),
+                    "latencyMs": trace.latency_ms,
+                    "createdAt": trace.created_at.isoformat()
+                    if trace.created_at
+                    else None,
+                }
+                for trace in traces
+            ],
+        }
+    )
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
 @conditional_ratelimit(key="user", rate="5/m", method="POST")
@@ -677,7 +751,7 @@ def public_brief_ai_chat(request, brief_id):
     )
     brief.refresh_from_db()
 
-    ChatMessage.objects.create(
+    chat_message = ChatMessage.objects.create(
         brief=brief,
         user=None,
         anonymous_token=token,
@@ -689,6 +763,7 @@ def public_brief_ai_chat(request, brief_id):
         model_used=result["model_used"],
         sections_changed=result["sections_changed"],
     )
+    _persist_traces(chat_message, result.get("traces", []))
 
     return JsonResponse(
         {

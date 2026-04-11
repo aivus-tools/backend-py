@@ -46,6 +46,10 @@ def _add_messages(left: list, right: list) -> list:
     return left + right
 
 
+def _add_traces(left: list, right: list) -> list:
+    return (left or []) + (right or [])
+
+
 class BriefGraphState(TypedDict):
     messages: Annotated[list, _add_messages]
     brief_id: str
@@ -68,6 +72,7 @@ class BriefGraphState(TypedDict):
     model_used: str
     route_intent: str
     document_language: str
+    traces: Annotated[list[dict], _add_traces]
 
 
 SECTION_TEMPLATE = """\
@@ -821,6 +826,20 @@ def _accumulate_tokens(state: BriefGraphState, response: LLMResponse) -> dict:
     }
 
 
+def _build_trace_entry(purpose: str, response: LLMResponse) -> dict:
+    return {
+        "purpose": purpose,
+        "model": response.model_used,
+        "request_messages": response.request_messages,
+        "request_params": response.request_params,
+        "response_raw": response.content,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "cost_usd": response.cost_usd,
+        "latency_ms": response.latency_ms,
+    }
+
+
 def route_message(state: BriefGraphState) -> dict:
     conversation_phase = state.get("conversation_phase", "initial")
 
@@ -861,6 +880,7 @@ def route_message(state: BriefGraphState) -> dict:
 
         return {
             **token_update,
+            "traces": [_build_trace_entry("router", response)],
             "route_intent": intent,
             "sections_changed": affected,
         }
@@ -992,6 +1012,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
         token_update = _accumulate_tokens(state, response)
         return {
             **token_update,
+            "traces": [_build_trace_entry("generate", response)],
             "document_sections": {},
             "sections_status": dict.fromkeys(BRIEF_SECTION_KEYS, "empty"),
             "archetypes": [],
@@ -1015,6 +1036,7 @@ def generate_full_brief(state: BriefGraphState) -> dict:
 
     return {
         **token_update,
+        "traces": [_build_trace_entry("generate", response)],
         "document_sections": sections,
         "sections_status": sections_status,
         "archetypes": archetypes,
@@ -1127,6 +1149,7 @@ def update_and_respond(state: BriefGraphState) -> dict:  # noqa: PLR0915
 
     return {
         **token_update,
+        "traces": [_build_trace_entry("update", response)],
         "document_sections": merged_sections,
         "sections_status": merged_status,
         "structured_data": merged_structured,
@@ -1176,6 +1199,7 @@ def answer_or_chat(state: BriefGraphState) -> dict:
 
     return {
         **token_update,
+        "traces": [_build_trace_entry("answer", response)],
         "reply": reply,
         "sections_changed": [],
         "section_patches": {},
@@ -1205,6 +1229,7 @@ def extract_structured(state: BriefGraphState) -> dict:
 
     return {
         **token_update,
+        "traces": [_build_trace_entry("extract", response)],
         "structured_data": parsed,
     }
 
@@ -1301,6 +1326,7 @@ def process_brief_message(  # noqa: PLR0913
         "model_used": "",
         "route_intent": "",
         "document_language": document_language,
+        "traces": [],
     }
 
     result = graph.invoke(initial_state)
@@ -1319,6 +1345,7 @@ def process_brief_message(  # noqa: PLR0913
         "output_tokens": result.get("turn_output_tokens", 0),
         "cost_usd": result.get("turn_cost_usd", 0.0),
         "model_used": result.get("model_used", ""),
+        "traces": result.get("traces", []),
     }
 
 
@@ -1350,6 +1377,7 @@ def finalize_brief(
         "model_used": "",
         "route_intent": "",
         "document_language": "",
+        "traces": [],
     }
 
     result = extract_structured(state)
@@ -1359,4 +1387,5 @@ def finalize_brief(
         "output_tokens": result.get("turn_output_tokens", 0),
         "cost_usd": result.get("turn_cost_usd", 0.0),
         "model_used": result.get("model_used", ""),
+        "traces": result.get("traces", []),
     }

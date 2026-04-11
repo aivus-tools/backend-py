@@ -362,6 +362,11 @@ def serialize_brief_detail(brief: Brief) -> dict:
 
 def serialize_chat_message_v2(message: ChatMessage) -> dict:
     feedback = message.feedbacks.first() if hasattr(message, "feedbacks") else None
+    has_trace = (
+        message.role == "assistant" and message.llm_traces.exists()
+        if hasattr(message, "llm_traces")
+        else False
+    )
     return {
         "id": str(message.id),
         "role": message.role,
@@ -370,6 +375,8 @@ def serialize_chat_message_v2(message: ChatMessage) -> dict:
         "modelUsed": message.model_used,
         "inputTokens": message.input_tokens,
         "outputTokens": message.output_tokens,
+        "costUsd": str(message.cost_usd),
+        "hasTrace": has_trace,
         "feedback": serialize_brief_feedback(feedback) if feedback else None,
         "createdAt": message.created_at.isoformat() if message.created_at else None,
     }

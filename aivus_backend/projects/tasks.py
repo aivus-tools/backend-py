@@ -10,8 +10,31 @@ from aivus_backend.projects.ai_brief_v2 import process_brief_message
 from aivus_backend.projects.api.serializers import serialize_brief_v2
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import LLMCallTrace
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
+    if not traces:
+        return
+    rows = [
+        LLMCallTrace(
+            message=chat_message,
+            purpose=str(entry.get("purpose", "")),
+            model=str(entry.get("model", "")),
+            request_messages=entry.get("request_messages") or [],
+            request_params=entry.get("request_params") or {},
+            response_raw=str(entry.get("response_raw", "")),
+            input_tokens=int(entry.get("input_tokens", 0) or 0),
+            output_tokens=int(entry.get("output_tokens", 0) or 0),
+            cost_usd=Decimal(str(entry.get("cost_usd", 0) or 0)),
+            latency_ms=int(entry.get("latency_ms", 0) or 0),
+            sequence=index,
+        )
+        for index, entry in enumerate(traces)
+    ]
+    LLMCallTrace.objects.bulk_create(rows)
 
 
 @shared_task(
@@ -65,7 +88,7 @@ def generate_brief_task(
             message_count=F("message_count") + 1,
         )
 
-        ChatMessage.objects.create(
+        chat_message = ChatMessage.objects.create(
             brief=brief,
             user=None,
             role="assistant",
@@ -76,6 +99,7 @@ def generate_brief_task(
             model_used=result["model_used"],
             sections_changed=result["sections_changed"],
         )
+        _persist_traces(chat_message, result.get("traces", []))
 
     brief.refresh_from_db()
     return serialize_brief_v2(brief)

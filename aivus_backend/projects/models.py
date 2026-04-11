@@ -818,3 +818,30 @@ class BriefFeedback(models.Model):
 
     def __str__(self):
         return f"{self.rating} on {self.brief_id} by {self.user_id}"
+
+
+class LLMCallTrace(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    message = models.ForeignKey(
+        ChatMessage,
+        on_delete=models.CASCADE,
+        related_name="llm_traces",
+    )
+    purpose = models.CharField(max_length=32, blank=True, default="")
+    model = models.CharField(max_length=100, blank=True, default="")
+    request_messages = models.JSONField(default=list, blank=True)
+    request_params = models.JSONField(default=dict, blank=True)
+    response_raw = models.TextField(blank=True, default="")
+    input_tokens = models.IntegerField(default=0)
+    output_tokens = models.IntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    latency_ms = models.IntegerField(default=0)
+    sequence = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "llm_call_trace"
+        ordering = ["message_id", "sequence", "created_at"]
+
+    def __str__(self):
+        return f"{self.purpose} ({self.model}) for message {self.message_id}"
