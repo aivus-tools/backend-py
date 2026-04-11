@@ -280,3 +280,4 @@ aivus_backend/media/
 .idea
 
 gcs-credentials.json
+vertex-credentials.json

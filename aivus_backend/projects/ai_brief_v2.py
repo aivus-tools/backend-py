@@ -14,9 +14,9 @@ from aivus_backend.projects.models import BRIEF_SECTION_KEYS
 
 logger = logging.getLogger(__name__)
 
-MODEL_ROUTER = "gpt-4o-mini"
-MODEL_GENERATION = "gpt-4o"
-MODEL_CHAT = "gpt-4o-mini"
+MODEL_ROUTER = "gemini-2.5-flash-lite"
+MODEL_GENERATION = "gemini-2.5-pro"
+MODEL_CHAT = "gemini-2.5-flash"
 
 SECTION_LABELS = {
     "project_header": "1. Project Header",

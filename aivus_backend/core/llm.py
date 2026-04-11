@@ -5,9 +5,13 @@ import re as _re
 import time
 from dataclasses import dataclass
 from typing import Any
+from typing import cast
 
 import anthropic
 import openai
+from google import genai
+from google.genai import types as genai_types
+from google.oauth2 import service_account
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +19,15 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.0},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
 
 FALLBACK_CHAIN: dict[str, str] = {
-    "claude-sonnet-4-5-20250929": "gpt-4o",
+    "claude-sonnet-4-5-20250929": "gemini-2.5-pro",
+    "gemini-2.5-pro": "gemini-2.5-flash",
+    "gemini-2.5-flash": "gemini-2.5-flash-lite",
     "gpt-4o": "gpt-4o-mini",
 }
 
@@ -47,6 +56,10 @@ def _is_anthropic_model(model: str) -> bool:
     return model.startswith("claude")
 
 
+def _is_gemini_model(model: str) -> bool:
+    return model.startswith("gemini")
+
+
 def _get_openai_client() -> openai.OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -61,6 +74,87 @@ def _get_anthropic_client() -> anthropic.Anthropic:
         msg = "ANTHROPIC_API_KEY is not set"
         raise ValueError(msg)
     return anthropic.Anthropic(api_key=api_key)
+
+
+def _get_gemini_client() -> genai.Client:
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    if not project:
+        msg = "GOOGLE_CLOUD_PROJECT is not set"
+        raise ValueError(msg)
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+    client_kwargs: dict[str, Any] = {
+        "vertexai": True,
+        "project": project,
+        "location": location,
+    }
+
+    credentials_path = os.environ.get("VERTEX_CREDENTIALS_PATH", "")
+    if credentials_path:
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        client_kwargs["credentials"] = credentials
+
+    return genai.Client(**client_kwargs)
+
+
+def _call_gemini(
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool,  # noqa: FBT001
+) -> LLMResponse:
+    client = _get_gemini_client()
+    start = time.monotonic()
+
+    system_parts: list[str] = []
+    contents: list[genai_types.Content] = []
+    for message in messages:
+        role = message["role"]
+        content_text = message["content"]
+        if role == "system":
+            system_parts.append(content_text)
+            continue
+        gemini_role = "model" if role == "assistant" else "user"
+        contents.append(
+            genai_types.Content(
+                role=gemini_role,
+                parts=[genai_types.Part.from_text(text=content_text)],
+            )
+        )
+
+    config_kwargs: dict[str, Any] = {
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+    }
+    if system_parts:
+        config_kwargs["system_instruction"] = "\n".join(system_parts)
+    if json_mode:
+        config_kwargs["response_mime_type"] = "application/json"
+
+    response = client.models.generate_content(
+        model=model,
+        contents=cast("Any", contents),
+        config=genai_types.GenerateContentConfig(**config_kwargs),
+    )
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    content = response.text or ""
+    usage = response.usage_metadata
+    input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+    output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+
+    return LLMResponse(
+        content=content,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=calculate_cost(model, input_tokens, output_tokens),
+        model_used=model,
+        latency_ms=latency_ms,
+    )
 
 
 def _call_openai(
@@ -162,6 +256,10 @@ def call_llm(
             try:
                 if _is_anthropic_model(current_model):
                     result = _call_anthropic(
+                        current_model, messages, temperature, max_tokens, json_mode
+                    )
+                elif _is_gemini_model(current_model):
+                    result = _call_gemini(
                         current_model, messages, temperature, max_tokens, json_mode
                     )
                 else:

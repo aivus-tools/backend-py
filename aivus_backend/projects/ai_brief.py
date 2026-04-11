@@ -1,20 +1,24 @@
-"""AI-powered brief creation using LangGraph + OpenAI.
+"""AI-powered brief creation using LangGraph.
 
 This module implements a conversational AI agent that guides clients through
 creating a video production brief. It uses LangGraph for state management
-and OpenAI for natural language understanding and generation.
+and routes all LLM calls through ``aivus_backend.core.llm``.
 """
 
 import json
 import logging
-import os
 import threading
 from typing import Annotated
 
 from langgraph.graph import END
 from langgraph.graph import StateGraph
-from openai import OpenAI
 from typing_extensions import TypedDict
+
+from aivus_backend.core.llm import call_llm_json
+
+MODEL_CHAT = "gemini-2.5-flash"
+MODEL_ANALYSIS = "gemini-2.5-flash"
+MODEL_COMPARISON = "gemini-2.5-pro"
 
 logger = logging.getLogger(__name__)
 
@@ -201,15 +205,6 @@ COMPARISON_SYSTEM_PROMPT = (
 )
 
 
-def _get_openai_client():
-    """Get OpenAI client with API key from environment."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        msg = "OPENAI_API_KEY environment variable is not set"
-        raise ValueError(msg)
-    return OpenAI(api_key=api_key)
-
-
 def _merge_extracted_fields(existing: dict, new_fields: dict) -> dict:
     """Merge newly extracted fields into existing brief data."""
     merged = dict(existing)
@@ -242,37 +237,27 @@ class BriefChatState(TypedDict):
 
 def chat_node(state: BriefChatState) -> dict:
     """Main chat node - processes user message and generates response."""
-    client = _get_openai_client()
+    llm_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Build the conversation for OpenAI
-    openai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    # Add context about what we've extracted so far
     if state.get("extracted_fields"):
         context_msg = (
             f"Fields extracted so far from the conversation: "
             f"{json.dumps(state['extracted_fields'], indent=2)}\n"
             f"Continue the conversation to fill in missing required fields."
         )
-        openai_messages.append({"role": "system", "content": context_msg})
+        llm_messages.append({"role": "system", "content": context_msg})
 
-    # Add conversation history
-    openai_messages.extend(
+    llm_messages.extend(
         {"role": msg["role"], "content": msg["content"]} for msg in state["messages"]
     )
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=openai_messages,
+        parsed, _ = call_llm_json(
+            model=MODEL_CHAT,
+            messages=llm_messages,
             temperature=0.7,
             max_tokens=1000,
-            response_format={"type": "json_object"},
-            timeout=60,
         )
-
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
 
         fallback_reply = (
             "I'd love to help you create a brief!"
@@ -296,8 +281,8 @@ def chat_node(state: BriefChatState) -> dict:
             "messages": [{"role": "assistant", "content": reply}],
         }
 
-    except json.JSONDecodeError:
-        logger.exception("Failed to parse OpenAI response as JSON")
+    except (json.JSONDecodeError, ValueError):
+        logger.exception("Failed to parse LLM response as JSON")
         parse_error_reply = (
             "I'd love to help you create a brief!"
             " Could you tell me about your video"
@@ -470,11 +455,9 @@ def analyze_brief(brief_data: dict) -> dict:
         - summary: Brief summary
         - suggestions: List of suggestions
     """
-    client = _get_openai_client()
-
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        parsed, _ = call_llm_json(
+            model=MODEL_ANALYSIS,
             messages=[
                 {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
                 {
@@ -487,12 +470,7 @@ def analyze_brief(brief_data: dict) -> dict:
             ],
             temperature=0.5,
             max_tokens=1000,
-            response_format={"type": "json_object"},
-            timeout=60,
         )
-
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
 
         return {
             "summary": parsed.get("summary", "Brief analysis complete."),
@@ -522,8 +500,6 @@ def analyze_comparison(
         - analysis: Detailed analysis text
         - highlights: List of highlights with type and text
     """
-    client = _get_openai_client()
-
     data_content = (
         f"Brief details:\n{json.dumps(brief_data, indent=2)}\n\n"
         f"Comparison data:\n{json.dumps(comparison_data, indent=2)}"
@@ -538,17 +514,12 @@ def analyze_comparison(
         messages.append({"role": "user", "content": question})
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
+        parsed, _ = call_llm_json(
+            model=MODEL_COMPARISON,
             messages=messages,
             temperature=0.5,
             max_tokens=2000,
-            response_format={"type": "json_object"},
-            timeout=60,
         )
-
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
 
         return {
             "analysis": parsed.get("analysis", "Analysis complete."),

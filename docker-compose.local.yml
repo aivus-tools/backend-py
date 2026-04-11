@@ -18,6 +18,7 @@ services:
       - /app/.venv
       - .:/app:z
       - ./gcs-credentials.json:/app/gcs-credentials.json:ro
+      - ./vertex-credentials.json:/app/vertex-credentials.json:ro
     env_file:
       - ./.envs/.local/.django
       - ./.envs/.local/.postgres
