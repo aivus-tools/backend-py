@@ -182,6 +182,35 @@ MEDIA_ROOT = str(APPS_DIR / "media")
 # https://docs.djangoproject.com/en/dev/ref/settings/#media-url
 MEDIA_URL = "/media/"
 
+# STORAGES
+# ------------------------------------------------------------------------------
+# Default: local filesystem (MEDIA_ROOT). Set DJANGO_STORAGE_BACKEND=gcs to use
+# Google Cloud Storage via django-storages. GCS config is driven by env vars
+# GS_BUCKET_NAME and GS_CREDENTIALS_PATH (service account JSON).
+STORAGE_BACKEND = env("DJANGO_STORAGE_BACKEND", default="local")
+
+if STORAGE_BACKEND == "gcs":
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.gcloud.GoogleCloudStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    GS_BUCKET_NAME = env("GS_BUCKET_NAME")
+    GS_DEFAULT_ACL = "private"
+    GS_QUERYSTRING_AUTH = True
+    GS_EXPIRATION = env.int("GS_SIGNED_URL_EXPIRATION_SECONDS", default=900)
+    GS_CREDENTIALS_PATH = env("GS_CREDENTIALS_PATH", default="")
+    if GS_CREDENTIALS_PATH:
+        from google.oauth2 import service_account as _gs_service_account
+
+        GS_CREDENTIALS = _gs_service_account.Credentials.from_service_account_file(
+            GS_CREDENTIALS_PATH,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+
 # TEMPLATES
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#templates

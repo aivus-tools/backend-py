@@ -210,9 +210,9 @@ dependencies = [
     "openai>=1.0.0",
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
-    "langgraph>=0.2.0",
     "openpyxl>=3.1.0",
     "django-ratelimit>=4.1.0",
     "nh3>=0.2.0",
     "weasyprint>=62.0",
+    "python-magic>=0.4.27",
 ]

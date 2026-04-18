@@ -3,7 +3,7 @@
 from django.urls import path
 
 from . import views
-from . import views_brief_v2
+from . import views_brief_v3
 
 app_name = "projects_api"
 
@@ -107,104 +107,116 @@ urlpatterns = [
     ),
     # XLSX Upload (Sprint 5)
     path("client/xlsx-upload", views.client_xlsx_upload, name="client_xlsx_upload"),
+    # AI Brief V3 (client)
     path(
         "client/briefs/ai",
-        views_brief_v2.client_brief_ai_list,
+        views_brief_v3.client_brief_ai_list,
         name="client_brief_ai_list",
     ),
     path(
-        "client/briefs/ai/start",
-        views_brief_v2.client_brief_ai_start,
+        "client/briefs/ai/drafts",
+        views_brief_v3.client_brief_ai_drafts,
+        name="client_brief_ai_drafts",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/start",
+        views_brief_v3.client_brief_ai_start,
         name="client_brief_ai_start",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>/status",
-        views_brief_v2.client_brief_ai_status,
+        views_brief_v3.client_brief_ai_status,
         name="client_brief_ai_status",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>/chat",
-        views_brief_v2.client_brief_ai_chat,
+        views_brief_v3.client_brief_ai_chat,
         name="client_brief_ai_chat",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>",
-        views_brief_v2.client_brief_ai_detail,
+        views_brief_v3.client_brief_ai_detail,
         name="client_brief_ai_detail",
     ),
     path(
-        "client/briefs/ai/<uuid:brief_id>/section",
-        views_brief_v2.client_brief_ai_section,
-        name="client_brief_ai_section",
+        "client/briefs/ai/<uuid:brief_id>/attachments",
+        views_brief_v3.client_brief_ai_attachments,
+        name="client_brief_ai_attachments",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/attachments/<uuid:attachment_id>",
+        views_brief_v3.client_brief_ai_attachment_delete,
+        name="client_brief_ai_attachment_delete",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>/feedback",
-        views_brief_v2.client_brief_ai_feedback,
+        views_brief_v3.client_brief_ai_feedback,
         name="client_brief_ai_feedback",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>/messages/<uuid:message_id>/trace",
-        views_brief_v2.client_brief_ai_message_trace,
+        views_brief_v3.client_brief_ai_message_trace,
         name="client_brief_ai_message_trace",
     ),
     path(
         "client/briefs/ai/<uuid:brief_id>/finalize",
-        views_brief_v2.client_brief_ai_finalize,
+        views_brief_v3.client_brief_ai_finalize,
         name="client_brief_ai_finalize",
     ),
     path(
-        "client/briefs/ai/<uuid:brief_id>/duplicate",
-        views_brief_v2.client_brief_ai_duplicate,
-        name="client_brief_ai_duplicate",
+        "client/briefs/ai/<uuid:brief_id>/final-documents",
+        views_brief_v3.client_brief_ai_final_documents,
+        name="client_brief_ai_final_documents",
     ),
     path(
-        "public/briefs/ai/start",
-        views_brief_v2.public_brief_ai_start,
+        "client/briefs/ai/<uuid:brief_id>/final-documents/<uuid:document_id>",
+        views_brief_v3.client_brief_ai_final_document_update,
+        name="client_brief_ai_final_document_update",
+    ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/final-documents/<uuid:document_id>/pdf",
+        views_brief_v3.client_brief_ai_final_document_pdf,
+        name="client_brief_ai_final_document_pdf",
+    ),
+    # AI Brief V3 (public/anonymous)
+    path(
+        "public/briefs/ai/drafts",
+        views_brief_v3.public_brief_ai_drafts,
+        name="public_brief_ai_drafts",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/start",
+        views_brief_v3.public_brief_ai_start,
         name="public_brief_ai_start",
     ),
     path(
         "public/briefs/ai/<uuid:brief_id>/status",
-        views_brief_v2.public_brief_ai_status,
+        views_brief_v3.public_brief_ai_status,
         name="public_brief_ai_status",
     ),
     path(
         "public/briefs/ai/<uuid:brief_id>/chat",
-        views_brief_v2.public_brief_ai_chat,
+        views_brief_v3.public_brief_ai_chat,
         name="public_brief_ai_chat",
     ),
     path(
+        "public/briefs/ai/<uuid:brief_id>/attachments",
+        views_brief_v3.public_brief_ai_attachments,
+        name="public_brief_ai_attachments",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/attachments/<uuid:attachment_id>",
+        views_brief_v3.public_brief_ai_attachment_delete,
+        name="public_brief_ai_attachment_delete",
+    ),
+    path(
         "public/briefs/ai/<uuid:brief_id>",
-        views_brief_v2.public_brief_ai_detail,
+        views_brief_v3.public_brief_ai_detail,
         name="public_brief_ai_detail",
     ),
     path(
         "public/briefs/ai/<uuid:brief_id>/claim",
-        views_brief_v2.public_brief_ai_claim,
+        views_brief_v3.public_brief_ai_claim,
         name="public_brief_ai_claim",
-    ),
-    path(
-        "client/briefs/ai/<uuid:brief_id>/share",
-        views_brief_v2.client_brief_share_create,
-        name="client_brief_share_create",
-    ),
-    path(
-        "public/brief-shares/<str:token>",
-        views_brief_v2.brief_share_get_public,
-        name="brief_share_get_public",
-    ),
-    path(
-        "client/brief-shares/<str:token>/manage",
-        views_brief_v2.brief_share_manage,
-        name="brief_share_manage",
-    ),
-    path(
-        "client/briefs/ai/<uuid:brief_id>/pdf",
-        views_brief_v2.client_brief_ai_pdf,
-        name="client_brief_ai_pdf",
-    ),
-    path(
-        "public/brief-shares/<str:token>/pdf",
-        views_brief_v2.brief_share_pdf,
-        name="brief_share_pdf",
     ),
 ]

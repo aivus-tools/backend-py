@@ -16,6 +16,55 @@ from google.oauth2 import service_account
 
 logger = logging.getLogger(__name__)
 
+
+def _part_summary(part: dict) -> dict:
+    """Trace-friendly summary of a multimodal content part."""
+    kind = part.get("type", "text")
+    if kind == "text":
+        return {"type": "text", "text": part.get("text", "")}
+    if kind == "file_uri":
+        return {
+            "type": "file_uri",
+            "file_uri": part.get("file_uri", ""),
+            "mime_type": part.get("mime_type", ""),
+        }
+    if kind == "inline_bytes":
+        data = part.get("data")
+        size = len(data) if isinstance(data, (bytes, bytearray)) else 0
+        return {
+            "type": "inline_bytes",
+            "size": size,
+            "mime_type": part.get("mime_type", ""),
+        }
+    return {"type": kind}
+
+
+def _serialize_message_for_trace(message: dict) -> dict:
+    content = message.get("content")
+    if isinstance(content, str):
+        return {"role": message["role"], "content": content}
+    parts = [_part_summary(x) for x in (content or [])]
+    return {"role": message["role"], "parts": parts}
+
+
+def _flatten_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    texts = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            texts.append(part.get("text", ""))
+        elif part.get("type") == "file_uri":
+            texts.append(f"[attachment: {part.get('file_uri', '')}]")
+        elif part.get("type") == "inline_bytes":
+            texts.append(f"[attachment: {part.get('mime_type', 'binary')}]")
+    return "\n".join(t for t in texts if t)
+
+
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -107,9 +156,42 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(**client_kwargs)
 
 
+def _gemini_parts(content: Any) -> list[genai_types.Part]:  # noqa: C901
+    """Convert our content representation to list of genai Parts."""
+    if isinstance(content, str):
+        return [genai_types.Part.from_text(text=content)]
+    if not isinstance(content, list):
+        return [genai_types.Part.from_text(text=str(content or ""))]
+
+    parts: list[genai_types.Part] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type", "text")
+        if kind == "text":
+            text = item.get("text", "")
+            if text:
+                parts.append(genai_types.Part.from_text(text=text))
+        elif kind == "file_uri":
+            uri = item.get("file_uri") or ""
+            mime = item.get("mime_type") or ""
+            if uri and mime:
+                parts.append(genai_types.Part.from_uri(file_uri=uri, mime_type=mime))
+        elif kind == "inline_bytes":
+            data = item.get("data")
+            mime = item.get("mime_type") or ""
+            if isinstance(data, (bytes, bytearray)) and mime:
+                parts.append(
+                    genai_types.Part.from_bytes(data=bytes(data), mime_type=mime)
+                )
+    if not parts:
+        parts.append(genai_types.Part.from_text(text=""))
+    return parts
+
+
 def _call_gemini(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float,
     max_tokens: int,
     json_mode: bool,  # noqa: FBT001
@@ -121,16 +203,13 @@ def _call_gemini(
     contents: list[genai_types.Content] = []
     for message in messages:
         role = message["role"]
-        content_text = message["content"]
+        content = message.get("content", "")
         if role == "system":
-            system_parts.append(content_text)
+            system_parts.append(_flatten_content_to_text(content))
             continue
         gemini_role = "model" if role == "assistant" else "user"
         contents.append(
-            genai_types.Content(
-                role=gemini_role,
-                parts=[genai_types.Part.from_text(text=content_text)],
-            )
+            genai_types.Content(role=gemini_role, parts=_gemini_parts(content))
         )
 
     config_kwargs: dict[str, Any] = {
@@ -138,9 +217,20 @@ def _call_gemini(
         "max_output_tokens": max_tokens,
     }
     if system_parts:
-        config_kwargs["system_instruction"] = "\n".join(system_parts)
+        config_kwargs["system_instruction"] = "\n".join(p for p in system_parts if p)
     if json_mode:
         config_kwargs["response_mime_type"] = "application/json"
+
+    # Gemini 3.1 Pro enables dynamic "thinking" by default which eats into
+    # max_output_tokens and can truncate JSON replies mid-stream. Cap the
+    # thinking budget so the visible answer always has room to complete.
+    if model.startswith("gemini-3"):
+        try:
+            config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                thinking_budget=0,
+            )
+        except Exception:
+            logger.debug("ThinkingConfig not supported for %s", model)
 
     response = client.models.generate_content(
         model=model,
@@ -161,7 +251,7 @@ def _call_gemini(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
-        request_messages=list(messages),
+        request_messages=[_serialize_message_for_trace(x) for x in messages],
         request_params={
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -173,7 +263,7 @@ def _call_gemini(
 
 def _call_openai(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float,
     max_tokens: int,
     json_mode: bool,  # noqa: FBT001
@@ -181,9 +271,14 @@ def _call_openai(
     client = _get_openai_client()
     start = time.monotonic()
 
+    flat_messages = [
+        {"role": m["role"], "content": _flatten_content_to_text(m.get("content", ""))}
+        for m in messages
+    ]
+
     kwargs: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": flat_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "timeout": 120,
@@ -205,7 +300,7 @@ def _call_openai(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
-        request_messages=list(messages),
+        request_messages=[_serialize_message_for_trace(x) for x in messages],
         request_params={
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -217,7 +312,7 @@ def _call_openai(
 
 def _call_anthropic(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float,
     max_tokens: int,
     json_mode: bool,  # noqa: FBT001
@@ -228,10 +323,11 @@ def _call_anthropic(
     system_content = ""
     api_messages = []
     for msg in messages:
+        flat = _flatten_content_to_text(msg.get("content", ""))
         if msg["role"] == "system":
-            system_content += msg["content"] + "\n"
+            system_content += flat + "\n"
         else:
-            api_messages.append({"role": msg["role"], "content": msg["content"]})
+            api_messages.append({"role": msg["role"], "content": flat})
 
     if json_mode:
         system_content += "\nRespond with valid JSON only. No markdown, no code blocks."
@@ -259,7 +355,7 @@ def _call_anthropic(
         cost_usd=calculate_cost(model, input_tokens, output_tokens),
         model_used=model,
         latency_ms=latency_ms,
-        request_messages=list(messages),
+        request_messages=[_serialize_message_for_trace(x) for x in messages],
         request_params={
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -271,7 +367,7 @@ def _call_anthropic(
 
 def call_llm(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float = 0.7,
     max_tokens: int = 2000,
     json_mode: bool = False,  # noqa: FBT001, FBT002
@@ -337,7 +433,7 @@ _JSON_BLOCK_RE = _re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", _re.DOTALL)
 
 def call_llm_json(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float = 0.7,
     max_tokens: int = 2000,
 ) -> tuple[dict, LLMResponse]:

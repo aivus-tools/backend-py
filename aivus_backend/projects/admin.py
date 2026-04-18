@@ -7,10 +7,11 @@ from tinymce.widgets import TinyMCE
 from unfold.admin import ModelAdmin
 
 from .models import Brief
+from .models import BriefAttachment
 from .models import BriefFeedback
-from .models import BriefMethodology
+from .models import BriefFinalDocument
 from .models import BriefOffer
-from .models import BriefShare
+from .models import BriefPrompt
 from .models import ChatMessage
 from .models import ClientManager
 from .models import Offer
@@ -35,20 +36,20 @@ class BriefAdmin(ModelAdmin):
     list_display = [
         "id",
         "status",
-        "conversation_phase",
+        "conversation_status",
+        "title",
+        "document_language",
         "client",
         "total_cost_usd",
         "message_count",
-        "version",
         "created_at",
     ]
-    search_fields = ["id", "client__name", "anonymous_token"]
-    list_filter = ["status", "conversation_phase", "created_at"]
+    search_fields = ["id", "title", "client__name", "anonymous_token"]
+    list_filter = ["status", "conversation_status", "document_language", "created_at"]
     readonly_fields = [
         "created_at",
         "updated_at",
         "deleted_at",
-        "version",
         "total_input_tokens",
         "total_output_tokens",
         "total_cost_usd",
@@ -349,19 +350,6 @@ class ShareAdmin(ModelAdmin):
         return f"{instance.token[:12]}..." if instance.token else ""
 
 
-@admin.register(BriefShare)
-class BriefShareAdmin(ModelAdmin):
-    list_display = ["brief", "token_short", "is_active", "created_by", "created_at"]
-    search_fields = ["brief__id", "token"]
-    list_filter = ["is_active", "created_at"]
-    readonly_fields = ["token", "created_at", "updated_at"]
-    ordering = ["-created_at"]
-
-    @admin.display(description="Token")
-    def token_short(self, instance):
-        return f"{instance.token[:12]}..." if instance.token else ""
-
-
 @admin.register(BriefOffer)
 class BriefOfferAdmin(ModelAdmin):
     """BriefOffer admin configuration."""
@@ -449,18 +437,18 @@ class ChatMessageAdmin(ModelAdmin):
         "role",
         "model_used",
         "cost_usd",
+        "ready_to_finalize",
         "content_short",
         "created_at",
     ]
     search_fields = ["content", "user__email", "brief__id"]
-    list_filter = ["role", "model_used", "created_at"]
+    list_filter = ["role", "model_used", "ready_to_finalize", "created_at"]
     readonly_fields = [
         "created_at",
         "input_tokens",
         "output_tokens",
         "cost_usd",
         "model_used",
-        "sections_changed",
     ]
     ordering = ["-created_at"]
 
@@ -473,34 +461,127 @@ class ChatMessageAdmin(ModelAdmin):
         )
 
 
-@admin.register(BriefMethodology)
-class BriefMethodologyAdmin(ModelAdmin):
+class BriefPromptAdminForm(forms.ModelForm):
+    body = forms.CharField(
+        widget=TinyMCE(attrs={"cols": 100, "rows": 30}),
+        required=True,
+    )
+
+    class Meta:
+        model = BriefPrompt
+        fields = "__all__"  # noqa: DJ007
+
+
+@admin.register(BriefPrompt)
+class BriefPromptAdmin(ModelAdmin):
+    form = BriefPromptAdminForm
+
     list_display = [
+        "slug",
         "title",
-        "archetype_code",
-        "section_key",
-        "priority",
+        "version",
         "is_active",
+        "model_name",
         "updated_at",
     ]
-    search_fields = ["title", "content"]
-    list_filter = ["archetype_code", "section_key", "is_active"]
-    list_editable = ["priority", "is_active"]
-    ordering = ["priority"]
+    list_filter = ["slug", "is_active"]
+    search_fields = ["slug", "title", "body"]
+    readonly_fields = ["version", "created_at", "updated_at", "created_by"]
+    ordering = ["slug", "-version"]
+
+    fieldsets = (
+        (
+            "Identity",
+            {"fields": ("slug", "title", "version", "is_active", "model_name")},
+        ),
+        ("Content", {"fields": ("body",)}),
+        ("Metadata", {"fields": ("metadata",), "classes": ("collapse",)}),
+        (
+            "Audit",
+            {
+                "fields": ("created_by", "created_at", "updated_at"),
+                "classes": ("collapse",),
+            },
+        ),
+    )
+
+    def save_model(self, request, obj, form, change):
+        if not obj.pk:
+            last = (
+                BriefPrompt.objects.filter(slug=obj.slug)
+                .order_by("-version")
+                .only("version")
+                .first()
+            )
+            obj.version = (last.version + 1) if last else 1
+            if getattr(request, "user", None) and request.user.is_authenticated:
+                obj.created_by = request.user
+
+        if obj.is_active:
+            BriefPrompt.objects.filter(slug=obj.slug, is_active=True).exclude(
+                pk=obj.pk
+            ).update(is_active=False)
+
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(BriefAttachment)
+class BriefAttachmentAdmin(ModelAdmin):
+    list_display = [
+        "filename",
+        "brief",
+        "mime_type",
+        "size_bytes",
+        "created_at",
+    ]
+    search_fields = ["filename", "brief__id"]
+    list_filter = ["mime_type", "created_at"]
+    readonly_fields = [
+        "brief",
+        "message",
+        "file",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "gemini_file_uri",
+        "created_at",
+    ]
+    ordering = ["-created_at"]
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(BriefFinalDocument)
+class BriefFinalDocumentAdmin(ModelAdmin):
+    list_display = ["brief", "kind", "updated_at"]
+    search_fields = ["brief__id"]
+    list_filter = ["kind", "created_at"]
+    readonly_fields = [
+        "brief",
+        "kind",
+        "html",
+        "plain_text",
+        "created_at",
+        "updated_at",
+    ]
+    ordering = ["-updated_at"]
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(BriefFeedback)
 class BriefFeedbackAdmin(ModelAdmin):
     list_display = [
         "brief",
-        "section_key",
         "rating",
         "user",
         "comment_short",
         "created_at",
     ]
     search_fields = ["comment", "brief__id"]
-    list_filter = ["rating", "section_key", "created_at"]
+    list_filter = ["rating", "created_at"]
     readonly_fields = ["created_at"]
     ordering = ["-created_at"]
 

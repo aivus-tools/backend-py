@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
   libpq-dev \
   # weasyprint dependencies
   libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 shared-mime-info \
+  # python-magic runtime dependency
+  libmagic1 \
   gettext \
   wait-for-it
 

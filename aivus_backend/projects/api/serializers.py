@@ -1,9 +1,10 @@
 """Serializers for projects API."""
 
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
+from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefOffer
-from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
@@ -360,39 +361,52 @@ def serialize_brief_detail(brief: Brief) -> dict:
     }
 
 
-def serialize_chat_message_v2(message: ChatMessage) -> dict:
+def serialize_brief_attachment(attachment: BriefAttachment) -> dict:
+    return {
+        "id": str(attachment.id),
+        "filename": attachment.filename,
+        "mimeType": attachment.mime_type,
+        "sizeBytes": attachment.size_bytes,
+        "url": attachment.file.url if attachment.file else None,
+        "createdAt": attachment.created_at.isoformat()
+        if attachment.created_at
+        else None,
+    }
+
+
+def serialize_chat_message_v3(message: ChatMessage) -> dict:
     feedback = message.feedbacks.first() if hasattr(message, "feedbacks") else None
     has_trace = (
         message.role == "assistant" and message.llm_traces.exists()
         if hasattr(message, "llm_traces")
         else False
     )
+    attachments = (
+        list(message.attachments.all()) if hasattr(message, "attachments") else []
+    )
     return {
         "id": str(message.id),
         "role": message.role,
         "content": message.content,
-        "sectionsChanged": message.sections_changed,
+        "readyToFinalize": message.ready_to_finalize,
         "modelUsed": message.model_used,
         "inputTokens": message.input_tokens,
         "outputTokens": message.output_tokens,
         "costUsd": str(message.cost_usd),
         "hasTrace": has_trace,
+        "attachments": [serialize_brief_attachment(x) for x in attachments],
         "feedback": serialize_brief_feedback(feedback) if feedback else None,
         "createdAt": message.created_at.isoformat() if message.created_at else None,
     }
 
 
-def serialize_brief_v2(brief: Brief) -> dict:
+def serialize_brief_v3(brief: Brief) -> dict:
     return {
         "id": str(brief.id),
         "status": brief.status,
-        "documentHtml": brief.render_document_html(),
-        "documentSections": brief.document_sections,
-        "structuredData": brief.structured_data,
-        "archetypes": brief.archetypes,
-        "sectionsStatus": brief.sections_status,
-        "conversationPhase": brief.conversation_phase,
-        "version": brief.version,
+        "title": brief.title,
+        "documentLanguage": brief.document_language,
+        "conversationStatus": brief.conversation_status,
         "totalInputTokens": brief.total_input_tokens,
         "totalOutputTokens": brief.total_output_tokens,
         "totalCostUsd": str(brief.total_cost_usd),
@@ -403,96 +417,46 @@ def serialize_brief_v2(brief: Brief) -> dict:
     }
 
 
-def serialize_brief_v2_list_item(brief: Brief) -> dict:
-    structured = brief.structured_data or {}
-    project_name = structured.get("projectName") or ""
-
-    active_share = next(
-        (share for share in brief.shares.all() if share.is_active),
-        None,
-    )
-    if active_share is not None:
-        share_status = "active"
-        share_view_count = active_share.view_count
-        share_last_viewed_at = (
-            active_share.last_viewed_at.isoformat()
-            if active_share.last_viewed_at
-            else None
-        )
-    elif brief.shares.exists():
-        share_status = "inactive"
-        share_view_count = 0
-        share_last_viewed_at = None
-    else:
-        share_status = "none"
-        share_view_count = 0
-        share_last_viewed_at = None
-
+def serialize_brief_v3_list_item(brief: Brief) -> dict:
     offers_count = brief.brief_offers.count()
-
     return {
         "id": str(brief.id),
         "status": brief.status,
-        "projectName": project_name,
-        "version": brief.version,
+        "title": brief.title,
+        "conversationStatus": brief.conversation_status,
         "messageCount": brief.message_count,
         "totalCostUsd": str(brief.total_cost_usd),
-        "conversationPhase": brief.conversation_phase,
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
         "claimedAt": brief.claimed_at.isoformat() if brief.claimed_at else None,
-        "shareStatus": share_status,
-        "shareViewCount": share_view_count,
-        "shareLastViewedAt": share_last_viewed_at,
         "offersCount": offers_count,
     }
 
 
-def serialize_brief_v2_detail(brief: Brief) -> dict:
-    messages = brief.chat_messages.prefetch_related("feedbacks").all()
-    result = serialize_brief_v2(brief)
-    result["messages"] = [serialize_chat_message_v2(x) for x in messages]
+def serialize_brief_v3_detail(brief: Brief) -> dict:
+    messages = brief.chat_messages.prefetch_related("feedbacks", "attachments").all()
+    result = serialize_brief_v3(brief)
+    result["messages"] = [serialize_chat_message_v3(x) for x in messages]
     return result
+
+
+def serialize_brief_final_document(document: BriefFinalDocument) -> dict:
+    return {
+        "id": str(document.id),
+        "kind": document.kind,
+        "html": document.html,
+        "plainText": document.plain_text,
+        "createdAt": document.created_at.isoformat() if document.created_at else None,
+        "updatedAt": document.updated_at.isoformat() if document.updated_at else None,
+    }
 
 
 def serialize_brief_feedback(feedback: BriefFeedback) -> dict:
     return {
         "id": str(feedback.id),
-        "sectionKey": feedback.section_key,
+        "messageId": str(feedback.message_id) if feedback.message_id else None,
         "rating": feedback.rating,
         "comment": feedback.comment,
-        "userId": str(feedback.user_id),
+        "userId": str(feedback.user_id) if feedback.user_id else None,
         "createdAt": feedback.created_at.isoformat() if feedback.created_at else None,
-    }
-
-
-def serialize_brief_share(share: BriefShare) -> dict:
-    return {
-        "id": str(share.id),
-        "briefId": str(share.brief_id),
-        "token": share.token,
-        "isActive": share.is_active,
-        "viewCount": share.view_count,
-        "lastViewedAt": share.last_viewed_at.isoformat()
-        if share.last_viewed_at
-        else None,
-        "createdBy": str(share.created_by_id) if share.created_by_id else None,
-        "createdAt": share.created_at.isoformat() if share.created_at else None,
-        "updatedAt": share.updated_at.isoformat() if share.updated_at else None,
-    }
-
-
-def serialize_brief_share_public(share: BriefShare) -> dict:
-    brief = share.brief
-    return {
-        "token": share.token,
-        "isActive": share.is_active,
-        "brief": {
-            "id": str(brief.id),
-            "status": brief.status,
-            "documentHtml": share.render_snapshot_html(),
-            "structuredData": share.snapshot_structured_data,
-            "sectionsStatus": share.snapshot_sections_status,
-            "createdAt": brief.created_at.isoformat() if brief.created_at else None,
-        },
     }

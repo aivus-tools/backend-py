@@ -77,22 +77,28 @@ class ShareStatus(models.TextChoices):
     DELETED = "DELETED", "Deleted"
 
 
-class ConversationPhase(models.TextChoices):
-    INITIAL = "initial", "Initial"
-    QUESTIONING = "questioning", "Questioning"
-    REFINING = "refining", "Refining"
-    COMPLETE = "complete", "Complete"
-
-
-class SectionStatus(models.TextChoices):
-    EMPTY = "empty", "Empty"
-    DRAFT = "draft", "Draft"
-    COMPLETE = "complete", "Complete"
+class ConversationStatus(models.TextChoices):
+    IN_PROGRESS = "in_progress", "In Progress"
+    READY_TO_FINALIZE = "ready_to_finalize", "Ready to Finalize"
+    FINALIZED = "finalized", "Finalized"
 
 
 class FeedbackRating(models.TextChoices):
     UP = "up", "Thumbs Up"
     DOWN = "down", "Thumbs Down"
+
+
+class FinalDocumentKind(models.TextChoices):
+    PRODUCTION_BRIEF = "production_brief", "Production Brief"
+    VENDOR_EMAIL = "vendor_email", "Vendor Outreach Email"
+    DELIVERABLES_CHECKLIST = "deliverables_checklist", "Deliverables Checklist"
+
+
+class BriefPromptSlug(models.TextChoices):
+    MAIN_SYSTEM = "main_system_prompt", "Main system prompt"
+    FINALIZATION = "finalization_prompt", "Finalization prompt"
+    MASTER_BRIEF_TEMPLATE = "master_brief_template", "Master brief template"
+    ARCHETYPES_REFERENCE = "archetypes_reference", "Archetypes reference"
 
 
 class UnitDimension(models.TextChoices):

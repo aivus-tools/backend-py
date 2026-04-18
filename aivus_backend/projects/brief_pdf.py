@@ -1,9 +1,10 @@
+"""PDF rendering for final brief documents."""
+
 import logging
 
 import weasyprint
 
-from aivus_backend.projects.models import BRIEF_SECTION_KEYS
-from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefFinalDocument
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,11 @@ body {
     line-height: 1.8;
 }
 
-.section {
-    margin-bottom: 20px;
-    page-break-inside: avoid;
+h1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #111827;
+    margin: 24px 0 12px 0;
 }
 
 h2 {
@@ -138,55 +141,18 @@ blockquote {
 }
 """
 
-
-def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+DOCUMENT_TITLE_BY_KIND = {
+    "production_brief": "Production Brief",
+    "vendor_email": "Vendor Outreach Email",
+    "deliverables_checklist": "Deliverables Checklist",
+}
 
 
-def _is_real_name(value: str) -> bool:
-    if not value:
-        return False
-    stripped = value.strip()
-    if not stripped:
-        return False
-    if stripped.startswith("[") and stripped.endswith("]"):
-        return False
-    return stripped.lower() not in {"tbd", "n/a", "na", "to be confirmed"}
-
-
-def _build_pdf_html(
-    brief: Brief, document_sections: dict, structured_data: dict
-) -> str:
-    structured = structured_data or {}
-    raw_project_name = str(structured.get("projectName", "")).strip()
-    project_name = (
-        _escape(raw_project_name)
-        if _is_real_name(raw_project_name)
-        else "Creative Brief"
-    )
-    raw_client_name = str(structured.get("clientName", "")).strip()
-    client_name = _escape(raw_client_name) if _is_real_name(raw_client_name) else ""
-
-    sections_html = []
-    for key in BRIEF_SECTION_KEYS:
-        html = (document_sections or {}).get(key, "")
-        if html:
-            sections_html.append(f'<div class="section">{html}</div>')
-
-    body = "\n".join(sections_html)
-
-    client_line = ""
-    if client_name:
-        client_line = f"Prepared for: {client_name}<br/>"
-
-    created = ""
-    if brief.created_at:
-        created = brief.created_at.strftime("%B %d, %Y")
+def _build_pdf_html(document: BriefFinalDocument) -> str:
+    brief = document.brief
+    title = DOCUMENT_TITLE_BY_KIND.get(document.kind, "Brief Document")
+    project_name = brief.title or "Creative Brief"
+    created = brief.created_at.strftime("%B %d, %Y") if brief.created_at else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -195,25 +161,14 @@ def _build_pdf_html(
   <div class="cover">
     <div class="cover-brand">AIVUS</div>
     <h1>{project_name}</h1>
-    <div class="cover-subtitle">Creative Brief</div>
-    <div class="cover-meta">
-      {client_line}
-      {created}
-    </div>
+    <div class="cover-subtitle">{title}</div>
+    <div class="cover-meta">{created}</div>
   </div>
-  {body}
+  {document.html}
 </body>
 </html>"""
 
 
-def render_brief_pdf(
-    brief: Brief,
-    document_sections: dict | None = None,
-    structured_data: dict | None = None,
-) -> bytes:
-    sections = (
-        brief.document_sections if document_sections is None else document_sections
-    )
-    structured = brief.structured_data if structured_data is None else structured_data
-    html_string = _build_pdf_html(brief, sections, structured)
+def render_final_document_pdf(document: BriefFinalDocument) -> bytes:
+    html_string = _build_pdf_html(document)
     return weasyprint.HTML(string=html_string).write_pdf()

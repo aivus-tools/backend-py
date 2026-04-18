@@ -5,17 +5,18 @@ from celery import shared_task
 from django.db import transaction
 from django.db.models import F
 
-from aivus_backend.projects.ai_brief_v2 import finalize_brief
-from aivus_backend.projects.ai_brief_v2 import process_brief_message
-from aivus_backend.projects.api.serializers import serialize_brief_v2
+from aivus_backend.projects.ai_brief_v3 import generate_final_documents
+from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+from aivus_backend.projects.api.serializers import serialize_brief_v3
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import LLMCallTrace
 
 logger = logging.getLogger(__name__)
 
 
-def _persist_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
+def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
     if not traces:
         return
     rows = [
@@ -37,51 +38,74 @@ def _persist_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
     LLMCallTrace.objects.bulk_create(rows)
 
 
+def persist_final_document_traces(document, traces: list[dict]) -> None:
+    if not traces:
+        return
+    rows = [
+        LLMCallTrace(
+            final_document=document,
+            purpose=str(entry.get("purpose", "")),
+            model=str(entry.get("model", "")),
+            request_messages=entry.get("request_messages") or [],
+            request_params=entry.get("request_params") or {},
+            response_raw=str(entry.get("response_raw", "")),
+            input_tokens=int(entry.get("input_tokens", 0) or 0),
+            output_tokens=int(entry.get("output_tokens", 0) or 0),
+            cost_usd=Decimal(str(entry.get("cost_usd", 0) or 0)),
+            latency_ms=int(entry.get("latency_ms", 0) or 0),
+            sequence=index,
+        )
+        for index, entry in enumerate(traces)
+    ]
+    LLMCallTrace.objects.bulk_create(rows)
+
+
 @shared_task(
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=180,
+    time_limit=240,
     autoretry_for=(Exception,),
     retry_backoff=True,
     max_retries=1,
 )
-def generate_brief_task(
-    brief_id: str, user_message: str, document_language: str = ""
-) -> dict:
+def generate_first_reply_task(brief_id: str) -> dict:
     try:
         brief = Brief.objects.get(id=brief_id)
     except Brief.DoesNotExist:
-        logger.warning("Brief not found for generation: brief_id=%s", brief_id)
+        logger.warning("Brief not found for first reply: brief_id=%s", brief_id)
         return {"error": "Brief not found"}
 
-    if brief.conversation_phase != "initial":
-        logger.warning("Brief already generated, skipping: brief_id=%s", brief_id)
-        return serialize_brief_v2(brief)
+    if brief.message_count > 1:
+        logger.warning("Brief already has assistant reply, skipping: %s", brief_id)
+        return serialize_brief_v3(brief)
 
-    try:
-        result = process_brief_message(
-            user_message=user_message,
-            brief_id=brief_id,
-            document_sections=brief.document_sections,
-            sections_status=brief.sections_status,
-            archetypes=brief.archetypes,
-            structured_data=brief.structured_data,
-            conversation_phase="initial",
-            questions_asked=[],
-            history=[],
-            document_language=document_language,
-        )
-    except Exception:
-        logger.exception("Brief generation LLM call failed: brief_id=%s", brief_id)
-        raise
+    first_user_message = (
+        brief.chat_messages.filter(role="user").order_by("created_at").first()
+    )
+    if not first_user_message:
+        logger.warning("No user message found for brief %s", brief_id)
+        return {"error": "No user message"}
+
+    attachments = list(
+        BriefAttachment.objects.filter(
+            brief=brief, message=first_user_message
+        ).order_by("created_at")
+    )
+
+    result = process_brief_turn(
+        brief=brief,
+        user_message=first_user_message.content,
+        attachments=attachments,
+        history=[],
+    )
 
     with transaction.atomic():
-        Brief.objects.filter(id=brief_id).update(
-            document_sections=result["document_sections"],
-            sections_status=result["sections_status"],
-            archetypes=result["archetypes"],
-            structured_data=result["structured_data"],
-            conversation_phase=result["conversation_phase"],
-            version=F("version") + 1,
+        if not brief.document_language and result.get("document_language"):
+            Brief.objects.filter(id=brief.id).update(
+                document_language=result["document_language"]
+            )
+
+        Brief.objects.filter(id=brief.id).update(
+            conversation_status=result["conversation_status"],
             total_input_tokens=F("total_input_tokens") + result["input_tokens"],
             total_output_tokens=F("total_output_tokens") + result["output_tokens"],
             total_cost_usd=F("total_cost_usd") + Decimal(str(result["cost_usd"])),
@@ -97,17 +121,17 @@ def generate_brief_task(
             output_tokens=result["output_tokens"],
             cost_usd=Decimal(str(result["cost_usd"])),
             model_used=result["model_used"],
-            sections_changed=result["sections_changed"],
+            ready_to_finalize=result["ready_to_finalize"],
         )
-        _persist_traces(chat_message, result.get("traces", []))
+        persist_message_traces(chat_message, result.get("traces", []))
 
     brief.refresh_from_db()
-    return serialize_brief_v2(brief)
+    return serialize_brief_v3(brief)
 
 
 @shared_task(
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=180,
+    time_limit=240,
     autoretry_for=(Exception,),
     retry_backoff=True,
     max_retries=1,
@@ -120,30 +144,26 @@ def finalize_brief_task(brief_id: str) -> dict:
             logger.warning("Brief not found for finalization: brief_id=%s", brief_id)
             return {"error": "Brief not found"}
 
-        if brief.status == "COMPLETED":
+        if brief.conversation_status == "finalized":
             logger.warning("Brief already finalized: brief_id=%s", brief_id)
-            return serialize_brief_v2(brief)
-
-        brief.status = "COMPLETED"
-        brief.save(update_fields=["status", "updated_at"])
+            return serialize_brief_v3(brief)
 
     try:
-        result = finalize_brief(
-            brief_id=brief_id,
-            document_sections=brief.document_sections,
-        )
+        result = generate_final_documents(brief=brief)
     except Exception:
-        logger.exception("Brief finalization LLM call failed: brief_id=%s", brief_id)
-        Brief.objects.filter(id=brief_id).update(status="DRAFT")
+        logger.exception("Brief finalization failed: brief_id=%s", brief_id)
         raise
 
-    Brief.objects.filter(id=brief_id).update(
-        structured_data=result["structured_data"],
-        conversation_phase="complete",
-        total_input_tokens=F("total_input_tokens") + result["input_tokens"],
-        total_output_tokens=F("total_output_tokens") + result["output_tokens"],
-        total_cost_usd=F("total_cost_usd") + Decimal(str(result["cost_usd"])),
-    )
+    with transaction.atomic():
+        Brief.objects.filter(id=brief.id).update(
+            status="COMPLETED",
+            conversation_status="finalized",
+            total_input_tokens=F("total_input_tokens") + result["input_tokens"],
+            total_output_tokens=F("total_output_tokens") + result["output_tokens"],
+            total_cost_usd=F("total_cost_usd") + Decimal(str(result["cost_usd"])),
+        )
+        for document in result["documents"]:
+            persist_final_document_traces(document, result.get("traces", []))
 
     brief.refresh_from_db()
-    return serialize_brief_v2(brief)
+    return serialize_brief_v3(brief)

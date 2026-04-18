@@ -8,9 +8,11 @@ from django.db import models
 
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
+from aivus_backend.core.enums import BriefPromptSlug
 from aivus_backend.core.enums import BriefStatus
-from aivus_backend.core.enums import ConversationPhase
+from aivus_backend.core.enums import ConversationStatus
 from aivus_backend.core.enums import FeedbackRating
+from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
 from aivus_backend.core.enums import ProjectStatus
@@ -22,21 +24,12 @@ from aivus_backend.users.models import Team
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
 
-BRIEF_SECTION_KEYS = [
-    "project_header",
-    "budget_timeline",
-    "strategic_foundation",
-    "creative_direction",
-    "scope_video",
-    "scope_photo",
-    "post_production",
-    "usage_rights",
-    "deliverables",
-]
 
-
+# Legacy: referenced by old migration 0018. Kept as a stub so historical
+# migrations can still be imported. The field it was attached to is dropped
+# in migration 0025.
 def _default_sections_status():
-    return dict.fromkeys(BRIEF_SECTION_KEYS, "empty")
+    return {}
 
 
 class Brief(models.Model):
@@ -45,6 +38,7 @@ class Brief(models.Model):
         max_length=20, choices=BriefStatus.choices, default=BriefStatus.DRAFT
     )
     details = models.JSONField(default=dict)
+    structured_data = models.JSONField(default=dict, blank=True)
     client = models.ForeignKey(
         Client,
         on_delete=models.SET_NULL,
@@ -53,17 +47,13 @@ class Brief(models.Model):
         related_name="briefs",
     )
 
-    document_sections = models.JSONField(default=dict, blank=True)
-    structured_data = models.JSONField(default=dict, blank=True)
-    archetypes = models.JSONField(default=list, blank=True)
-    sections_status = models.JSONField(default=_default_sections_status, blank=True)
-    questions_asked = models.JSONField(default=list, blank=True)
-    conversation_phase = models.CharField(
+    title = models.CharField(max_length=255, blank=True, default="")
+    document_language = models.CharField(max_length=10, blank=True, default="")
+    conversation_status = models.CharField(
         max_length=20,
-        choices=ConversationPhase.choices,
-        default=ConversationPhase.INITIAL,
+        choices=ConversationStatus.choices,
+        default=ConversationStatus.IN_PROGRESS,
     )
-    version = models.IntegerField(default=0)
     anonymous_token = models.CharField(
         max_length=64, unique=True, null=True, blank=True, db_index=True
     )
@@ -83,14 +73,6 @@ class Brief(models.Model):
 
     def __str__(self):
         return f"Brief {self.id} - {self.status}"
-
-    def render_document_html(self) -> str:
-        parts = []
-        for key in BRIEF_SECTION_KEYS:
-            html = self.document_sections.get(key, "")
-            if html:
-                parts.append(f'<div data-section="{key}">{html}</div>')
-        return "\n<hr/>\n".join(parts)
 
 
 class Project(models.Model):
@@ -554,54 +536,6 @@ class Share(models.Model):
         return f"{self.offer.project_name} - token:{self.token[:8]}... ({status})"
 
 
-class BriefShare(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    brief = models.ForeignKey(Brief, on_delete=models.CASCADE, related_name="shares")
-    token = models.CharField(
-        max_length=64, unique=True, db_index=True, default=secrets.token_urlsafe
-    )
-    is_active = models.BooleanField(default=True)
-    view_count = models.IntegerField(default=0)
-    last_viewed_at = models.DateTimeField(null=True, blank=True)
-    snapshot_document_sections = models.JSONField(default=dict, blank=True)
-    snapshot_structured_data = models.JSONField(default=dict, blank=True)
-    snapshot_sections_status = models.JSONField(default=dict, blank=True)
-    snapshot_version = models.IntegerField(default=0)
-    created_by = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="created_brief_shares",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "brief_share"
-        ordering = ["-created_at"]
-
-    def __str__(self):
-        status = "active" if self.is_active else "inactive"
-        return f"Brief {self.brief_id} - token:{self.token[:8]}... ({status})"
-
-    def capture_snapshot(self) -> None:
-        brief = self.brief
-        self.snapshot_document_sections = dict(brief.document_sections or {})
-        self.snapshot_structured_data = dict(brief.structured_data or {})
-        self.snapshot_sections_status = dict(brief.sections_status or {})
-        self.snapshot_version = brief.version
-
-    def render_snapshot_html(self) -> str:
-        parts = []
-        sections = self.snapshot_document_sections or {}
-        for key in BRIEF_SECTION_KEYS:
-            html = sections.get(key, "")
-            if html:
-                parts.append(f'<div data-section="{key}">{html}</div>')
-        return "\n<hr/>\n".join(parts)
-
-
 class BriefOffer(models.Model):
     """Links a shared offer to a client's brief."""
 
@@ -718,7 +652,7 @@ class ChatMessage(models.Model):
     output_tokens = models.IntegerField(default=0)
     cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
     model_used = models.CharField(max_length=100, blank=True, default="")
-    sections_changed = models.JSONField(default=list, blank=True)
+    ready_to_finalize = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -767,27 +701,6 @@ class RateCardItem(models.Model):
         return f"{self.item_name} - ${self.price}"
 
 
-class BriefMethodology(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    archetype_code = models.IntegerField(null=True, blank=True, db_index=True)
-    section_key = models.CharField(max_length=50, blank=True, default="", db_index=True)
-    title = models.CharField(max_length=255)
-    content = models.TextField()
-    priority = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "brief_methodology"
-        ordering = ["priority"]
-
-    def __str__(self):
-        archetype = f"A{self.archetype_code}" if self.archetype_code else "all"
-        section = self.section_key or "general"
-        return f"{self.title} ({archetype}/{section})"
-
-
 class BriefFeedback(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     brief = models.ForeignKey(
@@ -797,17 +710,16 @@ class BriefFeedback(models.Model):
     )
     message = models.ForeignKey(
         ChatMessage,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
+        on_delete=models.CASCADE,
         related_name="feedbacks",
     )
-    section_key = models.CharField(max_length=50, blank=True, default="")
     rating = models.CharField(max_length=10, choices=FeedbackRating.choices)
     comment = models.TextField(blank=True, default="")
     user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="brief_feedbacks",
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -825,6 +737,15 @@ class LLMCallTrace(models.Model):
     message = models.ForeignKey(
         ChatMessage,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="llm_traces",
+    )
+    final_document = models.ForeignKey(
+        "BriefFinalDocument",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name="llm_traces",
     )
     purpose = models.CharField(max_length=32, blank=True, default="")
@@ -845,3 +766,116 @@ class LLMCallTrace(models.Model):
 
     def __str__(self):
         return f"{self.purpose} ({self.model}) for message {self.message_id}"
+
+
+def _brief_attachment_upload_to(instance: "BriefAttachment", filename: str) -> str:
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
+    return f"briefs/{instance.brief_id}/{uuid.uuid4()}.{suffix}"
+
+
+class BriefPrompt(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.CharField(
+        max_length=64,
+        choices=BriefPromptSlug.choices,
+        db_index=True,
+    )
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    version = models.IntegerField(default=1)
+    is_active = models.BooleanField(default=False, db_index=True)
+    model_name = models.CharField(max_length=100, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_brief_prompts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_prompt"
+        ordering = ["slug", "-version"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["slug", "version"],
+                name="brief_prompt_slug_version_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(is_active=True),
+                name="brief_prompt_active_single",
+            ),
+        ]
+
+    def __str__(self):
+        state = "active" if self.is_active else "inactive"
+        return f"{self.slug} v{self.version} ({state})"
+
+    @classmethod
+    def get_active_body(cls, slug: str, default: str = "") -> str:
+        row = cls.objects.filter(slug=slug, is_active=True).only("body").first()
+        return row.body if row else default
+
+    @classmethod
+    def get_active(cls, slug: str) -> "BriefPrompt | None":
+        return cls.objects.filter(slug=slug, is_active=True).first()
+
+
+class BriefAttachment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    message = models.ForeignKey(
+        ChatMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attachments",
+    )
+    file = models.FileField(upload_to=_brief_attachment_upload_to)
+    filename = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=128)
+    size_bytes = models.BigIntegerField(default=0)
+    gemini_file_uri = models.CharField(max_length=512, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "brief_attachment"
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.filename} ({self.mime_type})"
+
+
+class BriefFinalDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.ForeignKey(
+        Brief,
+        on_delete=models.CASCADE,
+        related_name="final_documents",
+    )
+    kind = models.CharField(max_length=32, choices=FinalDocumentKind.choices)
+    html = models.TextField(blank=True, default="")
+    plain_text = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_final_document"
+        ordering = ["brief_id", "kind"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["brief", "kind"],
+                name="brief_final_document_unique_kind",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} for brief {self.brief_id}"
