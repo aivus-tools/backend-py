@@ -27,6 +27,8 @@ from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.api.serializers import serialize_brief_attachment
 from aivus_backend.projects.api.serializers import serialize_brief_feedback
 from aivus_backend.projects.api.serializers import serialize_brief_final_document
+from aivus_backend.projects.api.serializers import serialize_brief_share
+from aivus_backend.projects.api.serializers import serialize_brief_share_public
 from aivus_backend.projects.api.serializers import serialize_brief_v3
 from aivus_backend.projects.api.serializers import serialize_brief_v3_detail
 from aivus_backend.projects.api.serializers import serialize_brief_v3_list_item
@@ -35,6 +37,7 @@ from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefFinalDocument
+from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
@@ -130,6 +133,13 @@ def _get_client_safe(request) -> Client | None:
     if not client_id:
         return None
     return Client.objects.filter(id=client_id).first()
+
+
+def _get_request_user(request) -> User | None:
+    user_id = (getattr(request, "user_data", None) or {}).get("id")
+    if not user_id:
+        return None
+    return User.objects.filter(id=user_id).first()
 
 
 def _build_chat_response(
@@ -368,7 +378,12 @@ def client_brief_ai_status(request, brief_id):
         if result.successful():
             brief.refresh_from_db()
             return JsonResponse(
-                {"status": "done", "result": serialize_brief_v3_detail(brief)}
+                {
+                    "status": "done",
+                    "result": serialize_brief_v3_detail(
+                        brief, user=_get_request_user(request)
+                    ),
+                }
             )
         logger.error(
             "Generation task failed: brief_id=%s error=%s",
@@ -445,7 +460,9 @@ def client_brief_ai_detail(request, brief_id):
         return JsonResponse({"error": "Brief not found"}, status=404)
 
     if request.method == "GET":
-        return JsonResponse(serialize_brief_v3_detail(brief))
+        return JsonResponse(
+            serialize_brief_v3_detail(brief, user=_get_request_user(request))
+        )
 
     if request.method == "DELETE":
         brief.deleted_at = timezone.now()
@@ -679,13 +696,6 @@ def client_brief_ai_final_document_update(request, brief_id, document_id):
 @require_http_methods(["GET"])
 @require_groups("CLIENT")
 def client_brief_ai_final_document_pdf(request, brief_id, document_id):
-    from urllib.parse import quote  # noqa: PLC0415
-
-    from aivus_backend.projects.brief_pdf import DOCUMENT_TITLE_BY_KIND  # noqa: PLC0415
-    from aivus_backend.projects.brief_pdf import (  # noqa: PLC0415
-        render_final_document_pdf,
-    )
-
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
@@ -693,11 +703,20 @@ def client_brief_ai_final_document_pdf(request, brief_id, document_id):
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)
+    return _pdf_response_for_document(document)
+
+
+def _pdf_response_for_document(document: BriefFinalDocument) -> HttpResponse:
+    from urllib.parse import quote  # noqa: PLC0415
+
+    from aivus_backend.projects.brief_pdf import DOCUMENT_TITLE_BY_KIND  # noqa: PLC0415
+    from aivus_backend.projects.brief_pdf import (  # noqa: PLC0415
+        render_final_document_pdf,
+    )
 
     pdf_bytes = render_final_document_pdf(document)
-
     label = DOCUMENT_TITLE_BY_KIND.get(document.kind, "Brief")
-    base_name = (brief.title or "Brief").strip()
+    base_name = (document.brief.title or "Brief").strip()
     safe = "".join(c for c in base_name if c.isalnum() or c in " _-").strip()[:60]
     filename = f"{safe or 'Brief'} - {label}.pdf"
     encoded = quote(filename)
@@ -707,6 +726,91 @@ def client_brief_ai_final_document_pdf(request, brief_id, document_id):
         f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}"
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Share endpoints
+# ---------------------------------------------------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST", "PATCH"])
+@require_groups("CLIENT")
+@conditional_ratelimit(key="user", rate="30/m", method="POST")
+def client_brief_ai_share(request, brief_id):
+    brief = _get_brief_for_client(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    if request.method == "GET":
+        share = BriefShare.objects.filter(brief=brief).first()
+        if not share:
+            return JsonResponse({"error": "No share yet"}, status=404)
+        return JsonResponse(serialize_brief_share(share))
+
+    if request.method == "POST":
+        if brief.conversation_status != "finalized":
+            return JsonResponse(
+                {"error": "Brief must be finalized before sharing"}, status=400
+            )
+        user = _get_request_user(request)
+        share, created = BriefShare.objects.get_or_create(
+            brief=brief, defaults={"created_by": user}
+        )
+        return JsonResponse(
+            serialize_brief_share(share), status=201 if created else 200
+        )
+
+    # PATCH — toggle active
+    share = BriefShare.objects.filter(brief=brief).first()
+    if not share:
+        return JsonResponse({"error": "No share to update"}, status=404)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+    if "isActive" in body:
+        share.is_active = bool(body["isActive"])
+        share.save(update_fields=["is_active", "updated_at"])
+    return JsonResponse(serialize_brief_share(share))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="120/m", method="GET")
+def public_brief_share_get(request, token):
+    share = (
+        BriefShare.objects.filter(token=token, is_active=True)
+        .select_related("brief")
+        .first()
+    )
+    if not share:
+        return JsonResponse({"error": "Share not found or inactive"}, status=404)
+    if share.brief.conversation_status != "finalized":
+        return JsonResponse({"error": "Brief is not finalized yet"}, status=404)
+    return JsonResponse(serialize_brief_share_public(share))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+def public_brief_share_document_pdf(request, token, document_id):
+    share = (
+        BriefShare.objects.filter(token=token, is_active=True)
+        .select_related("brief")
+        .first()
+    )
+    if not share or share.brief.conversation_status != "finalized":
+        return JsonResponse({"error": "Share not found"}, status=404)
+
+    document = BriefFinalDocument.objects.filter(
+        id=document_id, brief=share.brief
+    ).first()
+    if not document:
+        return JsonResponse({"error": "Document not found"}, status=404)
+    return _pdf_response_for_document(document)
 
 
 # ---------------------------------------------------------------------------
@@ -793,7 +897,12 @@ def public_brief_ai_status(request, brief_id):
         if result.successful():
             brief.refresh_from_db()
             return JsonResponse(
-                {"status": "done", "result": serialize_brief_v3_detail(brief)}
+                {
+                    "status": "done",
+                    "result": serialize_brief_v3_detail(
+                        brief, user=_get_request_user(request)
+                    ),
+                }
             )
         return JsonResponse(
             {"status": "failed", "error": "Generation failed"}, status=500
@@ -911,7 +1020,7 @@ def public_brief_ai_detail(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    data = serialize_brief_v3(brief)
+    data = serialize_brief_v3(brief, user=_get_request_user(request))
     messages = brief.chat_messages.prefetch_related("feedbacks", "attachments").all()
     data["messages"] = [serialize_chat_message_v3(x) for x in messages]
     return JsonResponse(data)
@@ -953,4 +1062,6 @@ def public_brief_ai_claim(request, brief_id):
     brief = Brief.objects.filter(id=brief_id).first()
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
-    return JsonResponse(serialize_brief_v3_detail(brief))
+    return JsonResponse(
+        serialize_brief_v3_detail(brief, user=_get_request_user(request))
+    )

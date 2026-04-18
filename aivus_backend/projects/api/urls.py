@@ -178,6 +178,23 @@ urlpatterns = [
         views_brief_v3.client_brief_ai_final_document_pdf,
         name="client_brief_ai_final_document_pdf",
     ),
+    # Brief share (authenticated owner)
+    path(
+        "client/briefs/ai/<uuid:brief_id>/share",
+        views_brief_v3.client_brief_ai_share,
+        name="client_brief_ai_share",
+    ),
+    # Brief share (public)
+    path(
+        "public/brief-shares/<str:token>",
+        views_brief_v3.public_brief_share_get,
+        name="public_brief_share_get",
+    ),
+    path(
+        "public/brief-shares/<str:token>/documents/<uuid:document_id>/pdf",
+        views_brief_v3.public_brief_share_document_pdf,
+        name="public_brief_share_document_pdf",
+    ),
     # AI Brief V3 (public/anonymous)
     path(
         "public/briefs/ai/drafts",

@@ -5,6 +5,7 @@ from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefOffer
+from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
 from aivus_backend.projects.models import Offer
@@ -400,7 +401,15 @@ def serialize_chat_message_v3(message: ChatMessage) -> dict:
     }
 
 
-def serialize_brief_v3(brief: Brief) -> dict:
+def should_show_brief_cost(user) -> bool:
+    from django.conf import settings as dj_settings  # noqa: PLC0415
+
+    if getattr(dj_settings, "SHOW_BRIEF_COST_TO_ALL", True):
+        return True
+    return bool(user and getattr(user, "is_staff", False))
+
+
+def serialize_brief_v3(brief: Brief, *, user=None) -> dict:
     return {
         "id": str(brief.id),
         "status": brief.status,
@@ -411,6 +420,7 @@ def serialize_brief_v3(brief: Brief) -> dict:
         "totalOutputTokens": brief.total_output_tokens,
         "totalCostUsd": str(brief.total_cost_usd),
         "messageCount": brief.message_count,
+        "showCost": should_show_brief_cost(user),
         "createdAt": brief.created_at.isoformat() if brief.created_at else None,
         "updatedAt": brief.updated_at.isoformat() if brief.updated_at else None,
         "claimedAt": brief.claimed_at.isoformat() if brief.claimed_at else None,
@@ -433,9 +443,9 @@ def serialize_brief_v3_list_item(brief: Brief) -> dict:
     }
 
 
-def serialize_brief_v3_detail(brief: Brief) -> dict:
+def serialize_brief_v3_detail(brief: Brief, *, user=None) -> dict:
     messages = brief.chat_messages.prefetch_related("feedbacks", "attachments").all()
-    result = serialize_brief_v3(brief)
+    result = serialize_brief_v3(brief, user=user)
     result["messages"] = [serialize_chat_message_v3(x) for x in messages]
     return result
 
@@ -459,4 +469,29 @@ def serialize_brief_feedback(feedback: BriefFeedback) -> dict:
         "comment": feedback.comment,
         "userId": str(feedback.user_id) if feedback.user_id else None,
         "createdAt": feedback.created_at.isoformat() if feedback.created_at else None,
+    }
+
+
+def serialize_brief_share(share: BriefShare) -> dict:
+    return {
+        "id": str(share.id),
+        "briefId": str(share.brief_id),
+        "token": share.token,
+        "isActive": share.is_active,
+        "createdAt": share.created_at.isoformat() if share.created_at else None,
+        "updatedAt": share.updated_at.isoformat() if share.updated_at else None,
+    }
+
+
+def serialize_brief_share_public(share: BriefShare) -> dict:
+    brief = share.brief
+    documents = list(brief.final_documents.order_by("kind"))
+    return {
+        "token": share.token,
+        "briefId": str(brief.id),
+        "title": brief.title,
+        "documentLanguage": brief.document_language,
+        "conversationStatus": brief.conversation_status,
+        "documents": [serialize_brief_final_document(x) for x in documents],
+        "createdAt": share.created_at.isoformat() if share.created_at else None,
     }

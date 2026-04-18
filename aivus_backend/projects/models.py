@@ -773,6 +773,46 @@ def _brief_attachment_upload_to(instance: "BriefAttachment", filename: str) -> s
     return f"briefs/{instance.brief_id}/{uuid.uuid4()}.{suffix}"
 
 
+class BriefShare(models.Model):
+    """Public share link for a finalized brief.
+
+    Simple model — one BriefShare per brief. Token is a urlsafe 64-char string
+    generated on creation. Active/inactive toggle lets the owner revoke the
+    link without deleting it.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    brief = models.OneToOneField(
+        "Brief",
+        on_delete=models.CASCADE,
+        related_name="share",
+    )
+    token = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        default=secrets.token_urlsafe,
+    )
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_brief_shares",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "brief_share"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        state = "active" if self.is_active else "inactive"
+        return f"Share for {self.brief_id} ({state})"
+
+
 class BriefPrompt(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     slug = models.CharField(

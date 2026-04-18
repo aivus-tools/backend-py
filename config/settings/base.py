@@ -56,6 +56,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 HMAC_SECRET = env("HMAC_SECRET")
 API_KEY = env("API_KEY")
 
+# AIVUS BRIEF AI
+# ------------------------------------------------------------------------------
+# Toggle whether the cumulative LLM cost of a brief is visible to every client
+# or only to staff. Staff can always see it regardless of this flag.
+SHOW_BRIEF_COST_TO_ALL = env.bool("SHOW_BRIEF_COST_TO_ALL", default=True)
+
 # URLS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#root-urlconf
@@ -198,11 +204,19 @@ if STORAGE_BACKEND == "gcs":
             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
-    GS_BUCKET_NAME = env("GS_BUCKET_NAME")
+    # Accept either the canonical GS_* vars or the legacy DJANGO_GCP_*/GOOGLE_
+    # APPLICATION_CREDENTIALS names so existing env files keep working.
+    GS_BUCKET_NAME = env(
+        "GS_BUCKET_NAME",
+        default=env("DJANGO_GCP_STORAGE_BUCKET_NAME", default=""),
+    )
     GS_DEFAULT_ACL = "private"
     GS_QUERYSTRING_AUTH = True
     GS_EXPIRATION = env.int("GS_SIGNED_URL_EXPIRATION_SECONDS", default=900)
-    GS_CREDENTIALS_PATH = env("GS_CREDENTIALS_PATH", default="")
+    GS_CREDENTIALS_PATH = env(
+        "GS_CREDENTIALS_PATH",
+        default=env("GOOGLE_APPLICATION_CREDENTIALS", default=""),
+    )
     if GS_CREDENTIALS_PATH:
         from google.oauth2 import service_account as _gs_service_account
 

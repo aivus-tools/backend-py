@@ -12,6 +12,7 @@ from .models import BriefFeedback
 from .models import BriefFinalDocument
 from .models import BriefOffer
 from .models import BriefPrompt
+from .models import BriefShare
 from .models import ChatMessage
 from .models import ClientManager
 from .models import Offer
@@ -463,7 +464,14 @@ class ChatMessageAdmin(ModelAdmin):
 
 class BriefPromptAdminForm(forms.ModelForm):
     body = forms.CharField(
-        widget=TinyMCE(attrs={"cols": 100, "rows": 30}),
+        widget=forms.Textarea(
+            attrs={
+                "rows": 40,
+                "cols": 120,
+                "style": "font-family: ui-monospace, SFMono-Regular, Menlo, "
+                "monospace; white-space: pre; width: 100%;",
+            }
+        ),
         required=True,
     )
 
@@ -569,6 +577,19 @@ class BriefFinalDocumentAdmin(ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(BriefShare)
+class BriefShareAdmin(ModelAdmin):
+    list_display = ["brief", "token_short", "is_active", "created_by", "created_at"]
+    search_fields = ["brief__id", "token"]
+    list_filter = ["is_active", "created_at"]
+    readonly_fields = ["token", "created_at", "updated_at"]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Token")
+    def token_short(self, instance):
+        return f"{instance.token[:12]}..." if instance.token else ""
 
 
 @admin.register(BriefFeedback)
