@@ -5,6 +5,8 @@ from celery import shared_task
 from django.db import transaction
 from django.db.models import F
 
+from aivus_backend.projects.ai_brief_v3 import feedback_question_for
+from aivus_backend.projects.ai_brief_v3 import generate_brief_title
 from aivus_backend.projects.ai_brief_v3 import generate_final_documents
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.api.serializers import serialize_brief_v3
@@ -166,4 +168,31 @@ def finalize_brief_task(brief_id: str) -> dict:
             persist_final_document_traces(document, result.get("traces", []))
 
     brief.refresh_from_db()
+
+    # Post-finalize side-effects: auto-title + feedback-request chat message.
+    # Both are best-effort — a failure here must not roll back the finalize.
+    try:
+        title = generate_brief_title(brief)
+        if title and not brief.title:
+            brief.title = title
+            brief.save(update_fields=["title", "updated_at"])
+    except Exception:
+        logger.exception("auto-title failed brief_id=%s", brief.id)
+
+    try:
+        already_asked = ChatMessage.objects.filter(
+            brief=brief, kind=ChatMessage.KIND_FEEDBACK_REQUEST
+        ).exists()
+        if not already_asked:
+            ChatMessage.objects.create(
+                brief=brief,
+                role="assistant",
+                kind=ChatMessage.KIND_FEEDBACK_REQUEST,
+                content=feedback_question_for(brief.document_language),
+            )
+    except Exception:
+        logger.exception(
+            "feedback_request message creation failed brief_id=%s", brief.id
+        )
+
     return serialize_brief_v3(brief)

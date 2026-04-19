@@ -23,6 +23,7 @@ from django_ratelimit.decorators import ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.sanitize import sanitize_html
+from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.api.serializers import serialize_brief_attachment
 from aivus_backend.projects.api.serializers import serialize_brief_feedback
@@ -160,11 +161,81 @@ def _build_chat_response(
     }
 
 
+def _handle_post_finalize_feedback(
+    brief: Brief,
+    user_message_obj: ChatMessage,
+) -> tuple[ChatMessage, dict, None] | None:
+    """If the assistant just asked a feedback question, treat this user turn as
+    a feedback submission: store the comment + a thanks-ack message and skip
+    LLM completely. Returns None when the branch does not apply.
+    """
+    if brief.conversation_status != "finalized":
+        return None
+
+    last_assistant = (
+        brief.chat_messages.filter(role="assistant")
+        .exclude(id=user_message_obj.id)
+        .order_by("-created_at")
+        .first()
+    )
+    if not last_assistant or last_assistant.kind != ChatMessage.KIND_FEEDBACK_REQUEST:
+        return None
+
+    already_answered = brief.chat_messages.filter(
+        kind=ChatMessage.KIND_FEEDBACK_REPLY_ACK
+    ).exists()
+    if already_answered:
+        return None
+
+    try:
+        BriefFeedback.objects.create(
+            brief=brief,
+            message=user_message_obj,
+            rating="up",
+            comment=user_message_obj.content[:MAX_FEEDBACK_COMMENT_LENGTH],
+            user=user_message_obj.user,
+        )
+    except Exception:
+        logger.exception(
+            "feedback save failed brief_id=%s user_msg=%s",
+            brief.id,
+            user_message_obj.id,
+        )
+
+    ack_text = feedback_ack_for(brief.document_language)
+    ack = ChatMessage.objects.create(
+        brief=brief,
+        user=None,
+        role="assistant",
+        kind=ChatMessage.KIND_FEEDBACK_REPLY_ACK,
+        content=ack_text,
+    )
+    result = {
+        "reply": ack_text,
+        "ready_to_finalize": False,
+        "conversation_status": brief.conversation_status,
+        "document_language": brief.document_language,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0,
+        "model_used": "",
+        "traces": [],
+    }
+    return ack, result, None
+
+
 def _process_chat(
     brief: Brief,
     user_message_obj: ChatMessage,
     message_text: str,
 ) -> tuple[ChatMessage | None, dict | None, JsonResponse | None]:
+    # Post-finalize feedback branch: if the last assistant message was a
+    # feedback_request, treat the user reply as feedback text and short-circuit
+    # without hitting the LLM. Store the feedback and acknowledge back.
+    feedback_branch = _handle_post_finalize_feedback(brief, user_message_obj)
+    if feedback_branch is not None:
+        return feedback_branch
+
     history = list(
         brief.chat_messages.exclude(id=user_message_obj.id)
         .prefetch_related("attachments")
@@ -473,12 +544,31 @@ def client_brief_ai_detail(request, brief_id):
     if error:
         return error
 
-    title = body.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return JsonResponse({"error": "title is required"}, status=400)
+    update_fields: list[str] = []
 
-    brief.title = title.strip()[:255]
-    brief.save(update_fields=["title", "updated_at"])
+    if "title" in body:
+        title = body.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return JsonResponse({"error": "title must be non-empty"}, status=400)
+        brief.title = title.strip()[:255]
+        update_fields.append("title")
+
+    if "documentLanguage" in body:
+        language = body.get("documentLanguage")
+        if not isinstance(language, str) or language.lower() not in {"en", "ru"}:
+            return JsonResponse(
+                {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
+            )
+        brief.document_language = language.lower()
+        update_fields.append("document_language")
+
+    if not update_fields:
+        return JsonResponse(
+            {"error": "title or documentLanguage is required"}, status=400
+        )
+
+    update_fields.append("updated_at")
+    brief.save(update_fields=update_fields)
     return JsonResponse(serialize_brief_v3_list_item(brief))
 
 

@@ -4,8 +4,11 @@ Single unified chat engine replacing the v2 LangGraph.
 
 - `process_brief_turn` handles every chat turn (first message and follow-ups)
   using one system prompt assembled from BriefPrompt rows in DB.
-- `generate_final_documents` produces the three final deliverables at finalize
-  time: Production Brief, Vendor Outreach Email, Deliverables Checklist.
+- `generate_final_documents` produces two final documents at finalize time:
+  Production Brief (with embedded deliverables section) and Vendor Outreach
+  Email. Deliverables as a standalone document has been folded into the brief.
+- `generate_brief_title` calls a cheap/fast model to name the brief after
+  finalization so the dashboard doesn't show "Untitled".
 """
 
 # ruff: noqa: RUF001
@@ -34,10 +37,16 @@ from aivus_backend.projects.models import ChatMessage
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
+TITLE_MODEL = "gemini-2.5-flash"
 MAIN_MAX_TOKENS = 2500
 FINALIZATION_MAX_TOKENS = 6000
+TITLE_MAX_TOKENS = 80
 MAIN_TEMPERATURE = 0.7
 FINALIZATION_TEMPERATURE = 0.5
+TITLE_TEMPERATURE = 0.4
+TITLE_MAX_LENGTH = 80
+
+_HISTORY_KINDS_FOR_LLM = {"chat"}
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
 _HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
@@ -213,9 +222,16 @@ def _build_user_parts(
 def _build_history_messages(history: list[ChatMessage]) -> list[dict[str, Any]]:
     """Rebuild conversation history as multimodal messages. User turns carry
     forward their attachments so the model keeps seeing the referenced files
-    on every subsequent chat turn."""
+    on every subsequent chat turn.
+
+    Post-finalize feedback exchanges (kind != 'chat') are skipped so the LLM
+    never sees them as part of the brief conversation.
+    """
     out: list[dict[str, Any]] = []
     for msg in history:
+        kind = getattr(msg, "kind", "chat") or "chat"
+        if kind not in _HISTORY_KINDS_FOR_LLM:
+            continue
         role = "assistant" if msg.role == "assistant" else "user"
         parts: list[dict[str, Any]] = [{"type": "text", "text": msg.content}]
         if role == "user" and hasattr(msg, "attachments"):
@@ -441,9 +457,6 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
     )
     vendor_email_html = sanitize_html(str(parsed.get("vendor_email_html", "")).strip())
     vendor_email_text = str(parsed.get("vendor_email_text", "")).strip()
-    deliverables_html = sanitize_html(
-        str(parsed.get("deliverables_checklist_html", "")).strip()
-    )
 
     if not production_brief_html:
         msg = "Finalization LLM did not return production_brief_html"
@@ -467,13 +480,6 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
             plain_text=vendor_email_text,
         )
     )
-    documents.append(
-        BriefFinalDocument.objects.create(
-            brief=brief,
-            kind="deliverables_checklist",
-            html=deliverables_html,
-        )
-    )
 
     return {
         "documents": documents,
@@ -483,3 +489,119 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
         "model_used": response.model_used,
         "traces": [_trace_entry("finalize", response)],
     }
+
+
+# ---------------------------------------------------------------------------
+# Post-finalize helpers: brief title + feedback request
+# ---------------------------------------------------------------------------
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+_TITLE_TRIM_CHARS = " .,:;!?\t\r\n\"'«»“”‘’—–-"
+
+
+def _strip_html(html: str) -> str:
+    if not html:
+        return ""
+    text = _TAG_RE.sub(" ", html)
+    text = _WHITESPACE_RE.sub(" ", text)
+    return text.strip()
+
+
+def _sanitize_title(raw: str) -> str:
+    if not raw:
+        return ""
+    text = raw.strip().splitlines()[0] if raw.strip() else ""
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    text = text.strip(_TITLE_TRIM_CHARS)
+    if len(text) > TITLE_MAX_LENGTH:
+        text = text[:TITLE_MAX_LENGTH].rstrip(_TITLE_TRIM_CHARS)
+    return text
+
+
+def generate_brief_title(brief: Brief) -> str:
+    """Ask a fast/cheap model to name the brief. Returns empty string on
+    failure — callers must tolerate that."""
+    history = list(brief.chat_messages.order_by("created_at"))
+    first_user_msg = next(
+        (m.content for m in history if m.role == "user" and m.content), ""
+    )
+    production_brief = (
+        BriefFinalDocument.objects.filter(brief=brief, kind="production_brief")
+        .order_by("-created_at")
+        .first()
+    )
+    brief_text = _strip_html(production_brief.html if production_brief else "")[:4000]
+
+    doc_language = brief.document_language or "en"
+    language_name = _language_name(doc_language)
+    system_prompt = (
+        "You name client video production brief projects. "
+        f"Return a short 3-6 word title in {language_name} — the same language as "
+        "the conversation. No quotes, no trailing punctuation, no prefixes like "
+        '"Title:". Just the title itself.'
+    )
+
+    user_text_parts = []
+    if first_user_msg:
+        user_text_parts.append(f"Client's first ask:\n{first_user_msg.strip()}")
+    if brief_text:
+        user_text_parts.append(f"Production brief excerpt:\n{brief_text}")
+    if not user_text_parts:
+        return ""
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "\n\n".join(user_text_parts)},
+            ],
+        },
+    ]
+
+    response = call_llm(
+        model=TITLE_MODEL,
+        messages=messages,
+        temperature=TITLE_TEMPERATURE,
+        max_tokens=TITLE_MAX_TOKENS,
+    )
+    return _sanitize_title(response.content or "")
+
+
+FEEDBACK_QUESTION_TEXT = {
+    "en": (
+        "Your brief is ready! Quick pulse-check so we can keep making this better:\n"
+        "1) Was everything clear along the way?\n"
+        "2) How useful is the brief for you right now?\n"
+        "3) Anything missing or confusing?\n"
+        "\n"
+        "Drop everything in a single reply — no pressure."
+    ),
+    "ru": (
+        "Бриф готов! Хочу коротко узнать впечатления, чтобы дальше делать ещё лучше:\n"
+        "1) Всё ли было понятно в процессе?\n"
+        "2) Насколько полезен получился бриф?\n"
+        "3) Чего не хватило или что смутило?\n"
+        "\n"
+        "Ответь одним сообщением — без напряга."
+    ),
+}
+
+FEEDBACK_ACK_TEXT = {
+    "en": (
+        "Thanks, got it — passed your feedback to the team. "
+        "If anything else comes up, just ping me here."
+    ),
+    "ru": ("Спасибо, передал фидбек команде. Если ещё что-то всплывёт — пиши сюда же."),
+}
+
+
+def feedback_question_for(language: str) -> str:
+    return FEEDBACK_QUESTION_TEXT.get(
+        (language or "en").lower(), FEEDBACK_QUESTION_TEXT["en"]
+    )
+
+
+def feedback_ack_for(language: str) -> str:
+    return FEEDBACK_ACK_TEXT.get((language or "en").lower(), FEEDBACK_ACK_TEXT["en"])

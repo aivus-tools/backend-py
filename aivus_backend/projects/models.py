@@ -628,6 +628,14 @@ class ChatMessage(models.Model):
         ("user", "User"),
         ("assistant", "Assistant"),
     ]
+    KIND_CHAT = "chat"
+    KIND_FEEDBACK_REQUEST = "feedback_request"
+    KIND_FEEDBACK_REPLY_ACK = "feedback_reply_ack"
+    KIND_CHOICES = [
+        (KIND_CHAT, "Chat"),
+        (KIND_FEEDBACK_REQUEST, "Feedback Request"),
+        (KIND_FEEDBACK_REPLY_ACK, "Feedback Reply Ack"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     brief = models.ForeignKey(
@@ -646,6 +654,9 @@ class ChatMessage(models.Model):
     )
     anonymous_token = models.CharField(max_length=64, blank=True, default="")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    kind = models.CharField(
+        max_length=32, choices=KIND_CHOICES, default=KIND_CHAT, db_index=True
+    )
     content = models.TextField()
     metadata = models.JSONField(default=dict, blank=True)
     input_tokens = models.IntegerField(default=0)

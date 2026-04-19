@@ -432,3 +432,274 @@ def _file(name: str, content: bytes, mime: str):
     from django.core.files.uploadedfile import SimpleUploadedFile
 
     return SimpleUploadedFile(name, content, content_type=mime)
+
+
+# ----------------------------------------------------------------------------
+# Second-batch features: deliverables / title / feedback / settings
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_migrations_activate_latest_prompt_versions(seeded_prompts):
+    """0029 + 0030 prompt migrations should leave v3 main and v2 finalization
+    as the active rows (or at least the most recent)."""
+    main = BriefPrompt.objects.filter(slug="main_system_prompt", is_active=True).first()
+    final = BriefPrompt.objects.filter(
+        slug="finalization_prompt", is_active=True
+    ).first()
+    assert main is not None
+    assert final is not None
+    assert main.version >= 3
+    assert final.version >= 2
+
+
+@pytest.mark.django_db
+def test_generate_final_documents_has_no_deliverables_kind(
+    client_profile, seeded_prompts
+):
+    """generate_final_documents must only produce production_brief + vendor_email."""
+    from aivus_backend.projects import ai_brief_v3
+
+    brief = Brief.objects.create(
+        client=client_profile, conversation_status="ready_to_finalize"
+    )
+    ChatMessage.objects.create(brief=brief, role="user", content="hi")
+
+    fake_response = type(
+        "R",
+        (),
+        {
+            "content": "{}",
+            "model_used": "fake",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost_usd": 0.01,
+            "latency_ms": 100,
+            "request_messages": [],
+            "request_params": {},
+        },
+    )()
+
+    with patch.object(
+        ai_brief_v3,
+        "call_llm_json",
+        return_value=(
+            {
+                "production_brief_html": "<h1>brief</h1><h2>Deliverables</h2>",
+                "vendor_email_html": "<h1>Subject</h1><p>Hi</p>",
+                "vendor_email_text": "Subject: Hi\n\nBody",
+            },
+            fake_response,
+        ),
+    ):
+        result = ai_brief_v3.generate_final_documents(brief)
+
+    kinds = sorted(d.kind for d in result["documents"])
+    assert kinds == ["production_brief", "vendor_email"]
+    assert not BriefFinalDocument.objects.filter(
+        brief=brief, kind="deliverables_checklist"
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_history_filter_skips_feedback_messages(client_profile, seeded_prompts):
+    """`_build_history_messages` must drop feedback_* kinds so they never land
+    in the LLM context."""
+    from aivus_backend.projects.ai_brief_v3 import _build_history_messages
+
+    brief = Brief.objects.create(client=client_profile)
+    m1 = ChatMessage.objects.create(brief=brief, role="user", content="hi", kind="chat")
+    m2 = ChatMessage.objects.create(
+        brief=brief, role="assistant", content="hello", kind="chat"
+    )
+    m3 = ChatMessage.objects.create(
+        brief=brief,
+        role="assistant",
+        content="feedback q?",
+        kind="feedback_request",
+    )
+    m4 = ChatMessage.objects.create(
+        brief=brief, role="user", content="answer", kind="chat"
+    )
+    m5 = ChatMessage.objects.create(
+        brief=brief,
+        role="assistant",
+        content="thx",
+        kind="feedback_reply_ack",
+    )
+
+    result = _build_history_messages([m1, m2, m3, m4, m5])
+    assert len(result) == 3
+    contents = [c["content"][0]["text"] for c in result]
+    assert contents == ["hi", "hello", "answer"]
+
+
+@pytest.mark.django_db
+def test_finalize_task_creates_feedback_request_and_title(
+    client_user, client_profile, seeded_prompts
+):
+    """finalize_brief_task seeds feedback_request message + auto-title."""
+    from aivus_backend.projects import tasks
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="ready_to_finalize",
+        document_language="en",
+    )
+    ChatMessage.objects.create(
+        brief=brief,
+        user=client_user,
+        role="user",
+        content="Need a product video for laptops",
+    )
+
+    fake_documents = [
+        BriefFinalDocument(brief=brief, kind="production_brief", html="<h1>Brief</h1>"),
+        BriefFinalDocument(brief=brief, kind="vendor_email", html="<h1>Hi</h1>"),
+    ]
+    for d in fake_documents:
+        d.save()
+    fake_docs = {
+        "documents": fake_documents,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cost_usd": 0.05,
+        "model_used": "fake",
+        "traces": [],
+    }
+
+    class _TitleResp:
+        content = "Laptop Launch Product Video"
+        model_used = "fake-flash"
+        input_tokens = 10
+        output_tokens = 5
+        cost_usd = 0.0001
+        latency_ms = 120
+        request_messages: list = []
+        request_params: dict = {}
+
+    with (
+        patch.object(tasks, "generate_final_documents", return_value=fake_docs),
+        patch("aivus_backend.projects.ai_brief_v3.call_llm", return_value=_TitleResp()),
+    ):
+        tasks.finalize_brief_task(str(brief.id))
+
+    brief.refresh_from_db()
+    assert brief.conversation_status == "finalized"
+    assert brief.title == "Laptop Launch Product Video"
+    assert ChatMessage.objects.filter(
+        brief=brief, kind="feedback_request", role="assistant"
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_finalize_task_tolerates_title_failure(
+    client_user, client_profile, seeded_prompts
+):
+    """Auto-title failure must not break finalize."""
+    from aivus_backend.projects import tasks
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="ready_to_finalize",
+    )
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="x")
+
+    fake_documents = [
+        BriefFinalDocument(brief=brief, kind="production_brief", html="<h1>B</h1>"),
+    ]
+    for d in fake_documents:
+        d.save()
+    fake_docs = {
+        "documents": fake_documents,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "model_used": "fake",
+        "traces": [],
+    }
+
+    def _boom(*a, **k):
+        msg = "title service down"
+        raise RuntimeError(msg)
+
+    with (
+        patch.object(tasks, "generate_final_documents", return_value=fake_docs),
+        patch("aivus_backend.projects.ai_brief_v3.call_llm", side_effect=_boom),
+    ):
+        tasks.finalize_brief_task(str(brief.id))
+
+    brief.refresh_from_db()
+    assert brief.conversation_status == "finalized"
+    # Title may stay empty — that's fine, dashboard falls back to "Untitled".
+    assert ChatMessage.objects.filter(brief=brief, kind="feedback_request").exists()
+
+
+@pytest.mark.django_db
+def test_post_finalize_chat_records_feedback_without_llm(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """When the last assistant message is feedback_request, user replies are
+    stored as BriefFeedback and the LLM is not invoked."""
+    from aivus_backend.projects.api import views_brief_v3
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="ru",
+    )
+    ChatMessage.objects.create(
+        brief=brief,
+        role="assistant",
+        kind="feedback_request",
+        content="feedback q",
+    )
+
+    with patch.object(views_brief_v3, "process_brief_turn") as process_mock:
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "всё ок, удобно"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert resp.status_code == 200
+    process_mock.assert_not_called()
+
+    from aivus_backend.projects.models import BriefFeedback
+
+    assert BriefFeedback.objects.filter(brief=brief).count() == 1
+    assert ChatMessage.objects.filter(brief=brief, kind="feedback_reply_ack").exists()
+
+
+@pytest.mark.django_db
+def test_patch_brief_updates_document_language(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    brief = Brief.objects.create(client=client_profile, document_language="en")
+
+    resp = api_client.patch(
+        reverse("projects_api:client_brief_ai_detail", args=[brief.id]),
+        data=json.dumps({"documentLanguage": "ru"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"
+
+
+@pytest.mark.django_db
+def test_patch_brief_rejects_unknown_language(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    brief = Brief.objects.create(client=client_profile, document_language="en")
+    resp = api_client.patch(
+        reverse("projects_api:client_brief_ai_detail", args=[brief.id]),
+        data=json.dumps({"documentLanguage": "fr"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 400
+    brief.refresh_from_db()
+    assert brief.document_language == "en"

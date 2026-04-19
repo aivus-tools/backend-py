@@ -388,6 +388,7 @@ def serialize_chat_message_v3(message: ChatMessage) -> dict:
     return {
         "id": str(message.id),
         "role": message.role,
+        "kind": getattr(message, "kind", "chat") or "chat",
         "content": message.content,
         "readyToFinalize": message.ready_to_finalize,
         "modelUsed": message.model_used,
