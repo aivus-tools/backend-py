@@ -101,6 +101,32 @@ def _validate_uuid(value, field_name="id"):
         raise ValueError(msg) from exc
 
 
+def _vendor_can_link_brief(brief, vendor_id, *, exclude_project_id=None):
+    """Return True if a vendor is allowed to attach this brief to a project.
+
+    Allowed when:
+    - The brief belongs to a client and that client has already linked this
+      vendor (BriefOffer with one of the vendor's offers exists).
+    - The brief has no client and no other vendor has a non-deleted project
+      attached to it (legacy vendor-initiated flow).
+    """
+    if not vendor_id:
+        return False
+
+    if brief.client_id is not None:
+        return BriefOffer.objects.filter(
+            brief=brief,
+            offer__project__vendor_id=vendor_id,
+        ).exists()
+
+    other_projects = brief.projects.exclude(vendor_id=vendor_id).filter(
+        deleted_at__isnull=True,
+    )
+    if exclude_project_id is not None:
+        other_projects = other_projects.exclude(id=exclude_project_id)
+    return not other_projects.exists()
+
+
 # ==================== Projects API ====================
 
 
@@ -203,6 +229,11 @@ def projects_list(request):  # noqa: C901, PLR0912, PLR0915
                     brief = Brief.objects.get(id=brief_id)
                 except Brief.DoesNotExist:
                     return JsonResponse({"error": "Brief not found"}, status=404)
+                if not _vendor_can_link_brief(brief, vendor_id):
+                    return JsonResponse(
+                        {"error": "Brief is not accessible by this vendor"},
+                        status=403,
+                    )
 
             # Verify client exists if provided
             client = None
@@ -345,9 +376,16 @@ def project_detail(request, project_id):  # noqa: C901, PLR0912, PLR0915
                 if data["briefId"]:
                     try:
                         brief = Brief.objects.get(id=data["briefId"])
-                        project.brief = brief
                     except Brief.DoesNotExist:
                         return JsonResponse({"error": "Brief not found"}, status=404)
+                    if not _vendor_can_link_brief(
+                        brief, user_vendor_id, exclude_project_id=project.id
+                    ):
+                        return JsonResponse(
+                            {"error": "Brief is not accessible by this vendor"},
+                            status=403,
+                        )
+                    project.brief = brief
                 else:
                     project.brief = None
             if "teamId" in data:
@@ -2486,6 +2524,14 @@ def client_brief_comparison_analyze(request, brief_id):
         data = {}
 
     question = data.get("question")
+    raw_history = data.get("history") or []
+    history = [
+        x
+        for x in raw_history
+        if isinstance(x, dict)
+        and x.get("role") in {"user", "assistant"}
+        and isinstance(x.get("content"), str)
+    ][-20:]
 
     # Build comparison data
     comparison_data = _build_comparison_data(brief)
@@ -2506,6 +2552,7 @@ def client_brief_comparison_analyze(request, brief_id):
         brief_data=brief.details,
         comparison_data=comparison_data,
         question=question,
+        history=history,
     )
 
     return JsonResponse(result)
@@ -2598,7 +2645,7 @@ def client_xlsx_upload(request):  # noqa: C901, PLR0912
     )
 
 
-def _build_offer_export_data(offer):
+def _build_offer_export_data(offer, *, include_internal_costs=True):
     project = offer.project
     vendor = project.vendor
 
@@ -2663,11 +2710,12 @@ def _build_offer_export_data(offer):
                 "_raw_estimates": [],
             }
 
-        estimate = (
-            float(entry.client_cost)
-            if entry.client_cost is not None
-            else float(entry.cost or 0)
-        )
+        if entry.client_cost is not None:
+            estimate = float(entry.client_cost)
+        elif include_internal_costs:
+            estimate = float(entry.cost or 0)
+        else:
+            estimate = 0.0
         rate = float(entry.price) if entry.price is not None else 0
 
         item_data = entry.item_data or {}
@@ -2719,54 +2767,58 @@ def _build_offer_export_data(offer):
 
     company_name = vendor_settings.company_name if vendor_settings else ""
 
+    offer_payload = {
+        "id": str(offer.id),
+        "uuid": str(offer.id),
+        "status": offer.status,
+        "bidDate": offer.bid_date.isoformat() if offer.bid_date else None,
+        "revision": offer.revision,
+        "term": offer.term,
+        "territory": offer.territory,
+        "mediaPlacements": offer.media_placements,
+        "coverPageNotes": offer.cover_page_notes,
+        "assumptionsExclusions": offer.assumptions_exclusions,
+        "fringesPercent": str(offer.fringes_percent),
+        "handlingPercent": str(offer.handling_percent),
+        "markupPercent": str(offer.markup_percent),
+        "productionInsurancePercent": str(offer.production_insurance_percent),
+        "productionFeePercent": str(offer.production_fee_percent),
+        "postMarkupPercent": str(offer.post_markup_percent),
+        "postInsurancePercent": str(offer.post_insurance_percent),
+        "postTaxPercent": str(offer.post_tax_percent),
+        "customFeeNames": (offer.details or {}).get("customFeeNames", {}),
+        "categoryExternalMarkup": (offer.details or {}).get(
+            "categoryExternalMarkup", {}
+        ),
+        "deliverables": [
+            {
+                "id": str(x.id),
+                "quantity": x.quantity,
+                "duration": x.duration,
+                "durationUnit": x.duration_unit,
+                "notes": x.notes,
+                "sortOrder": x.sort_order,
+            }
+            for x in deliverables
+        ],
+        "scheduleEntries": [
+            {
+                "id": str(x.id),
+                "phaseType": x.phase_type,
+                "days": x.days,
+                "hoursPerDay": x.hours_per_day,
+                "notes": x.notes,
+                "sortOrder": x.sort_order,
+            }
+            for x in schedule_entries
+        ],
+    }
+
+    if include_internal_costs:
+        offer_payload["cost"] = float(offer.cost) if offer.cost is not None else None
+
     return {
-        "offer": {
-            "id": str(offer.id),
-            "uuid": str(offer.id),
-            "status": offer.status,
-            "cost": float(offer.cost) if offer.cost is not None else None,
-            "bidDate": offer.bid_date.isoformat() if offer.bid_date else None,
-            "revision": offer.revision,
-            "term": offer.term,
-            "territory": offer.territory,
-            "mediaPlacements": offer.media_placements,
-            "coverPageNotes": offer.cover_page_notes,
-            "assumptionsExclusions": offer.assumptions_exclusions,
-            "fringesPercent": str(offer.fringes_percent),
-            "handlingPercent": str(offer.handling_percent),
-            "markupPercent": str(offer.markup_percent),
-            "productionInsurancePercent": str(offer.production_insurance_percent),
-            "productionFeePercent": str(offer.production_fee_percent),
-            "postMarkupPercent": str(offer.post_markup_percent),
-            "postInsurancePercent": str(offer.post_insurance_percent),
-            "postTaxPercent": str(offer.post_tax_percent),
-            "customFeeNames": (offer.details or {}).get("customFeeNames", {}),
-            "categoryExternalMarkup": (offer.details or {}).get(
-                "categoryExternalMarkup", {}
-            ),
-            "deliverables": [
-                {
-                    "id": str(x.id),
-                    "quantity": x.quantity,
-                    "duration": x.duration,
-                    "durationUnit": x.duration_unit,
-                    "notes": x.notes,
-                    "sortOrder": x.sort_order,
-                }
-                for x in deliverables
-            ],
-            "scheduleEntries": [
-                {
-                    "id": str(x.id),
-                    "phaseType": x.phase_type,
-                    "days": x.days,
-                    "hoursPerDay": x.hours_per_day,
-                    "notes": x.notes,
-                    "sortOrder": x.sort_order,
-                }
-                for x in schedule_entries
-            ],
-        },
+        "offer": offer_payload,
         "project": {
             "id": str(project.id),
             "name": project.name,
@@ -2835,4 +2887,4 @@ def share_export_data(request, token):
     if offer.deleted_at is not None:
         return JsonResponse({"error": "Offer not found"}, status=404)
 
-    return JsonResponse(_build_offer_export_data(offer))
+    return JsonResponse(_build_offer_export_data(offer, include_internal_costs=False))

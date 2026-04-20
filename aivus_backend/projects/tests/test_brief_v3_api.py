@@ -205,35 +205,53 @@ def test_client_chat_turn_writes_assistant_message(
 
 
 @pytest.mark.django_db
-def test_auth_message_limit_unlimited(
+def test_auth_message_limit_enforced(
     api_client, client_user, client_profile, seeded_prompts
 ):
-    """MESSAGE_LIMIT_AUTH=0 → endpoint never rejects with 429."""
-    brief = Brief.objects.create(client=client_profile, message_count=9999)
+    """Authenticated chat is rejected when message_count hits MESSAGE_LIMIT_AUTH."""
+    from aivus_backend.projects.api.views_brief_v3 import MESSAGE_LIMIT_AUTH
+
+    brief = Brief.objects.create(
+        client=client_profile, message_count=MESSAGE_LIMIT_AUTH
+    )
     ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="hi")
 
-    fake_result = {
-        "reply": "ok",
-        "ready_to_finalize": False,
-        "conversation_status": "in_progress",
-        "document_language": "en",
-        "input_tokens": 1,
-        "output_tokens": 1,
-        "cost_usd": 0.00001,
-        "model_used": "gemini-3.1-pro-preview",
-        "traces": [],
-    }
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.process_brief_turn",
-        return_value=fake_result,
-    ):
-        resp = api_client.post(
-            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
-            data=json.dumps({"message": "a"}),
-            content_type="application/json",
-            **_auth_headers(client_user),
-        )
-    assert resp.status_code == 200
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+        data=json.dumps({"message": "a"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 429
+    assert resp.json()["error"] == "Message limit reached"
+
+
+@pytest.mark.django_db
+def test_auth_chat_rejected_when_brief_cost_limit_reached(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """SEC: authenticated chat must hit a cost-cap to prevent unbounded $$."""
+    from decimal import Decimal
+
+    from aivus_backend.projects.api.views_brief_v3 import MAX_BRIEF_COST_USD
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        message_count=1,
+        total_cost_usd=MAX_BRIEF_COST_USD + Decimal("0.01"),
+    )
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="hi")
+
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+        data=json.dumps({"message": "more"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["code"] == "cost_limit_reached"
+    assert body["limitUsd"] == str(MAX_BRIEF_COST_USD)
 
 
 # ----------------------------------------------------------------------------
@@ -703,3 +721,277 @@ def test_patch_brief_rejects_unknown_language(
     assert resp.status_code == 400
     brief.refresh_from_db()
     assert brief.document_language == "en"
+
+
+@pytest.mark.django_db
+def test_regenerate_already_finalized_brief(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """POST /finalize on an already-finalized brief replaces final documents."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>old brief</p>"
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>old email</p>"
+    )
+
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "taskId" in body
+
+
+@pytest.mark.django_db
+def test_finalize_rejected_when_brief_cost_limit_reached(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    from decimal import Decimal
+
+    from aivus_backend.projects.api.views_brief_v3 import MAX_BRIEF_COST_USD
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="ready_to_finalize",
+        total_cost_usd=MAX_BRIEF_COST_USD + Decimal("0.01"),
+    )
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 429
+    assert resp.json()["code"] == "cost_limit_reached"
+
+
+@pytest.mark.django_db
+def test_finalize_task_replaces_documents_on_rerun(
+    client_user, client_profile, seeded_prompts
+):
+    """finalize_brief_task on a finalized brief replaces final documents."""
+    from aivus_backend.projects import tasks
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>old</p>"
+    )
+    ChatMessage.objects.create(
+        brief=brief, user=client_user, role="user", content="updated context"
+    )
+
+    def fake_generate(brief):
+        BriefFinalDocument.objects.filter(brief=brief).delete()
+        fresh = [
+            BriefFinalDocument.objects.create(
+                brief=brief, kind="production_brief", html="<p>fresh</p>"
+            ),
+            BriefFinalDocument.objects.create(
+                brief=brief, kind="vendor_email", html="<p>fresh email</p>"
+            ),
+        ]
+        return {
+            "documents": fresh,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cost_usd": 0.0001,
+            "model_used": "fake",
+            "traces": [],
+        }
+
+    with patch.object(tasks, "generate_final_documents", side_effect=fake_generate):
+        tasks.finalize_brief_task(str(brief.id))
+
+    docs = list(brief.final_documents.order_by("kind"))
+    assert {d.kind for d in docs} == {"production_brief", "vendor_email"}
+    production_brief = next(d for d in docs if d.kind == "production_brief")
+    assert "fresh" in production_brief.html
+    assert "old" not in production_brief.html
+
+
+@pytest.mark.django_db
+def test_finalized_status_is_sticky_after_followup_chat(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """After finalize, follow-up chat must NOT roll conversation_status back."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="hi")
+
+    fake_result = {
+        "reply": "thanks for the follow-up",
+        "ready_to_finalize": True,
+        "conversation_status": "ready_to_finalize",
+        "document_language": "en",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cost_usd": 0.0001,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_brief_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "one more thing"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["conversationStatus"] == "finalized"
+    brief.refresh_from_db()
+    assert brief.conversation_status == "finalized"
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_handles_list_response_from_llm(
+    client_user, client_profile, seeded_prompts
+):
+    """Gemini sometimes returns [{...}] instead of {...} — must not crash."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(client=client_profile, document_language="en")
+    user_msg = ChatMessage.objects.create(
+        brief=brief, user=client_user, role="user", content="hello"
+    )
+
+    fake_response = LLMResponse(
+        content='[{"reply": "hi from list", "ready_to_finalize": false}]',
+        model_used="gemini-3.1-pro-preview",
+        input_tokens=5,
+        output_tokens=2,
+        cost_usd=0.0001,
+        latency_ms=10,
+        request_messages=[],
+        request_params={},
+    )
+    parsed_list = [{"reply": "hi from list", "ready_to_finalize": False}]
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json",
+        return_value=(parsed_list, fake_response),
+    ):
+        result = process_brief_turn(
+            brief=brief, user_message="hello", attachments=[], history=[user_msg]
+        )
+
+    assert result["reply"] == "hi from list"
+    assert result["ready_to_finalize"] is False
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_injects_anonymous_auth_rule(
+    client_user, client_profile, seeded_prompts
+):
+    """Anonymous brief gets a 'sign up' CTA, never 'Finalize button'."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    anon_brief = Brief.objects.create(
+        client=None,
+        anonymous_token="tok-anon-1",
+        document_language="en",
+    )
+    user_msg = ChatMessage.objects.create(
+        brief=anon_brief,
+        user=None,
+        anonymous_token="tok-anon-1",
+        role="user",
+        content="hi",
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        return (
+            {"reply": "ok", "ready_to_finalize": False},
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        process_brief_turn(
+            brief=anon_brief, user_message="hi", attachments=[], history=[user_msg]
+        )
+
+    assert "USER AUTH CONTEXT" in captured["system"]
+    assert "anonymously" in captured["system"]
+    assert "sign up" in captured["system"].lower()
+    assert "Finalize" not in captured["system"] or "never mention" in captured["system"]
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_injects_authenticated_auth_rule(
+    client_user, client_profile, seeded_prompts
+):
+    """Signed-in brief gets the 'Finalize button' CTA."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(client=client_profile, document_language="en")
+    user_msg = ChatMessage.objects.create(
+        brief=brief, user=client_user, role="user", content="hi"
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        return (
+            {"reply": "ok", "ready_to_finalize": False},
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        process_brief_turn(
+            brief=brief, user_message="hi", attachments=[], history=[user_msg]
+        )
+
+    assert "USER AUTH CONTEXT" in captured["system"]
+    assert "signed in" in captured["system"]
+    assert "Finalize" in captured["system"]
+    assert (
+        "sign up" not in captured["system"].lower()
+        or "Never tell" in captured["system"]
+    )

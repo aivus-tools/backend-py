@@ -146,10 +146,6 @@ def finalize_brief_task(brief_id: str) -> dict:
             logger.warning("Brief not found for finalization: brief_id=%s", brief_id)
             return {"error": "Brief not found"}
 
-        if brief.conversation_status == "finalized":
-            logger.warning("Brief already finalized: brief_id=%s", brief_id)
-            return serialize_brief_v3(brief)
-
     try:
         result = generate_final_documents(brief=brief)
     except Exception:

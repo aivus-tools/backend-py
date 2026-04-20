@@ -405,7 +405,7 @@ def serialize_chat_message_v3(message: ChatMessage) -> dict:
 def should_show_brief_cost(user) -> bool:
     from django.conf import settings as dj_settings  # noqa: PLC0415
 
-    if getattr(dj_settings, "SHOW_BRIEF_COST_TO_ALL", True):
+    if getattr(dj_settings, "SHOW_BRIEF_COST_TO_ALL", False):
         return True
     return bool(user and getattr(user, "is_staff", False))
 

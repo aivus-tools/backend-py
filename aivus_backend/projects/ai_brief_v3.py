@@ -137,6 +137,25 @@ def _build_language_rule(doc_language: str) -> str:
     )
 
 
+def _build_auth_rule(*, is_anonymous: bool) -> str:
+    if is_anonymous:
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user is browsing anonymously and has NOT signed up yet.\n"
+            "When the brief is ready, briefly congratulate the user and ask them\n"
+            "to sign up to finalize and download the full brief package. There is\n"
+            "NO 'Finalize' button visible to anonymous users — never mention it.\n"
+            "Use a clear sign-up CTA in the user's reply language.\n"
+        )
+    return (
+        "=== USER AUTH CONTEXT ===\n"
+        "The user is signed in.\n"
+        "When the brief is ready, briefly congratulate the user and ask them to\n"
+        "click the 'Finalize' button in the interface to generate the final\n"
+        "package. Never tell signed-in users to register or sign up.\n"
+    )
+
+
 def _build_market_rule(doc_language: str) -> str:
     code = (doc_language or "").lower()
     if code == "ru":
@@ -155,12 +174,13 @@ def _build_market_rule(doc_language: str) -> str:
     return "Market context: infer from brief language (ru → RF/rubles, en → US/USD).\n"
 
 
-def _build_system_prompt(
+def _build_system_prompt(  # noqa: PLR0913
     main_body: str,
     master_template_body: str,
     archetypes_body: str,
     language_rule: str,
     market_rule: str,
+    auth_rule: str = "",
 ) -> str:
     parts = [main_body.strip()]
     if master_template_body.strip():
@@ -171,6 +191,8 @@ def _build_system_prompt(
         parts.append(archetypes_body.strip())
     parts.append(language_rule.strip())
     parts.append(market_rule.strip())
+    if auth_rule.strip():
+        parts.append(auth_rule.strip())
     return "\n\n".join(parts)
 
 
@@ -292,6 +314,7 @@ def process_brief_turn(
         archetypes_body=archetypes_body,
         language_rule=_build_language_rule(doc_language),
         market_rule=_build_market_rule(doc_language),
+        auth_rule=_build_auth_rule(is_anonymous=brief.client_id is None),
     )
 
     messages: list[dict[str, Any]] = [
@@ -324,6 +347,14 @@ def process_brief_turn(
             json_mode=False,
         )
         parsed = _salvage_reply(response.content)
+
+    if isinstance(parsed, list):
+        parsed = next(
+            (item for item in parsed if isinstance(item, dict) and item.get("reply")),
+            {},
+        )
+    if not isinstance(parsed, dict):
+        parsed = {}
 
     reply = str(parsed.get("reply", "")).strip()
     ready_to_finalize = bool(parsed.get("ready_to_finalize", False))
@@ -451,6 +482,18 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
         temperature=FINALIZATION_TEMPERATURE,
         max_tokens=FINALIZATION_MAX_TOKENS,
     )
+
+    if isinstance(parsed, list):
+        parsed = next(
+            (
+                item
+                for item in parsed
+                if isinstance(item, dict) and item.get("production_brief_html")
+            ),
+            {},
+        )
+    if not isinstance(parsed, dict):
+        parsed = {}
 
     production_brief_html = sanitize_html(
         str(parsed.get("production_brief_html", "")).strip()

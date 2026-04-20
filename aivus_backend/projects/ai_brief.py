@@ -91,7 +91,10 @@ def analyze_brief(brief_data: dict) -> dict:
 
 
 def analyze_comparison(
-    brief_data: dict, comparison_data: dict, question: str | None = None
+    brief_data: dict,
+    comparison_data: dict,
+    question: str | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
     """Analyze and compare vendor offers using AI."""
     data_content = (
@@ -103,6 +106,13 @@ def analyze_comparison(
         {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
         {"role": "user", "content": data_content},
     ]
+
+    if history:
+        for entry in history:
+            role = entry.get("role")
+            content = entry.get("content")
+            if role in {"user", "assistant"} and isinstance(content, str) and content:
+                messages.append({"role": role, "content": content})
 
     if question:
         messages.append({"role": "user", "content": question})

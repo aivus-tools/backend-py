@@ -981,6 +981,55 @@ class TestOfferExportData:
         response = api.get("/api/v1/shares/nonexistent/export-data")
         assert response.status_code == 404
 
+    def test_share_export_data_does_not_leak_offer_cost(self, api, share):
+        share.offer.cost = 12345.67
+        share.offer.save(update_fields=["cost"])
+        response = api.get(f"/api/v1/shares/{share.token}/export-data")
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert "cost" not in data["offer"], (
+            "Public share endpoint must not expose internal offer.cost"
+        )
+
+    def test_offer_export_data_includes_cost_for_owner(
+        self, api, vendor_user, vendor, published_offer
+    ):
+        published_offer.cost = 999.99
+        published_offer.save(update_fields=["cost"])
+        headers = _vendor_auth(vendor_user, vendor.id)
+        response = api.get(
+            f"/api/v1/offers/{published_offer.id}/export-data",
+            **headers,
+        )
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["offer"]["cost"] == 999.99
+
+    def test_share_export_data_estimate_does_not_fall_back_to_internal_cost(
+        self, api, share
+    ):
+        category = Category.objects.create(name="Cat", code="C1", level=0)
+        OfferEntry.objects.create(
+            offer=share.offer,
+            category=category,
+            item_name="Internal-only entry",
+            cost=500,
+            client_cost=None,
+            sort_order=0,
+        )
+        response = api.get(f"/api/v1/shares/{share.token}/export-data")
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        category_payload = next(
+            (c for c in data["categories"] if c["code"] == "C1"),
+            None,
+        )
+        assert category_payload is not None
+        entry = category_payload["entries"][0]
+        assert entry["estimate"] == 0.0, (
+            "Public estimate must not fall back to internal cost"
+        )
+
 
 class TestClientBriefsAPI:
     def test_list_client_briefs(self, api, client_user, client_entity, brief):
@@ -1053,3 +1102,47 @@ class TestClientBriefsAPI:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert len(data) >= 1
+
+
+class TestClientBriefComparisonAnalyze:
+    def test_comparison_analyze_passes_history_to_llm(
+        self, api, client_user, client_entity, brief, published_offer, monkeypatch
+    ):
+        BriefOffer.objects.create(
+            brief=brief, offer=published_offer, linked_by=client_user
+        )
+
+        captured = {}
+
+        def fake_analyze(brief_data, comparison_data, question=None, history=None):
+            captured["question"] = question
+            captured["history"] = history
+            return {"analysis": "ok", "highlights": []}
+
+        monkeypatch.setattr(
+            "aivus_backend.projects.api.views.analyze_comparison",
+            fake_analyze,
+        )
+        headers = _client_auth(client_user, client_entity.id)
+        response = api.post(
+            f"/api/v1/client/briefs/{brief.id}/comparison/analyze",
+            data=json.dumps(
+                {
+                    "question": "which is best?",
+                    "history": [
+                        {"role": "user", "content": "first"},
+                        {"role": "assistant", "content": "answer"},
+                        {"role": "spam", "content": "ignored"},
+                        {"role": "user", "content": 42},
+                    ],
+                }
+            ),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 200
+        assert captured["question"] == "which is best?"
+        assert captured["history"] == [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer"},
+        ]

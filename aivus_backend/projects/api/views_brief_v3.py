@@ -51,8 +51,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MESSAGE_LIMIT_AUTH = 0  # 0 = unlimited for authenticated clients
+MESSAGE_LIMIT_AUTH = 100
 MESSAGE_LIMIT_ANON = 50
+MAX_BRIEF_COST_USD = Decimal("5.00")
 MAX_MESSAGE_LENGTH = 10000
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
@@ -152,7 +153,7 @@ def _build_chat_response(
         "reply": result["reply"],
         "messageId": str(assistant_message.id),
         "readyToFinalize": result["ready_to_finalize"],
-        "conversationStatus": result["conversation_status"],
+        "conversationStatus": brief.conversation_status,
         "documentLanguage": brief.document_language,
         "inputTokens": result["input_tokens"],
         "outputTokens": result["output_tokens"],
@@ -264,12 +265,13 @@ def _process_chat(
 
     with transaction.atomic():
         updates = {
-            "conversation_status": result["conversation_status"],
             "total_input_tokens": F("total_input_tokens") + result["input_tokens"],
             "total_output_tokens": F("total_output_tokens") + result["output_tokens"],
             "total_cost_usd": F("total_cost_usd") + Decimal(str(result["cost_usd"])),
             "message_count": F("message_count") + 1,
         }
+        if brief.conversation_status != "finalized":
+            updates["conversation_status"] = result["conversation_status"]
         if not brief.document_language and result.get("document_language"):
             updates["document_language"] = result["document_language"]
 
@@ -479,6 +481,16 @@ def client_brief_ai_chat(request, brief_id):
 
     if MESSAGE_LIMIT_AUTH and brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
+
+    if brief.total_cost_usd >= MAX_BRIEF_COST_USD:
+        return JsonResponse(
+            {
+                "error": "Brief AI cost limit reached",
+                "code": "cost_limit_reached",
+                "limitUsd": str(MAX_BRIEF_COST_USD),
+            },
+            status=429,
+        )
 
     body, error = _parse_json_body(request)
     if error:
@@ -724,8 +736,15 @@ def client_brief_ai_finalize(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    if brief.conversation_status == "finalized":
-        return JsonResponse({"error": "Brief is already finalized"}, status=409)
+    if brief.total_cost_usd >= MAX_BRIEF_COST_USD:
+        return JsonResponse(
+            {
+                "error": "Brief AI cost limit reached",
+                "code": "cost_limit_reached",
+                "limitUsd": str(MAX_BRIEF_COST_USD),
+            },
+            status=429,
+        )
 
     task = finalize_brief_task.delay(str(brief.id))
     return JsonResponse({"taskId": task.id})
@@ -1011,6 +1030,16 @@ def public_brief_ai_chat(request, brief_id):
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)
+
+    if brief.total_cost_usd >= MAX_BRIEF_COST_USD:
+        return JsonResponse(
+            {
+                "error": "Brief AI cost limit reached",
+                "code": "cost_limit_reached",
+                "limitUsd": str(MAX_BRIEF_COST_USD),
+            },
+            status=429,
+        )
 
     body, error = _parse_json_body(request)
     if error:

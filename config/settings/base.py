@@ -60,7 +60,7 @@ API_KEY = env("API_KEY")
 # ------------------------------------------------------------------------------
 # Toggle whether the cumulative LLM cost of a brief is visible to every client
 # or only to staff. Staff can always see it regardless of this flag.
-SHOW_BRIEF_COST_TO_ALL = env.bool("SHOW_BRIEF_COST_TO_ALL", default=True)
+SHOW_BRIEF_COST_TO_ALL = env.bool("SHOW_BRIEF_COST_TO_ALL", default=False)
 
 # URLS
 # ------------------------------------------------------------------------------

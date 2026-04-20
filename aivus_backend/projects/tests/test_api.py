@@ -338,6 +338,110 @@ class TestProjectsAPI:
         data = json.loads(response.content)
         assert len(data["clientManagers"]) == 2
 
+    def test_create_project_with_other_clients_brief_rejected(
+        self, api_client, vendor_user, vendor, brief
+    ):
+        """SEC: vendor cannot attach a client's brief that wasn't shared with them."""
+        headers = _vendor_headers(vendor_user, vendor.id)
+        payload = {
+            "vendorId": str(vendor.id),
+            "name": "Hijack Attempt",
+            "briefId": str(brief.id),
+        }
+        response = api_client.post(
+            "/api/v1/projects",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 403
+        assert "Brief is not accessible" in json.loads(response.content)["error"]
+
+    def test_patch_project_with_other_clients_brief_rejected(
+        self, api_client, vendor_user, vendor, project, brief
+    ):
+        """SEC: PATCH cannot attach a client's brief that wasn't shared."""
+        headers = _vendor_headers(vendor_user, vendor.id)
+        payload = {"briefId": str(brief.id)}
+        response = api_client.patch(
+            f"/api/v1/projects/{project.id}",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 403
+
+    def test_create_project_with_brief_after_briefoffer_link_allowed(
+        self, api_client, vendor_user, vendor, project, brief
+    ):
+        """When the client has linked one of vendor's offers to their brief,
+        the vendor is allowed to create more projects against that brief."""
+        from aivus_backend.projects.models import BriefOffer
+        from aivus_backend.projects.models import Offer
+
+        existing_offer = Offer.objects.create(
+            project_name="Linked Offer",
+            project=project,
+            status="PUBLISHED",
+            details={"offers": []},
+            deadline=timezone.now(),
+            source="PLATFORM",
+        )
+        BriefOffer.objects.create(brief=brief, offer=existing_offer)
+
+        headers = _vendor_headers(vendor_user, vendor.id)
+        payload = {
+            "vendorId": str(vendor.id),
+            "name": "Authorised Brief Project",
+            "briefId": str(brief.id),
+        }
+        response = api_client.post(
+            "/api/v1/projects",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 201
+
+    def test_create_project_with_anonymous_brief_already_taken_rejected(
+        self, api_client, vendor_user, vendor
+    ):
+        """SEC: vendor cannot grab an anonymous brief already attached to
+        another vendor's non-deleted project."""
+        other_user = User.objects.create_user(
+            email="other-vendor@example.com",
+            password="x",
+            name="Other",
+            group="VENDOR",
+        )
+        other_vendor = Vendor.objects.create(name="Other Agency", owner=other_user)
+        anon_brief = Brief.objects.create(
+            status="DRAFT",
+            details={},
+            client=None,
+            anonymous_token="tok",
+        )
+        Project.objects.create(
+            name="Other vendor project",
+            vendor=other_vendor,
+            brief=anon_brief,
+            status="DRAFT",
+        )
+
+        headers = _vendor_headers(vendor_user, vendor.id)
+        payload = {
+            "vendorId": str(vendor.id),
+            "name": "Hijack Anonymous",
+            "briefId": str(anon_brief.id),
+        }
+        response = api_client.post(
+            "/api/v1/projects",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 403
+
     def test_get_nonexistent_project(self, api_client, vendor_user, vendor):
         """GET /projects/<random-uuid> should return 404."""
         headers = _auth_headers(vendor_user, "VENDOR")
