@@ -995,3 +995,222 @@ def test_process_brief_turn_injects_authenticated_auth_rule(
         "sign up" not in captured["system"].lower()
         or "Never tell" in captured["system"]
     )
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_injects_post_finalize_auth_rule(
+    client_user, client_profile, seeded_prompts
+):
+    """Finalized brief: AI must suggest Regenerate, not Finalize."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="en",
+        conversation_status="finalized",
+    )
+    user_msg = ChatMessage.objects.create(
+        brief=brief, user=client_user, role="user", content="rename to Acme"
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        return (
+            {"reply": "ok", "ready_to_finalize": False},
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        process_brief_turn(
+            brief=brief,
+            user_message="rename to Acme",
+            attachments=[],
+            history=[user_msg],
+        )
+
+    assert "ALREADY been finalized" in captured["system"]
+    assert "Regenerate package" in captured["system"]
+    assert "NEVER mention 'Finalize'" in captured["system"]
+
+
+@pytest.mark.django_db
+def test_client_start_stores_document_language_from_body(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """POST /start with documentLanguage persists it on the brief before task."""
+    brief = Brief.objects.create(client=client_profile)
+
+    task_mock = _TaskMock(task_id="task-lang-1")
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
+        return_value=task_mock,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_start", args=[brief.id]),
+            data=json.dumps({"message": "Hi", "documentLanguage": "ru"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 201
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"
+
+
+@pytest.mark.django_db
+def test_client_start_rejects_invalid_document_language(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    brief = Brief.objects.create(client=client_profile)
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_start", args=[brief.id]),
+        data=json.dumps({"message": "Hi", "documentLanguage": "fr"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_client_finalize_overrides_document_language(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """POST /finalize with documentLanguage overrides brief.document_language."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="ru",
+        conversation_status="ready_to_finalize",
+    )
+
+    task_mock = _TaskMock(task_id="task-lang-2")
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task.delay",
+        return_value=task_mock,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
+            data=json.dumps({"documentLanguage": "en"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.document_language == "en"
+
+
+@pytest.mark.django_db
+def test_client_finalize_without_body_keeps_document_language(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="ru",
+        conversation_status="ready_to_finalize",
+    )
+
+    task_mock = _TaskMock(task_id="task-lang-3")
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task.delay",
+        return_value=task_mock,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"
+
+
+@pytest.mark.django_db
+def test_generate_final_documents_uses_frozen_brief_language(
+    client_user, client_profile, seeded_prompts
+):
+    """generate_final_documents must strictly respect brief.document_language
+    even when the chat is in a different language."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import generate_final_documents
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="en",
+    )
+    ChatMessage.objects.create(
+        brief=brief,
+        user=client_user,
+        role="user",
+        content="Сделай бриф про фитнес-приложение, бюджет 50к рублей.",
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        parsed = {
+            "production_brief_html": "<h1>Brief</h1>",
+            "vendor_email_html": "<p>hi</p>",
+            "vendor_email_text": "hi",
+        }
+        return (
+            parsed,
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        generate_final_documents(brief=brief)
+
+    assert "Brief document language: English" in captured["system"]
+    assert "Russian" not in captured["system"].split("Market")[0]
+
+
+@pytest.mark.django_db
+def test_public_start_stores_document_language_from_body(
+    api_client, client_profile, seeded_prompts
+):
+    """POST /public/start also accepts documentLanguage, mirroring auth flow."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="tok-lang",
+    )
+    task_mock = _TaskMock(task_id="task-lang-4")
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
+        return_value=task_mock,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:public_brief_ai_start", args=[brief.id]),
+            data=json.dumps({"message": "Hi", "documentLanguage": "ru"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="tok-lang",
+        )
+    assert resp.status_code == 201
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"

@@ -137,7 +137,7 @@ def _build_language_rule(doc_language: str) -> str:
     )
 
 
-def _build_auth_rule(*, is_anonymous: bool) -> str:
+def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
     if is_anonymous:
         return (
             "=== USER AUTH CONTEXT ===\n"
@@ -146,6 +146,17 @@ def _build_auth_rule(*, is_anonymous: bool) -> str:
             "to sign up to finalize and download the full brief package. There is\n"
             "NO 'Finalize' button visible to anonymous users — never mention it.\n"
             "Use a clear sign-up CTA in the user's reply language.\n"
+        )
+    if is_finalized:
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user is signed in. The brief has ALREADY been finalized once and\n"
+            "the document package exists. The 'Finalize' button is gone — the\n"
+            "chat footer now shows 'Regenerate package' and 'Show package'.\n"
+            "If the user makes relevant changes, briefly confirm and invite them\n"
+            "to click 'Regenerate package' to rebuild the documents from the\n"
+            "updated chat. NEVER mention 'Finalize' — that action no longer\n"
+            "exists after the first finalization. Never tell the user to sign up.\n"
         )
     return (
         "=== USER AUTH CONTEXT ===\n"
@@ -314,7 +325,10 @@ def process_brief_turn(
         archetypes_body=archetypes_body,
         language_rule=_build_language_rule(doc_language),
         market_rule=_build_market_rule(doc_language),
-        auth_rule=_build_auth_rule(is_anonymous=brief.client_id is None),
+        auth_rule=_build_auth_rule(
+            is_anonymous=brief.client_id is None,
+            is_finalized=brief.conversation_status == "finalized",
+        ),
     )
 
     messages: list[dict[str, Any]] = [
@@ -445,11 +459,7 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
     finalization_body = _load_prompt_body("finalization_prompt")
     model = _model_for_prompt("finalization_prompt")
 
-    doc_language = brief.document_language or _resolve_language(
-        history[-1].content if history else "",
-        history[:-1],
-        fallback="",
-    )
+    doc_language = brief.document_language or "en"
 
     system_prompt = _build_system_prompt(
         main_body=main_body,

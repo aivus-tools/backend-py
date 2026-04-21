@@ -7,6 +7,7 @@ import logging
 import secrets
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from typing import Any
 
 import magic
 from celery.result import AsyncResult
@@ -99,6 +100,30 @@ def _validate_message(body) -> tuple[str | None, JsonResponse | None]:
     if len(message) > MAX_MESSAGE_LENGTH:
         return None, JsonResponse({"error": "Message too long"}, status=400)
     return message, None
+
+
+SUPPORTED_DOC_LANGUAGES = {"en", "ru"}
+
+
+def _parse_document_language(body) -> tuple[str | None, JsonResponse | None]:
+    """Pull `documentLanguage` from request body. Returns (language or None, error).
+
+    None means the caller did not supply the field — keep existing behaviour.
+    An empty/invalid value is a 400.
+    """
+    if not isinstance(body, dict) or "documentLanguage" not in body:
+        return None, None
+    raw = body.get("documentLanguage")
+    if not isinstance(raw, str):
+        return None, JsonResponse(
+            {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
+        )
+    normalised = raw.lower()
+    if normalised not in SUPPORTED_DOC_LANGUAGES:
+        return None, JsonResponse(
+            {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
+        )
+    return normalised, None
 
 
 def _parse_attachment_ids(body) -> list[str]:
@@ -405,6 +430,10 @@ def client_brief_ai_start(request, brief_id):
     if error or message is None:
         return error or JsonResponse({"error": "Message is required"}, status=400)
 
+    document_language, error = _parse_document_language(body)
+    if error:
+        return error
+
     user = User.objects.filter(id=request.user_data["id"]).first()
     if not user:
         return JsonResponse({"error": "User not found"}, status=401)
@@ -418,7 +447,10 @@ def client_brief_ai_start(request, brief_id):
             role="user",
             content=message,
         )
-        Brief.objects.filter(id=brief.id).update(message_count=F("message_count") + 1)
+        update_kwargs: dict[str, Any] = {"message_count": F("message_count") + 1}
+        if document_language:
+            update_kwargs["document_language"] = document_language
+        Brief.objects.filter(id=brief.id).update(**update_kwargs)
 
         if attachment_ids:
             BriefAttachment.objects.filter(
@@ -746,6 +778,18 @@ def client_brief_ai_finalize(request, brief_id):
             status=429,
         )
 
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        body = {}
+    if isinstance(body, dict):
+        document_language, error = _parse_document_language(body)
+        if error:
+            return error
+        if document_language and document_language != brief.document_language:
+            brief.document_language = document_language
+            brief.save(update_fields=["document_language", "updated_at"])
+
     task = finalize_brief_task.delay(str(brief.id))
     return JsonResponse({"taskId": task.id})
 
@@ -961,6 +1005,10 @@ def public_brief_ai_start(request, brief_id):
     if error or message is None:
         return error or JsonResponse({"error": "Message is required"}, status=400)
 
+    document_language, error = _parse_document_language(body)
+    if error:
+        return error
+
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
 
@@ -972,7 +1020,10 @@ def public_brief_ai_start(request, brief_id):
             role="user",
             content=message,
         )
-        Brief.objects.filter(id=brief.id).update(message_count=F("message_count") + 1)
+        update_kwargs: dict[str, Any] = {"message_count": F("message_count") + 1}
+        if document_language:
+            update_kwargs["document_language"] = document_language
+        Brief.objects.filter(id=brief.id).update(**update_kwargs)
 
         if attachment_ids:
             BriefAttachment.objects.filter(
