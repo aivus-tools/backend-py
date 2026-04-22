@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Подтвердите email</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        line-height: 1.6;
+        color: #333;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .container {
+        background-color: #ffffff;
+        border-radius: 8px;
+        padding: 40px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+
+      h1 {
+        color: #2563eb;
+        font-size: 24px;
+        margin-bottom: 20px;
+      }
+
+      p {
+        margin-bottom: 16px;
+        color: #4b5563;
+      }
+
+      .button {
+        display: inline-block;
+        padding: 12px 24px;
+        background-color: #2563eb;
+        color: #ffffff !important;
+        text-decoration: none;
+        border-radius: 6px;
+        font-weight: 600;
+        margin: 20px 0;
+      }
+
+      .button:hover {
+        background-color: #1d4ed8;
+      }
+
+      .footer {
+        margin-top: 40px;
+        padding-top: 20px;
+        border-top: 1px solid #e5e7eb;
+        font-size: 14px;
+        color: #6b7280;
+      }
+
+      .code {
+        background-color: #f3f4f6;
+        padding: 12px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 14px;
+        margin: 16px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Добро пожаловать в Aivus! 👋</h1>
+      <p>Привет, {{ user.name }}!</p>
+      <p>Спасибо за регистрацию. Подтверди email, нажав на кнопку ниже:</p>
+      <a href="{{ confirmation_url }}" class="button">Подтвердить email</a>
+      <p>Или скопируй ссылку в браузер:</p>
+      <div class="code">{{ confirmation_url }}</div>
+      <p>Ссылка действительна 24 часа.</p>
+      <div class="footer">
+        <p>Если ты не регистрировался в Aivus, просто проигнорируй это письмо.</p>
+        <p>
+          <strong>Команда Aivus</strong>
+          <br />
+          <a href="{{ frontend_url }}">{{ frontend_url }}</a>
+        </p>
+      </div>
+    </div>
+  </body>
+</html>

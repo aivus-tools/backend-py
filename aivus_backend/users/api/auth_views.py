@@ -20,8 +20,10 @@ from django.views.decorators.http import require_http_methods
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.users.emails import send_confirmation_email
 from aivus_backend.users.emails import send_password_reset_email
+from aivus_backend.users.i18n import resolve_language
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
+from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.tokens import AuthToken
 from aivus_backend.users.tokens import TokenType
@@ -123,7 +125,7 @@ def _try_claim_pending_brief(user):
 @require_http_methods(["POST"])
 @public_endpoint
 @ratelimit(key="ip", rate="5/m", method="POST", block=True)
-def register(request):  # noqa: C901, PLR0912
+def register(request):  # noqa: C901, PLR0912, PLR0915
     """
     Register a new user.
 
@@ -149,7 +151,8 @@ def register(request):  # noqa: C901, PLR0912
                 status=400,
             )
 
-        if User.objects.filter(email=email).exists():
+        existing = User.objects.all_with_deleted().filter(email=email).first()
+        if existing and not existing.is_deleted:
             return JsonResponse({"error": "Email already exists"}, status=400)
 
         if is_google:
@@ -171,12 +174,34 @@ def register(request):  # noqa: C901, PLR0912
 
         group = "CONFIRMED" if is_google else "UNCONFIRMED"
 
-        user = User.objects.create(
-            email=email,
-            name=name,
-            password=hashed_password,
-            auth_type=auth_type,
-            group=group,
+        language = resolve_language(
+            data.get("language"),
+            request.META.get("HTTP_ACCEPT_LANGUAGE"),
+        )
+
+        if existing and existing.is_deleted:
+            existing.name = name
+            existing.password = hashed_password
+            existing.auth_type = auth_type
+            existing.group = group
+            existing.deleted_at = None
+            existing.pending_brief_id = None
+            existing.pending_brief_token = None
+            existing.save()
+            user = existing
+            logger.info("Restored soft-deleted user %s", user.email)
+        else:
+            user = User.objects.create(
+                email=email,
+                name=name,
+                password=hashed_password,
+                auth_type=auth_type,
+                group=group,
+            )
+
+        UserSettings.objects.update_or_create(
+            user=user,
+            defaults={"language": language},
         )
 
         _save_pending_brief(user, data)
