@@ -36,3 +36,10 @@ GOOGLE_CLOUD_LOCATION=global
 VERTEX_CREDENTIALS_PATH=/app/vertex-credentials.json
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
+
+# Email (Resend)
+# ------------------------------------------------------------------------------
+# Оставь пустым — письма пойдут в Mailpit (http://localhost:8025).
+# Вставь реальный ключ — письма пойдут через Resend на указанный адрес.
+RESEND_API_KEY=
+DJANGO_DEFAULT_FROM_EMAIL="Aivus <noreply@aivus.co>"

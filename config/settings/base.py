@@ -93,6 +93,7 @@ THIRD_PARTY_APPS = [
     "allauth.account",
     "allauth.mfa",
     "allauth.socialaccount",
+    "anymail",
     "django_celery_beat",
     "tinymce",
 ]
