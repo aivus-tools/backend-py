@@ -14,6 +14,43 @@ from .models import Vendor
 from .models import VendorSettings
 
 
+class DeletedStateFilter(admin.SimpleListFilter):
+    """Default to alive records; allow browsing soft-deleted ones explicitly."""
+
+    title = "state"
+    parameter_name = "state"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("alive", "Alive"),
+            ("deleted", "Deleted"),
+            ("all", "All"),
+        )
+
+    def choices(self, changelist):
+        yield {
+            "selected": self.value() is None or self.value() == "alive",
+            "query_string": changelist.get_query_string(remove=[self.parameter_name]),
+            "display": "Alive",
+        }
+        for lookup, title in (("deleted", "Deleted"), ("all", "All")):
+            yield {
+                "selected": self.value() == lookup,
+                "query_string": changelist.get_query_string(
+                    {self.parameter_name: lookup}
+                ),
+                "display": title,
+            }
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value == "deleted":
+            return queryset.filter(deleted_at__isnull=False)
+        if value == "all":
+            return queryset
+        return queryset.filter(deleted_at__isnull=True)
+
+
 @admin.register(User)
 class UserAdmin(ModelAdmin, auth_admin.UserAdmin):
     """User admin configuration."""
@@ -69,7 +106,14 @@ class UserAdmin(ModelAdmin, auth_admin.UserAdmin):
     search_fields = ["name", "email"]
     ordering = ["-created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
-    list_filter = ["group", "auth_type", "is_staff", "is_superuser", "is_active"]
+    list_filter = [
+        DeletedStateFilter,
+        "group",
+        "auth_type",
+        "is_staff",
+        "is_superuser",
+        "is_active",
+    ]
 
     def get_queryset(self, request):
         return self.model.objects.all_with_deleted()
