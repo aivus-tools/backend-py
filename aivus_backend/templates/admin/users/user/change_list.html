@@ -1,0 +1,314 @@
+{% extends "admin/change_list.html" %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.1/dist/apexcharts.min.js"></script>
+{% endblock %}
+{% block content %}
+  {% if user_stats %}
+    {{ user_stats.daily|json_script:"user-stats-daily" }}
+    {{ user_stats.by_group|json_script:"user-stats-by-group" }}
+    {{ user_stats.by_auth|json_script:"user-stats-by-auth" }}
+    <div class="user-stats-dashboard">
+      <div class="user-stats-kpis">
+        <div class="user-stats-card">
+          <div class="user-stats-card-label">Total alive</div>
+          <div class="user-stats-card-value">{{ user_stats.total }}</div>
+          <div class="user-stats-card-sub">Soft-deleted: {{ user_stats.deleted }}</div>
+        </div>
+        <div class="user-stats-card">
+          <div class="user-stats-card-label">New · 7d</div>
+          <div class="user-stats-card-value">{{ user_stats.new_7d }}</div>
+          <div class="user-stats-card-sub {% if user_stats.growth_7d >= 0 %}is-up{% else %}is-down{% endif %}">
+            {% if user_stats.growth_7d >= 0 %}
+              ▲
+            {% else %}
+              ▼
+            {% endif %}
+            {{ user_stats.growth_7d }}% vs. prev 7d
+          </div>
+        </div>
+        <div class="user-stats-card">
+          <div class="user-stats-card-label">New · 30d</div>
+          <div class="user-stats-card-value">{{ user_stats.new_30d }}</div>
+          <div class="user-stats-card-sub">Rolling window</div>
+        </div>
+        <div class="user-stats-card">
+          <div class="user-stats-card-label">Active · 7d</div>
+          <div class="user-stats-card-value">{{ user_stats.active_7d }}</div>
+          <div class="user-stats-card-sub">Logged in last 7 days</div>
+        </div>
+      </div>
+      <div class="user-stats-charts">
+        <div class="user-stats-chart-block user-stats-chart-main">
+          <div class="user-stats-chart-title">New users · last 30 days</div>
+          <div id="user-stats-chart-daily"></div>
+        </div>
+        <div class="user-stats-chart-block">
+          <div class="user-stats-chart-title">By role</div>
+          <div id="user-stats-chart-group"></div>
+        </div>
+        <div class="user-stats-chart-block">
+          <div class="user-stats-chart-title">By auth type</div>
+          <div id="user-stats-chart-auth"></div>
+        </div>
+      </div>
+    </div>
+    <style>
+      .user-stats-dashboard {
+        margin: 0 0 24px 0;
+        padding: 20px;
+        background: #ffffff;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 12px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      }
+
+      .dark .user-stats-dashboard,
+      html.dark .user-stats-dashboard {
+        background: #0f172a;
+        border-color: rgba(148, 163, 184, 0.18);
+      }
+
+      .user-stats-kpis {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+
+      .user-stats-card {
+        padding: 14px 16px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 10px;
+        background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
+      }
+
+      html.dark .user-stats-card {
+        background: #1e293b;
+        border-color: rgba(148, 163, 184, 0.18);
+      }
+
+      .user-stats-card-label {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #64748b;
+      }
+
+      .user-stats-card-value {
+        font-size: 28px;
+        font-weight: 700;
+        color: #0f172a;
+        line-height: 1.2;
+        margin-top: 4px;
+      }
+
+      html.dark .user-stats-card-value {
+        color: #f1f5f9;
+      }
+
+      .user-stats-card-sub {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #94a3b8;
+      }
+
+      .user-stats-card-sub.is-up {
+        color: #16a34a;
+      }
+
+      .user-stats-card-sub.is-down {
+        color: #dc2626;
+      }
+
+      .user-stats-charts {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr;
+        gap: 16px;
+      }
+
+      @media (max-width: 1100px) {
+        .user-stats-charts {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .user-stats-chart-block {
+        padding: 14px 16px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 10px;
+        background: #ffffff;
+      }
+
+      html.dark .user-stats-chart-block {
+        background: #1e293b;
+        border-color: rgba(148, 163, 184, 0.18);
+      }
+
+      .user-stats-chart-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #334155;
+        margin-bottom: 8px;
+      }
+
+      html.dark .user-stats-chart-title {
+        color: #cbd5e1;
+      }
+    </style>
+    <script>
+      (function() {
+        if (typeof ApexCharts === 'undefined') {
+          return;
+        }
+
+        const daily = JSON.parse(document.getElementById('user-stats-daily').textContent);
+        const byGroup = JSON.parse(document.getElementById('user-stats-by-group').textContent);
+        const byAuth = JSON.parse(document.getElementById('user-stats-by-auth').textContent);
+
+        const accent = '#7c3aed';
+        const palette = ['#7c3aed', '#fd8258', '#ff5c9c', '#22c55e', '#0ea5e9', '#facc15', '#94a3b8'];
+
+        new ApexCharts(document.querySelector('#user-stats-chart-daily'), {
+          chart: {
+            type: 'area',
+            height: 260,
+            toolbar: {
+              show: false
+            },
+            animations: {
+              enabled: false
+            },
+            fontFamily: 'inherit'
+          },
+          series: [{
+            name: 'New users',
+            data: daily.map(x => x.count)
+          }],
+          xaxis: {
+            type: 'datetime',
+            categories: daily.map(x => x.date),
+            labels: {
+              style: {
+                colors: '#64748b',
+                fontSize: '11px'
+              }
+            },
+            axisBorder: {
+              show: false
+            },
+            axisTicks: {
+              show: false
+            }
+          },
+          yaxis: {
+            labels: {
+              style: {
+                colors: '#64748b',
+                fontSize: '11px'
+              }
+            },
+            min: 0,
+            forceNiceScale: true
+          },
+          colors: [accent],
+          stroke: {
+            curve: 'smooth',
+            width: 2
+          },
+          fill: {
+            type: 'gradient',
+            gradient: {
+              opacityFrom: 0.35,
+              opacityTo: 0.05,
+              stops: [0, 95]
+            }
+          },
+          dataLabels: {
+            enabled: false
+          },
+          grid: {
+            borderColor: 'rgba(148, 163, 184, 0.18)',
+            strokeDashArray: 4
+          },
+          tooltip: {
+            x: {
+              format: 'MMM dd'
+            }
+          }
+        }).render();
+
+        if (byGroup.length) {
+          new ApexCharts(document.querySelector('#user-stats-chart-group'), {
+            chart: {
+              type: 'donut',
+              height: 260,
+              fontFamily: 'inherit'
+            },
+            series: byGroup.map(x => x.count),
+            labels: byGroup.map(x => x.label),
+            colors: palette,
+            stroke: {
+              width: 0
+            },
+            legend: {
+              position: 'bottom',
+              fontSize: '11px',
+              labels: {
+                colors: '#64748b'
+              }
+            },
+            plotOptions: {
+              pie: {
+                donut: {
+                  size: '68%'
+                }
+              }
+            },
+            dataLabels: {
+              enabled: true,
+              formatter: (val) => Math.round(val) + '%'
+            }
+          }).render();
+        }
+
+        if (byAuth.length) {
+          new ApexCharts(document.querySelector('#user-stats-chart-auth'), {
+            chart: {
+              type: 'donut',
+              height: 260,
+              fontFamily: 'inherit'
+            },
+            series: byAuth.map(x => x.count),
+            labels: byAuth.map(x => x.label),
+            colors: palette.slice().reverse(),
+            stroke: {
+              width: 0
+            },
+            legend: {
+              position: 'bottom',
+              fontSize: '11px',
+              labels: {
+                colors: '#64748b'
+              }
+            },
+            plotOptions: {
+              pie: {
+                donut: {
+                  size: '68%'
+                }
+              }
+            },
+            dataLabels: {
+              enabled: true,
+              formatter: (val) => Math.round(val) + '%'
+            }
+          }).render();
+        }
+      })();
+    </script>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}
