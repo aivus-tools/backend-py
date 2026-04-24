@@ -24,6 +24,7 @@ from typing import Any
 
 from django.conf import settings
 
+from aivus_backend.core.llm import FALLBACK_CHAIN
 from aivus_backend.core.llm import LLMResponse
 from aivus_backend.core.llm import call_llm
 from aivus_backend.core.llm import call_llm_json
@@ -150,13 +151,15 @@ def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
     if is_finalized:
         return (
             "=== USER AUTH CONTEXT ===\n"
-            "The user is signed in. The brief has ALREADY been finalized once and\n"
-            "the document package exists. The 'Finalize' button is gone — the\n"
-            "chat footer now shows 'Regenerate package' and 'Show package'.\n"
-            "If the user makes relevant changes, briefly confirm and invite them\n"
-            "to click 'Regenerate package' to rebuild the documents from the\n"
-            "updated chat. NEVER mention 'Finalize' — that action no longer\n"
-            "exists after the first finalization. Never tell the user to sign up.\n"
+            "The user is signed in. The brief has ALREADY been finalized and\n"
+            "the document package exists. You apply targeted edits to the\n"
+            "documents directly via your own tools — the user does NOT need to\n"
+            "press any button for your edits to take effect. Never tell the\n"
+            "user to click 'Regenerate', 'Finalize', or any other UI button to\n"
+            "apply your changes. If the user asks for a full rebuild of the\n"
+            "whole package from scratch, say plainly that a full rebuild is a\n"
+            "separate action available in the interface and return no edits;\n"
+            "do not name the button. Never tell the user to sign up.\n"
         )
     return (
         "=== USER AUTH CONTEXT ===\n"
@@ -501,8 +504,10 @@ Rules:
 - Preserve existing HTML structure and classes. Do not strip inline tags.
 - Match the document language. The document language is frozen; translate
   user-provided replacements into it if needed.
-- If the user changed their mind or asks for a full regeneration, tell them
-  to use the "Regenerate package" button and return `edits: []`.
+- Never tell the user to click any button. Your edits apply automatically.
+  If the user asks for a full rebuild of the whole package from scratch,
+  reply plainly that a full rebuild is a separate action in the interface
+  (without naming the button) and return `edits: []`.
 - If you cannot find what the user referenced, return `edits: []` and ask
   a clarifying question in `reply`.
 """.strip()
@@ -736,12 +741,37 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
         }
     )
 
-    parsed, response = call_llm_json(
-        model=model,
-        messages=messages,
-        temperature=FINALIZATION_TEMPERATURE,
-        max_tokens=FINALIZATION_MAX_TOKENS,
-    )
+    parsed: Any = None
+    response: LLMResponse | None = None
+    last_error: Exception | None = None
+    models_to_try = [model]
+    fallback = FALLBACK_CHAIN.get(model)
+    while fallback and fallback not in models_to_try:
+        models_to_try.append(fallback)
+        fallback = FALLBACK_CHAIN.get(fallback)
+    for attempt_model in models_to_try:
+        try:
+            parsed, response = call_llm_json(
+                model=attempt_model,
+                messages=messages,
+                temperature=FINALIZATION_TEMPERATURE,
+                max_tokens=FINALIZATION_MAX_TOKENS,
+            )
+            break
+        except ValueError as exc:
+            logger.warning(
+                "Finalization JSON parse failed: model=%s brief=%s err=%s",
+                attempt_model,
+                brief.id,
+                exc,
+            )
+            last_error = exc
+            parsed = None
+            response = None
+
+    if response is None or parsed is None:
+        msg = "Finalization failed: all models returned invalid JSON"
+        raise last_error or ValueError(msg)
 
     if isinstance(parsed, list):
         parsed = next(

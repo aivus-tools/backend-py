@@ -10,6 +10,7 @@ from aivus_backend.projects.ai_brief_v3 import generate_brief_title
 from aivus_backend.projects.ai_brief_v3 import generate_final_documents
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.api.serializers import serialize_brief_v3
+from aivus_backend.projects.api.serializers import serialize_brief_v3_detail
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import ChatMessage
@@ -191,4 +192,4 @@ def finalize_brief_task(brief_id: str) -> dict:
             "feedback_request message creation failed brief_id=%s", brief.id
         )
 
-    return serialize_brief_v3(brief)
+    return serialize_brief_v3_detail(brief)
