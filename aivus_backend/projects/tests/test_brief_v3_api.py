@@ -1001,7 +1001,7 @@ def test_process_brief_turn_injects_authenticated_auth_rule(
 def test_process_brief_turn_injects_post_finalize_auth_rule(
     client_user, client_profile, seeded_prompts
 ):
-    """Finalized brief: AI must suggest Regenerate, not Finalize."""
+    """Finalized brief: AI applies edits via tools and never suggests UI buttons."""
     from aivus_backend.core.llm import LLMResponse
     from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 
@@ -1044,9 +1044,13 @@ def test_process_brief_turn_injects_post_finalize_auth_rule(
             history=[user_msg],
         )
 
-    assert "ALREADY been finalized" in captured["system"]
-    assert "Regenerate package" in captured["system"]
-    assert "NEVER mention 'Finalize'" in captured["system"]
+    system_prompt = captured["system"]
+    assert "ALREADY been finalized" in system_prompt
+    # Agent must apply edits automatically via its own tools and never tell
+    # the user to click any UI button (including Regenerate/Finalize).
+    assert "targeted edits" in system_prompt
+    assert "Never tell the\nuser to click" in system_prompt
+    assert "do not name the button" in system_prompt
 
 
 @pytest.mark.django_db
