@@ -832,17 +832,18 @@ def test_finalized_status_is_sticky_after_followup_chat(
 
     fake_result = {
         "reply": "thanks for the follow-up",
-        "ready_to_finalize": True,
-        "conversation_status": "ready_to_finalize",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
         "document_language": "en",
         "input_tokens": 10,
         "output_tokens": 5,
         "cost_usd": 0.0001,
         "model_used": "gemini-3.1-pro-preview",
         "traces": [],
+        "updated_documents": [],
     }
     with patch(
-        "aivus_backend.projects.api.views_brief_v3.process_brief_turn",
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
         return_value=fake_result,
     ):
         resp = api_client.post(
