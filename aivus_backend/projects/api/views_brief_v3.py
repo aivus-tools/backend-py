@@ -26,6 +26,7 @@ from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+from aivus_backend.projects.ai_brief_v3 import process_finalized_turn
 from aivus_backend.projects.api.serializers import serialize_brief_attachment
 from aivus_backend.projects.api.serializers import serialize_brief_feedback
 from aivus_backend.projects.api.serializers import serialize_brief_final_document
@@ -174,6 +175,7 @@ def _build_chat_response(
     assistant_message: ChatMessage,
     result: dict,
 ) -> dict:
+    updated = result.get("updated_documents") or []
     return {
         "reply": result["reply"],
         "messageId": str(assistant_message.id),
@@ -184,6 +186,7 @@ def _build_chat_response(
         "outputTokens": result["output_tokens"],
         "costUsd": str(Decimal(str(result["cost_usd"]))),
         "messageCount": brief.message_count,
+        "updatedDocuments": [serialize_brief_final_document(x) for x in updated],
     }
 
 
@@ -273,15 +276,25 @@ def _process_chat(
         )
     )
 
+    turn_runner = (
+        process_finalized_turn
+        if brief.conversation_status == "finalized"
+        else process_brief_turn
+    )
+
     try:
-        result = process_brief_turn(
+        result = turn_runner(
             brief=brief,
             user_message=message_text,
             attachments=attachments,
             history=history,
         )
     except Exception:
-        logger.exception("process_brief_turn failed: brief_id=%s", brief.id)
+        logger.exception(
+            "chat turn failed: brief_id=%s runner=%s",
+            brief.id,
+            turn_runner.__name__,
+        )
         return (
             None,
             None,

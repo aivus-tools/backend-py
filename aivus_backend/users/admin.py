@@ -58,11 +58,75 @@ class UserAdmin(ModelAdmin, auth_admin.UserAdmin):
         ),
         ("Aivus", {"fields": ("group", "auth_type")}),
     )
-    list_display = ["email", "name", "group", "is_superuser", "created_at"]
+    list_display = [
+        "email",
+        "name",
+        "group",
+        "is_superuser",
+        "created_at",
+        "deleted_at",
+    ]
     search_fields = ["name", "email"]
     ordering = ["-created_at"]
     readonly_fields = ["created_at", "updated_at", "deleted_at"]
     list_filter = ["group", "auth_type", "is_staff", "is_superuser", "is_active"]
+
+    def get_queryset(self, request):
+        return self.model.objects.all_with_deleted()
+
+    def get_deleted_objects(self, objs, request):
+        """Return soft-cascade preview bypassing Django's Collector.
+
+        Standard Collector trips over PROTECT on Client.owner / Vendor.owner
+        and Project.vendor. Here we skip real-delete checks because
+        User.delete() is soft and cascades via update(deleted_at=...).
+        Already soft-deleted children are excluded from the preview because
+        User.delete() is idempotent and will not touch them again.
+        """
+        user_ids = [user.id for user in objs]
+        clients_by_owner: dict = {}
+        for client in Client.objects.filter(
+            owner_id__in=user_ids,
+            deleted_at__isnull=True,
+        ):
+            clients_by_owner.setdefault(client.owner_id, []).append(client)
+        vendors_by_owner: dict = {}
+        for vendor in Vendor.objects.filter(
+            owner_id__in=user_ids,
+            deleted_at__isnull=True,
+        ):
+            vendors_by_owner.setdefault(vendor.owner_id, []).append(vendor)
+
+        to_delete: list[str] = []
+        model_count: dict[str, int] = {}
+        user_label = str(User._meta.verbose_name_plural or "")  # noqa: SLF001
+        client_label = str(Client._meta.verbose_name_plural or "")  # noqa: SLF001
+        vendor_label = str(Vendor._meta.verbose_name_plural or "")  # noqa: SLF001
+        for user in objs:
+            to_delete.append(f"User: {user.email or user.id}")
+            model_count[user_label] = model_count.get(user_label, 0) + 1
+
+            clients = clients_by_owner.get(user.id, [])
+            to_delete.extend(f"— Client: {client.name}" for client in clients)
+            if clients:
+                model_count[client_label] = model_count.get(client_label, 0) + len(
+                    clients
+                )
+
+            vendors = vendors_by_owner.get(user.id, [])
+            to_delete.extend(f"— Vendor: {vendor.name}" for vendor in vendors)
+            if vendors:
+                model_count[vendor_label] = model_count.get(vendor_label, 0) + len(
+                    vendors
+                )
+        return to_delete, model_count, set(), []
+
+    def delete_model(self, request, obj):
+        obj.delete()
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            obj.delete()
 
 
 @admin.register(Client)

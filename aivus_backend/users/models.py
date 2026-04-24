@@ -83,9 +83,68 @@ class User(AbstractUser):
         return reverse("users:detail", kwargs={"pk": self.id})
 
     def delete(self, using=None, keep_parents=False):  # noqa: FBT002
-        """Soft delete the user by setting deleted_at timestamp."""
-        self.deleted_at = timezone.now()
-        self.save(update_fields=("deleted_at",))
+        """Soft delete the user and cascade soft-delete to owned entities.
+
+        Owned Clients, Vendors, their Projects, Offers, Briefs and Shares
+        are marked deleted_at=now. Hard-cascade relations (UserTeam,
+        UserSettings) stay; AuthTokens are hard-deleted to revoke access.
+        Idempotent: a second call on an already soft-deleted user is a no-op
+        so the original deletion timestamp is preserved for audit.
+        """
+        from django.db import transaction  # noqa: PLC0415
+
+        from aivus_backend.projects.models import Brief  # noqa: PLC0415
+        from aivus_backend.projects.models import Offer  # noqa: PLC0415
+        from aivus_backend.projects.models import Project  # noqa: PLC0415
+        from aivus_backend.projects.models import Share  # noqa: PLC0415
+
+        if self.deleted_at is not None:
+            return
+
+        now = timezone.now()
+        with transaction.atomic():
+            owned_vendor_ids = list(
+                Vendor.objects.filter(
+                    owner=self,
+                    deleted_at__isnull=True,
+                ).values_list("id", flat=True),
+            )
+            owned_client_ids = list(
+                Client.objects.filter(
+                    owner=self,
+                    deleted_at__isnull=True,
+                ).values_list("id", flat=True),
+            )
+
+            project_qs = Project.objects.filter(
+                models.Q(vendor_id__in=owned_vendor_ids)
+                | models.Q(client_id__in=owned_client_ids),
+                deleted_at__isnull=True,
+            )
+            project_ids = list(project_qs.values_list("id", flat=True))
+
+            Offer.objects.filter(
+                project_id__in=project_ids,
+                deleted_at__isnull=True,
+            ).update(deleted_at=now)
+            Share.objects.filter(
+                offer__project_id__in=project_ids,
+                deleted_at__isnull=True,
+            ).update(deleted_at=now)
+            project_qs.update(deleted_at=now)
+
+            Brief.objects.filter(
+                client_id__in=owned_client_ids,
+                deleted_at__isnull=True,
+            ).update(deleted_at=now)
+
+            Vendor.objects.filter(id__in=owned_vendor_ids).update(deleted_at=now)
+            Client.objects.filter(id__in=owned_client_ids).update(deleted_at=now)
+
+            self.auth_tokens.all().delete()
+
+            self.deleted_at = now
+            self.save(update_fields=("deleted_at",))
 
     def hard_delete(self, using=None, keep_parents=False):  # noqa: FBT002
         """Permanently delete the user from the database."""

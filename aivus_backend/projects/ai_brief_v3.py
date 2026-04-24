@@ -445,6 +445,256 @@ def _fallback_reply(doc_language: str) -> str:
     return "Sorry, I hit a small glitch — could you repeat your last message?"
 
 
+# ---------------------------------------------------------------------------
+# Post-finalize turn: targeted edits via virtual function calling
+# ---------------------------------------------------------------------------
+
+FINALIZED_EDIT_MAX_TOKENS = 4000
+FINALIZED_EDIT_TEMPERATURE = 0.3
+
+_EDITABLE_DOCUMENTS = {"production_brief", "vendor_email"}
+
+_FINALIZED_EDIT_INSTRUCTIONS_EN = """
+=== POST-FINALIZE EDIT MODE ===
+The brief has been finalized. Two documents exist: `production_brief` (HTML)
+and `vendor_email` (HTML). Their current texts are provided below in
+<CURRENT_DOCUMENTS>.
+
+Your job on every turn:
+1. If the user asks you to change something inside a document, return one or
+   more `edits` describing the exact change. DO NOT rewrite whole documents
+   unless the user explicitly asks for a full rewrite of a section.
+2. If the user is just chatting or asking questions, return `edits: []` and
+   answer naturally in `reply`.
+
+Available edit tools:
+- replace_text — replace an exact HTML fragment with a new one. Use for small
+  targeted changes (brand name, single sentence, a date). Field `find` MUST be
+  an exact substring of the current document HTML (case-sensitive, whitespace-
+  sensitive). If you cannot guarantee an exact unique match, use
+  rewrite_section instead.
+- rewrite_section — replace a whole section identified by its heading text.
+  Use when the user asks to redo or expand a specific block (e.g. "rewrite
+  the deliverables", "add more detail to audience"). Field `section_heading`
+  is the visible text of an H2 or H3 tag. The section spans from that heading
+  up to (but not including) the next heading of the same or higher level, or
+  the end of the document.
+
+Output STRICT JSON (no markdown fences). Schema:
+{
+  "reply": "short chat reply in the user's language, confirming what you did",
+  "edits": [
+    {
+      "tool": "replace_text" | "rewrite_section",
+      "document": "production_brief" | "vendor_email",
+      "find": "<exact HTML fragment>",       // only for replace_text
+      "replace": "<new HTML fragment>",      // only for replace_text
+      "section_heading": "<heading text>",   // only for rewrite_section
+      "new_html": "<new section HTML incl. heading>",  // only for rewrite_section
+      "reason": "one short phrase, optional"
+    }
+  ]
+}
+
+Rules:
+- Keep the rest of each document untouched. Only the diff you declare changes.
+- Preserve existing HTML structure and classes. Do not strip inline tags.
+- Match the document language. The document language is frozen; translate
+  user-provided replacements into it if needed.
+- If the user changed their mind or asks for a full regeneration, tell them
+  to use the "Regenerate package" button and return `edits: []`.
+- If you cannot find what the user referenced, return `edits: []` and ask
+  a clarifying question in `reply`.
+""".strip()
+
+
+def _build_finalized_edit_rule(doc_language: str) -> str:
+    return _FINALIZED_EDIT_INSTRUCTIONS_EN
+
+
+def _current_documents_block(documents: dict[str, BriefFinalDocument]) -> str:
+    chunks = ["<CURRENT_DOCUMENTS>"]
+    for kind in ("production_brief", "vendor_email"):
+        doc = documents.get(kind)
+        html = (doc.html if doc else "") or ""
+        chunks.append(f'<DOC kind="{kind}">')
+        chunks.append(html)
+        chunks.append("</DOC>")
+    chunks.append("</CURRENT_DOCUMENTS>")
+    return "\n".join(chunks)
+
+
+def _apply_replace_text(html: str, find: str, replace: str) -> tuple[str, bool]:
+    if not find:
+        return html, False
+    occurrences = html.count(find)
+    if occurrences != 1:
+        return html, False
+    return html.replace(find, replace, 1), True
+
+
+def _apply_rewrite_section(
+    html: str,
+    section_heading: str,
+    new_html: str,
+) -> tuple[str, bool]:
+    if not section_heading or not new_html:
+        return html, False
+    heading_pattern = re.compile(
+        r"<(h[1-6])\b[^>]*>\s*" + re.escape(section_heading.strip()) + r"\s*</\1>",
+        re.IGNORECASE,
+    )
+    match = heading_pattern.search(html)
+    if not match:
+        return html, False
+    level = int(match.group(1)[1])
+    start = match.start()
+    search_from = match.end()
+    next_heading_pattern = re.compile(
+        r"<h([1-" + str(level) + r"])\b[^>]*>",
+        re.IGNORECASE,
+    )
+    next_match = next_heading_pattern.search(html, search_from)
+    end = next_match.start() if next_match else len(html)
+    updated = html[:start] + new_html.strip() + html[end:]
+    return updated, True
+
+
+def _apply_edits(
+    documents: dict[str, BriefFinalDocument],
+    edits: list[dict[str, Any]],
+) -> list[BriefFinalDocument]:
+    """Apply edits to the in-memory document objects. Returns the list of
+    documents whose html actually changed, in stable order."""
+    changed: dict[str, BriefFinalDocument] = {}
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        document_kind = str(edit.get("document") or "").strip()
+        tool = str(edit.get("tool") or "").strip()
+        if document_kind not in _EDITABLE_DOCUMENTS:
+            continue
+        document = documents.get(document_kind)
+        if document is None:
+            continue
+
+        if tool == "replace_text":
+            updated, ok = _apply_replace_text(
+                document.html or "",
+                str(edit.get("find") or ""),
+                str(edit.get("replace") or ""),
+            )
+        elif tool == "rewrite_section":
+            updated, ok = _apply_rewrite_section(
+                document.html or "",
+                str(edit.get("section_heading") or ""),
+                str(edit.get("new_html") or ""),
+            )
+        else:
+            continue
+
+        if not ok or updated == document.html:
+            continue
+
+        document.html = sanitize_html(updated)
+        changed[document_kind] = document
+
+    return list(changed.values())
+
+
+def process_finalized_turn(
+    brief: Brief,
+    user_message: str,
+    attachments: list[BriefAttachment] | None = None,
+    history: list[ChatMessage] | None = None,
+) -> dict[str, Any]:
+    attachments = attachments or []
+    history = history or []
+
+    doc_language = brief.document_language or "en"
+
+    main_body = _load_prompt_body("main_system_prompt")
+    master_body = _load_prompt_body("master_brief_template")
+    archetypes_body = _load_prompt_body("archetypes_reference")
+    model = _model_for_prompt("main_system_prompt")
+
+    base_system_prompt = _build_system_prompt(
+        main_body=main_body,
+        master_template_body=master_body,
+        archetypes_body=archetypes_body,
+        language_rule=_build_language_rule(doc_language),
+        market_rule=_build_market_rule(doc_language),
+        auth_rule=_build_auth_rule(
+            is_anonymous=brief.client_id is None,
+            is_finalized=True,
+        ),
+    )
+    edit_rule = _build_finalized_edit_rule(doc_language)
+    system_prompt = f"{base_system_prompt}\n\n{edit_rule}"
+
+    document_qs = BriefFinalDocument.objects.filter(
+        brief=brief, kind__in=list(_EDITABLE_DOCUMENTS)
+    )
+    documents: dict[str, BriefFinalDocument] = {doc.kind: doc for doc in document_qs}
+
+    user_parts = _build_user_parts(user_message, attachments)
+    user_parts.append({"type": "text", "text": _current_documents_block(documents)})
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+    ]
+    messages.extend(_build_history_messages(history))
+    messages.append({"role": "user", "content": user_parts})
+
+    try:
+        parsed, response = call_llm_json(
+            model=model,
+            messages=messages,
+            temperature=FINALIZED_EDIT_TEMPERATURE,
+            max_tokens=FINALIZED_EDIT_MAX_TOKENS,
+        )
+    except ValueError:
+        logger.warning(
+            "Finalized JSON parse failed, plain fallback for brief %s", brief.id
+        )
+        response = call_llm(
+            model=model,
+            messages=messages,
+            temperature=FINALIZED_EDIT_TEMPERATURE,
+            max_tokens=FINALIZED_EDIT_MAX_TOKENS,
+            json_mode=False,
+        )
+        parsed = _salvage_reply(response.content)
+
+    if isinstance(parsed, list):
+        parsed = next((x for x in parsed if isinstance(x, dict) and x.get("reply")), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    reply = str(parsed.get("reply", "")).strip() or _fallback_reply(doc_language)
+    raw_edits = parsed.get("edits") or []
+    if not isinstance(raw_edits, list):
+        raw_edits = []
+
+    updated_documents = _apply_edits(documents, raw_edits)
+    for document in updated_documents:
+        document.plain_text = _strip_html(document.html)
+        document.save(update_fields=["html", "plain_text", "updated_at"])
+
+    return {
+        "reply": reply,
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": doc_language,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "cost_usd": response.cost_usd,
+        "model_used": response.model_used,
+        "traces": [_trace_entry("finalized_chat", response)],
+        "updated_documents": updated_documents,
+    }
+
+
 def generate_final_documents(brief: Brief) -> dict[str, Any]:
     history = list(
         brief.chat_messages.prefetch_related("attachments").order_by("created_at")
