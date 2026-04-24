@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.conf import settings
+from django.utils import timezone
 
 from aivus_backend.core.llm import FALLBACK_CHAIN
 from aivus_backend.core.llm import LLMResponse
@@ -129,13 +130,25 @@ def _language_name(code: str) -> str:
 
 def _build_language_rule(doc_language: str) -> str:
     name = _language_name(doc_language)
-    return (
+    code = (doc_language or "").lower()
+    rule = (
         "=== LANGUAGE & MARKET ===\n"
         f"Brief document language: {name} (frozen — never translate final brief).\n"
         "Reply language: match the user's latest message language, even if it differs\n"
         "from the brief document language. Section/brief text always stays in the\n"
         "frozen document language.\n"
     )
+    if code and code != "en":
+        rule += (
+            "The MASTER BRIEF TEMPLATE is provided in English for reference only. "
+            "In the final brief, translate ALL section headers, subsection titles, "
+            f"field labels, bracketed hints, and enum values into {name}. "
+            "No English words, phrases, or headings must remain in the final brief — "
+            f"the document must be entirely in {name}, ready to paste into a Word "
+            "file. Industry acronyms (SAG, AICP, IATSE, MSA, RTB, SMP, etc.) may "
+            f"stay in their original form when no natural {name} equivalent exists.\n"
+        )
+    return rule
 
 
 def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
@@ -188,6 +201,18 @@ def _build_market_rule(doc_language: str) -> str:
     return "Market context: infer from brief language (ru → RF/rubles, en → US/USD).\n"
 
 
+def _current_date_iso() -> str:
+    return timezone.now().date().isoformat()
+
+
+def _build_date_rule() -> str:
+    return (
+        f"Today's date is {_current_date_iso()}. "
+        "Use this date for any 'Current Date' or similar date fields in the brief. "
+        "Never substitute a year from training data."
+    )
+
+
 def _build_system_prompt(  # noqa: PLR0913
     main_body: str,
     master_template_body: str,
@@ -195,6 +220,7 @@ def _build_system_prompt(  # noqa: PLR0913
     language_rule: str,
     market_rule: str,
     auth_rule: str = "",
+    date_rule: str = "",
 ) -> str:
     parts = [main_body.strip()]
     if master_template_body.strip():
@@ -205,6 +231,8 @@ def _build_system_prompt(  # noqa: PLR0913
         parts.append(archetypes_body.strip())
     parts.append(language_rule.strip())
     parts.append(market_rule.strip())
+    if date_rule.strip():
+        parts.append(date_rule.strip())
     if auth_rule.strip():
         parts.append(auth_rule.strip())
     return "\n\n".join(parts)
@@ -332,6 +360,7 @@ def process_brief_turn(
             is_anonymous=brief.client_id is None,
             is_finalized=brief.conversation_status == "finalized",
         ),
+        date_rule=_build_date_rule(),
     )
 
     messages: list[dict[str, Any]] = [
@@ -633,6 +662,7 @@ def process_finalized_turn(
             is_anonymous=brief.client_id is None,
             is_finalized=True,
         ),
+        date_rule=_build_date_rule(),
     )
     edit_rule = _build_finalized_edit_rule(doc_language)
     system_prompt = f"{base_system_prompt}\n\n{edit_rule}"
@@ -722,6 +752,14 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
         archetypes_body=archetypes_body,
         language_rule=_build_language_rule(doc_language),
         market_rule=_build_market_rule(doc_language),
+        date_rule=_build_date_rule(),
+    )
+
+    finalization_text = finalization_body.strip() or "Please finalize the brief now."
+    finalization_text = (
+        f"Today's date is {_current_date_iso()}. "
+        "Use this date for the 'Current Date' field in the brief.\n\n"
+        f"{finalization_text}"
     )
 
     messages: list[dict[str, Any]] = [
@@ -734,8 +772,7 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": finalization_body.strip()
-                    or "Please finalize the brief now.",
+                    "text": finalization_text,
                 }
             ],
         }
