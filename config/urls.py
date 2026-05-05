@@ -53,6 +53,8 @@ urlpatterns = [
     path(
         "api/v1/", include("aivus_backend.projects.api.urls", namespace="projects_api")
     ),
+    # Vendors API (pre-vendors)
+    path("api/v1/", include("aivus_backend.vendors.api.urls", namespace="vendors_api")),
     # TinyMCE
     path("tinymce/", include("tinymce.urls")),
     # Your stuff: custom urls includes go here

@@ -104,3 +104,10 @@ class BriefPromptSlug(models.TextChoices):
 class UnitDimension(models.TextChoices):
     QUANTITY = "QUANTITY", "Quantity"
     TEMPORAL = "TEMPORAL", "Temporal"
+
+
+class Language(models.TextChoices):
+    """Supported content languages."""
+
+    EN = "en", "English"
+    RU = "ru", "Russian"

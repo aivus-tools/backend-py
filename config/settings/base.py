@@ -101,6 +101,7 @@ LOCAL_APPS = [
     "aivus_backend.users",
     "aivus_backend.catalog",
     "aivus_backend.projects",
+    "aivus_backend.vendors",
     # Your stuff: custom apps go here
 ]
 # https://docs.djangoproject.com/en/dev/ref/settings/#installed-apps
