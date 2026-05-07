@@ -134,6 +134,11 @@ urlpatterns = [
         name="client_brief_ai_chat",
     ),
     path(
+        "client/briefs/ai/<uuid:brief_id>/transcribe",
+        views_brief_v3.client_brief_ai_chat_transcribe,
+        name="client_brief_ai_chat_transcribe",
+    ),
+    path(
         "client/briefs/ai/<uuid:brief_id>",
         views_brief_v3.client_brief_ai_detail,
         name="client_brief_ai_detail",
@@ -215,6 +220,11 @@ urlpatterns = [
         "public/briefs/ai/<uuid:brief_id>/chat",
         views_brief_v3.public_brief_ai_chat,
         name="public_brief_ai_chat",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/transcribe",
+        views_brief_v3.public_brief_ai_chat_transcribe,
+        name="public_brief_ai_chat_transcribe",
     ),
     path(
         "public/briefs/ai/<uuid:brief_id>/attachments",

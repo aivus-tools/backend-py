@@ -31,6 +31,9 @@ DJANGO_GCP_STORAGE_BUCKET_NAME=aivus-production-media
 # https://platform.openai.com/api-keys
 GOOGLE_CLOUD_PROJECT=pioneering-flag-476313-u2
 GOOGLE_CLOUD_LOCATION=global
+# Speech-to-Text (Vertex) — выровнено с GOOGLE_CLOUD_LOCATION (Vertex Gemini).
+GOOGLE_CLOUD_SPEECH_LOCATION=global
+STT_MODEL=short
 # Optional: separate service account JSON for Vertex AI.
 # If empty, Application Default Credentials are used (same SA as GCS storage).
 VERTEX_CREDENTIALS_PATH=/app/vertex-credentials.json

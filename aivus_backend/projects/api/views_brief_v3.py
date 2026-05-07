@@ -24,6 +24,7 @@ from django_ratelimit.decorators import ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.sanitize import sanitize_html
+from aivus_backend.projects import stt
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.ai_brief_v3 import process_finalized_turn
@@ -383,6 +384,91 @@ def _validate_attachment_file(
     return uploaded, None
 
 
+def _validate_audio_upload(
+    request,
+) -> tuple[UploadedFile | None, str | None, JsonResponse | None]:
+    uploaded = request.FILES.get("audio")
+    if not uploaded:
+        return None, None, JsonResponse({"error": "audio is required"}, status=400)
+
+    if uploaded.size > stt.MAX_AUDIO_BYTES:
+        return (
+            None,
+            None,
+            JsonResponse(
+                {"error": "Audio too large", "code": stt.ERROR_AUDIO_TOO_LARGE},
+                status=400,
+            ),
+        )
+
+    declared_mime = (uploaded.content_type or "").lower()
+    base_declared = declared_mime.split(";")[0].strip()
+    if (
+        declared_mime not in stt.ALLOWED_AUDIO_MIMES
+        and base_declared not in stt.ALLOWED_AUDIO_MIMES
+    ):
+        return (
+            None,
+            None,
+            JsonResponse(
+                {
+                    "error": f"Unsupported audio type: {declared_mime}",
+                    "code": stt.ERROR_UNSUPPORTED_FORMAT,
+                },
+                status=400,
+            ),
+        )
+
+    detected_mime = _sniff_mime(uploaded).lower()
+    base_detected = detected_mime.split(";")[0].strip()
+    if (
+        detected_mime
+        and detected_mime not in stt.ALLOWED_AUDIO_MIMES
+        and base_detected not in stt.ALLOWED_AUDIO_MIMES
+        and base_detected not in stt.AUDIO_SNIFF_VIDEO_ALIASES
+    ):
+        logger.warning(
+            "Audio MIME mismatch: declared=%s detected=%s",
+            declared_mime,
+            detected_mime,
+        )
+        return (
+            None,
+            None,
+            JsonResponse(
+                {
+                    "error": f"Audio content does not match type: {detected_mime}",
+                    "code": stt.ERROR_UNSUPPORTED_FORMAT,
+                },
+                status=400,
+            ),
+        )
+
+    return uploaded, declared_mime, None
+
+
+_TRANSCRIPTION_STATUS_MAP = {
+    stt.ERROR_UNSUPPORTED_FORMAT: 400,
+    stt.ERROR_AUDIO_TOO_LARGE: 400,
+    stt.ERROR_AUDIO_TOO_LONG: 400,
+    stt.ERROR_NO_SPEECH: 422,
+    stt.ERROR_QUOTA_EXCEEDED: 503,
+    stt.ERROR_INTERNAL: 500,
+}
+
+
+def _resolve_transcribe_language(request, brief: Brief) -> str:
+    raw = (request.POST.get("language") or "").strip().lower()
+    if raw in SUPPORTED_DOC_LANGUAGES:
+        return raw
+    return brief.document_language or "en"
+
+
+def _transcription_error_response(error: stt.TranscriptionError) -> JsonResponse:
+    status = _TRANSCRIPTION_STATUS_MAP.get(error.code, 500)
+    return JsonResponse({"error": str(error), "code": error.code}, status=status)
+
+
 # ---------------------------------------------------------------------------
 # Client endpoints
 # ---------------------------------------------------------------------------
@@ -678,6 +764,62 @@ def client_brief_ai_attachment_delete(request, brief_id, attachment_id):
         logger.exception("Failed to delete attachment file %s", attachment.id)
     attachment.delete()
     return JsonResponse({"deleted": True})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT")
+@conditional_ratelimit(key="user", rate="10/m", method="POST")
+def client_brief_ai_chat_transcribe(request, brief_id):
+    brief = _get_brief_for_client(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    if brief.total_cost_usd >= MAX_BRIEF_COST_USD:
+        return JsonResponse(
+            {
+                "error": "Brief AI cost limit reached",
+                "code": "cost_limit_reached",
+                "limitUsd": str(MAX_BRIEF_COST_USD),
+            },
+            status=429,
+        )
+
+    uploaded, declared_mime, error = _validate_audio_upload(request)
+    if error or uploaded is None or declared_mime is None:
+        return error or JsonResponse({"error": "audio is required"}, status=400)
+
+    audio_bytes = uploaded.read()
+    language = _resolve_transcribe_language(request, brief)
+    dynamic_hints, static_hints = stt.build_phrase_hints(brief, language)
+
+    try:
+        result = stt.transcribe_audio(
+            audio_bytes,
+            declared_mime,
+            language,
+            dynamic_hints,
+            static_hints,
+        )
+    except stt.TranscriptionError as ex:
+        logger.warning("STT auth failed: brief=%s code=%s", brief.id, ex.code)
+        return _transcription_error_response(ex)
+
+    logger.info(
+        "STT auth ok: brief=%s size=%s mime=%s hints=%s/%s",
+        brief.id,
+        len(audio_bytes),
+        declared_mime,
+        len(dynamic_hints),
+        len(static_hints),
+    )
+    return JsonResponse(
+        {
+            "text": result["text"],
+            "language": result["language"],
+            "model": result["model"],
+        },
+    )
 
 
 @csrf_exempt
@@ -1192,6 +1334,62 @@ def public_brief_ai_attachment_delete(request, brief_id, attachment_id):
         logger.exception("Failed to delete attachment file %s", attachment.id)
     attachment.delete()
     return JsonResponse({"deleted": True})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="10/m", method="POST")
+def public_brief_ai_chat_transcribe(request, brief_id):
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    if brief.total_cost_usd >= MAX_BRIEF_COST_USD:
+        return JsonResponse(
+            {
+                "error": "Brief AI cost limit reached",
+                "code": "cost_limit_reached",
+                "limitUsd": str(MAX_BRIEF_COST_USD),
+            },
+            status=429,
+        )
+
+    uploaded, declared_mime, error = _validate_audio_upload(request)
+    if error or uploaded is None or declared_mime is None:
+        return error or JsonResponse({"error": "audio is required"}, status=400)
+
+    audio_bytes = uploaded.read()
+    language = _resolve_transcribe_language(request, brief)
+    dynamic_hints, static_hints = stt.build_phrase_hints(brief, language)
+
+    try:
+        result = stt.transcribe_audio(
+            audio_bytes,
+            declared_mime,
+            language,
+            dynamic_hints,
+            static_hints,
+        )
+    except stt.TranscriptionError as ex:
+        logger.warning("STT public failed: brief=%s code=%s", brief.id, ex.code)
+        return _transcription_error_response(ex)
+
+    logger.info(
+        "STT public ok: brief=%s size=%s mime=%s hints=%s/%s",
+        brief.id,
+        len(audio_bytes),
+        declared_mime,
+        len(dynamic_hints),
+        len(static_hints),
+    )
+    return JsonResponse(
+        {
+            "text": result["text"],
+            "language": result["language"],
+            "model": result["model"],
+        },
+    )
 
 
 @csrf_exempt

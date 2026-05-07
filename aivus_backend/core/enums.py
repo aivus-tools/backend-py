@@ -99,6 +99,7 @@ class BriefPromptSlug(models.TextChoices):
     FINALIZATION = "finalization_prompt", "Finalization prompt"
     MASTER_BRIEF_TEMPLATE = "master_brief_template", "Master brief template"
     ARCHETYPES_REFERENCE = "archetypes_reference", "Archetypes reference"
+    STT_INDUSTRY_TERMS = "stt_industry_terms", "STT industry terms"
 
 
 class UnitDimension(models.TextChoices):
