@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_DURATION_SEC = 60
-STT_MODEL = os.environ.get("STT_MODEL", "chirp")
+STT_MODEL = os.environ.get("STT_MODEL", "short")
 
 ALLOWED_AUDIO_MIMES = frozenset(
     {
