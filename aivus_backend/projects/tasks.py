@@ -1,4 +1,5 @@
 import logging
+import time
 from decimal import Decimal
 
 from celery import shared_task
@@ -147,11 +148,27 @@ def finalize_brief_task(brief_id: str) -> dict:
             logger.warning("Brief not found for finalization: brief_id=%s", brief_id)
             return {"error": "Brief not found"}
 
+    started_at = time.monotonic()
     try:
         result = generate_final_documents(brief=brief)
     except Exception:
-        logger.exception("Brief finalization failed: brief_id=%s", brief_id)
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.exception(
+            "Brief finalization failed: brief_id=%s elapsed_ms=%s",
+            brief_id,
+            elapsed_ms,
+        )
         raise
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "Brief finalization done: brief_id=%s elapsed_ms=%s "
+        "input_tokens=%s output_tokens=%s cost_usd=%s",
+        brief_id,
+        elapsed_ms,
+        result.get("input_tokens"),
+        result.get("output_tokens"),
+        result.get("cost_usd"),
+    )
 
     with transaction.atomic():
         Brief.objects.filter(id=brief.id).update(

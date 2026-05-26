@@ -464,6 +464,16 @@ def _resolve_transcribe_language(request, brief: Brief) -> str:
     return brief.document_language or "en"
 
 
+def _parse_client_duration_ms(request) -> int:
+    raw = (request.POST.get("durationMs") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _transcription_error_response(error: stt.TranscriptionError) -> JsonResponse:
     status = _TRANSCRIPTION_STATUS_MAP.get(error.code, 500)
     return JsonResponse({"error": str(error), "code": error.code}, status=status)
@@ -791,6 +801,7 @@ def client_brief_ai_chat_transcribe(request, brief_id):
 
     audio_bytes = uploaded.read()
     language = _resolve_transcribe_language(request, brief)
+    duration_ms = _parse_client_duration_ms(request)
     dynamic_hints, static_hints = stt.build_phrase_hints(brief, language)
 
     try:
@@ -806,10 +817,14 @@ def client_brief_ai_chat_transcribe(request, brief_id):
         return _transcription_error_response(ex)
 
     logger.info(
-        "STT auth ok: brief=%s size=%s mime=%s hints=%s/%s",
+        "STT auth ok: brief=%s size=%s duration_ms=%s lang=%s mime=%s "
+        "chars=%s hints=%s/%s",
         brief.id,
         len(audio_bytes),
+        duration_ms,
+        language,
         declared_mime,
+        len(result["text"]),
         len(dynamic_hints),
         len(static_hints),
     )
@@ -1361,6 +1376,7 @@ def public_brief_ai_chat_transcribe(request, brief_id):
 
     audio_bytes = uploaded.read()
     language = _resolve_transcribe_language(request, brief)
+    duration_ms = _parse_client_duration_ms(request)
     dynamic_hints, static_hints = stt.build_phrase_hints(brief, language)
 
     try:
@@ -1376,10 +1392,14 @@ def public_brief_ai_chat_transcribe(request, brief_id):
         return _transcription_error_response(ex)
 
     logger.info(
-        "STT public ok: brief=%s size=%s mime=%s hints=%s/%s",
+        "STT public ok: brief=%s size=%s duration_ms=%s lang=%s mime=%s "
+        "chars=%s hints=%s/%s",
         brief.id,
         len(audio_bytes),
+        duration_ms,
+        language,
         declared_mime,
+        len(result["text"]),
         len(dynamic_hints),
         len(static_hints),
     )
@@ -1443,6 +1463,18 @@ def public_brief_ai_claim(request, brief_id):
     brief = Brief.objects.filter(id=brief_id).first()
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
-    return JsonResponse(
-        serialize_brief_v3_detail(brief, user=_get_request_user(request))
-    )
+
+    payload = serialize_brief_v3_detail(brief, user=_get_request_user(request))
+
+    if (
+        brief.conversation_status == "ready_to_finalize"
+        and brief.status != "COMPLETED"
+        and not brief.final_documents.exists()
+    ):
+        try:
+            task = finalize_brief_task.delay(str(brief.id))
+            payload["finalizingTaskId"] = task.id
+        except Exception:
+            logger.exception("Auto-finalize on claim failed brief_id=%s", brief.id)
+
+    return JsonResponse(payload)

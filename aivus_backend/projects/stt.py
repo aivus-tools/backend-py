@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_DURATION_SEC = 60
 STT_MODEL = os.environ.get("STT_MODEL", "short")
+STT_RECOGNIZER = os.environ.get("STT_RECOGNIZER", "_")
 
 ALLOWED_AUDIO_MIMES = frozenset(
     {
@@ -58,11 +59,16 @@ LANGUAGE_BCP47 = {
     "ru": "ru-RU",
 }
 
+# Languages for an explicit recognizer (e.g. chirp_3). "auto" lets chirp_3
+# detect the spoken language from 100+ supported languages; alternatively set a
+# small BCP-47 list (e.g. "en-US,ru-RU") to constrain detection. Ignored for the
+# synthetic "_" recognizer, which always uses the single language from the
+# request.
 STT_LANGUAGE_CODES = [
     x.strip()
-    for x in os.environ.get("STT_LANGUAGE_CODES", "en-US,ru-RU").split(",")
+    for x in os.environ.get("STT_LANGUAGE_CODES", "auto").split(",")
     if x.strip()
-]
+] or ["auto"]
 
 ERROR_UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
 ERROR_AUDIO_TOO_LARGE = "AUDIO_TOO_LARGE"
@@ -281,17 +287,29 @@ def _build_recognition_config(
 ) -> cloud_speech.RecognitionConfig:
     explicit, auto = _build_decoding_config(mime)
     config_kwargs: dict = {
-        "model": STT_MODEL,
-        "language_codes": [language_to_bcp47(language)],
         "features": cloud_speech.RecognitionFeatures(enable_automatic_punctuation=True),
     }
+    # With an explicit recognizer the model is baked into the recognizer
+    # resource (e.g. chirp_3 in a regional location). Passing model here would
+    # conflict; the synthetic "_" recognizer requires it inline. chirp_3 can
+    # auto-detect the spoken language, so we use STT_LANGUAGE_CODES (default
+    # "auto") instead of forcing the brief's document language.
+    if STT_RECOGNIZER == "_":
+        config_kwargs["model"] = STT_MODEL
+        config_kwargs["language_codes"] = [language_to_bcp47(language)]
+    else:
+        config_kwargs["language_codes"] = STT_LANGUAGE_CODES
     if explicit is not None:
         config_kwargs["explicit_decoding_config"] = explicit
     if auto is not None:
         config_kwargs["auto_decoding_config"] = auto
-    adaptation = _build_adaptation(dynamic_hints, static_hints)
-    if adaptation is not None:
-        config_kwargs["adaptation"] = adaptation
+    # Speech adaptation (phrase hints) is only supported by short/long/telephony
+    # models. chirp_3 rejects a request carrying adaptation with a 404, so apply
+    # phrase hints only for the synthetic "_" recognizer.
+    if STT_RECOGNIZER == "_":
+        adaptation = _build_adaptation(dynamic_hints, static_hints)
+        if adaptation is not None:
+            config_kwargs["adaptation"] = adaptation
     return cloud_speech.RecognitionConfig(**config_kwargs)
 
 
@@ -314,8 +332,11 @@ def _call_recognize(
     client = _get_speech_client()
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
     location = _resolve_location()
+    recognizer_path = (
+        f"projects/{project}/locations/{location}/recognizers/{STT_RECOGNIZER}"
+    )
     request = cloud_speech.RecognizeRequest(
-        recognizer=f"projects/{project}/locations/{location}/recognizers/_",
+        recognizer=recognizer_path,
         config=config,
         content=audio_bytes,
     )

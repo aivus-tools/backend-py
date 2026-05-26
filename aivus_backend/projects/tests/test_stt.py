@@ -210,6 +210,8 @@ def test_transcribe_audio_dev_fake_short_circuits(monkeypatch):
 def test_transcribe_audio_happy_path(mock_get_client, monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
     monkeypatch.delenv("STT_DEV_FAKE", raising=False)
+    monkeypatch.setattr(stt, "STT_RECOGNIZER", "_")
+    monkeypatch.setattr(stt, "STT_MODEL", "short")
     mock_client = MagicMock()
     mock_client.recognize.return_value = _make_response(["Hello world"])
     mock_get_client.return_value = mock_client
@@ -220,10 +222,34 @@ def test_transcribe_audio_happy_path(mock_get_client, monkeypatch):
     assert result["language"] == "en-US"
     request = mock_client.recognize.call_args.kwargs["request"]
     assert "test-project" in request.recognizer
-    assert request.config.model == stt.STT_MODEL
+    assert request.recognizer.endswith("/recognizers/_")
+    assert request.config.model == "short"
     assert request.config.language_codes == ["en-US"]
     phrases = request.config.adaptation.phrase_sets[0].inline_phrase_set.phrases
     assert {p.value for p in phrases} == {"Acme", "RFP"}
+
+
+@patch.object(stt, "_get_speech_client")
+def test_transcribe_audio_explicit_recognizer_chirp(mock_get_client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.delenv("STT_DEV_FAKE", raising=False)
+    monkeypatch.setattr(stt, "STT_RECOGNIZER", "aivus-chirp3-auto")
+    monkeypatch.setattr(stt, "STT_LANGUAGE_CODES", ["auto"])
+    mock_client = MagicMock()
+    mock_client.recognize.return_value = _make_response(["Привет мир"])
+    mock_get_client.return_value = mock_client
+
+    result = stt.transcribe_audio(b"abc", "audio/webm", "ru", ["Acme"], ["RFP"])
+
+    assert result["text"] == "Привет мир"
+    request = mock_client.recognize.call_args.kwargs["request"]
+    assert request.recognizer.endswith("/recognizers/aivus-chirp3-auto")
+    # model is baked into the explicit recognizer, not sent inline
+    assert request.config.model == ""
+    # chirp uses auto language detection from STT_LANGUAGE_CODES
+    assert request.config.language_codes == ["auto"]
+    # chirp rejects speech adaptation -> must not be attached
+    assert not request.config.adaptation.phrase_sets
 
 
 @patch.object(stt, "_get_speech_client")

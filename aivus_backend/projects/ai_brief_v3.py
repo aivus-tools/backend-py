@@ -134,9 +134,12 @@ def _build_language_rule(doc_language: str) -> str:
     rule = (
         "=== LANGUAGE & MARKET ===\n"
         f"Brief document language: {name} (frozen — never translate final brief).\n"
-        "Reply language: match the user's latest message language, even if it differs\n"
-        "from the brief document language. Section/brief text always stays in the\n"
-        "frozen document language.\n"
+        f"Reply language is {name}. ALWAYS write every reply in {name}, even if the\n"
+        f"user's message arrives in another language, mixes languages, or contains\n"
+        "only numbers, short acknowledgements, or transcribed text that looks like a\n"
+        f"different language. Never switch the reply language mid-conversation — the\n"
+        f"brief was started in {name} and stays in {name}. Section/brief text always\n"
+        "stays in the frozen document language.\n"
     )
     if code and code != "en":
         rule += (
@@ -157,9 +160,12 @@ def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
             "=== USER AUTH CONTEXT ===\n"
             "The user is browsing anonymously and has NOT signed up yet.\n"
             "When the brief is ready, briefly congratulate the user and ask them\n"
-            "to sign up to finalize and download the full brief package. There is\n"
-            "NO 'Finalize' button visible to anonymous users — never mention it.\n"
-            "Use a clear sign-up CTA in the user's reply language.\n"
+            "to sign up to receive the final package. There is NO 'Finalize'\n"
+            "button — never mention any button. Do NOT reveal the contents of\n"
+            "the future brief in chat: no excerpts, no field values, no preview\n"
+            "of the production brief, vendor email, or deliverables checklist.\n"
+            "The reply at this stage is a short congratulation plus a clear\n"
+            "sign-up CTA in the user's reply language. Nothing more.\n"
         )
     if is_finalized:
         return (
@@ -177,9 +183,11 @@ def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
     return (
         "=== USER AUTH CONTEXT ===\n"
         "The user is signed in.\n"
-        "When the brief is ready, briefly congratulate the user and ask them to\n"
-        "click the 'Finalize' button in the interface to generate the final\n"
-        "package. Never tell signed-in users to register or sign up.\n"
+        "When the brief is ready, briefly say so and tell the user the final\n"
+        "package is being generated right now — the system starts it\n"
+        "automatically. There is NO 'Finalize' button anywhere in the\n"
+        "interface; never instruct the user to click any button to begin\n"
+        "generation. Never tell signed-in users to register or sign up.\n"
     )
 
 
