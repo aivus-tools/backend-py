@@ -415,6 +415,7 @@ def serialize_brief_v3(brief: Brief, *, user=None) -> dict:
         "id": str(brief.id),
         "status": brief.status,
         "title": brief.title,
+        "contactEmail": brief.contact_email,
         "documentLanguage": brief.document_language,
         "conversationStatus": brief.conversation_status,
         "totalInputTokens": brief.total_input_tokens,

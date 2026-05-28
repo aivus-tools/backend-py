@@ -130,7 +130,7 @@ def test_client_start_after_draft_with_attachment(
 
     # 2. Upload attachment (bypass python-magic sniffing for simplicity)
     monkeypatch.setattr(
-        "aivus_backend.projects.api.views_brief_v3._sniff_mime",
+        "aivus_backend.projects.api.views_brief_v3.sniff_mime",
         lambda *_args, **_kw: "application/pdf",
     )
     pdf_bytes = b"%PDF-1.4\n% tiny pdf\n"
@@ -397,7 +397,7 @@ def test_attachment_mime_mismatch_rejected(
     brief = Brief.objects.create(client=client_profile)
     # Client claims PDF, but libmagic sniffs plain text.
     monkeypatch.setattr(
-        "aivus_backend.projects.api.views_brief_v3._sniff_mime",
+        "aivus_backend.projects.api.views_brief_v3.sniff_mime",
         lambda *_args, **_kw: "application/x-dosexec",
     )
     resp = api_client.post(

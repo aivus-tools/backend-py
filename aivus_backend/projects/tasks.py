@@ -3,6 +3,8 @@ import time
 from decimal import Decimal
 
 from celery import shared_task
+from django.conf import settings
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
 
@@ -12,6 +14,9 @@ from aivus_backend.projects.ai_brief_v3 import generate_final_documents
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.api.serializers import serialize_brief_v3
 from aivus_backend.projects.api.serializers import serialize_brief_v3_detail
+from aivus_backend.projects.attachments import MAX_ATTACHMENT_SIZE_BYTES
+from aivus_backend.projects.attachments import WIX_FILE_HOST_SUFFIXES
+from aivus_backend.projects.attachments import download_remote_file
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import ChatMessage
@@ -131,6 +136,58 @@ def generate_first_reply_task(brief_id: str) -> dict:
 
     brief.refresh_from_db()
     return serialize_brief_v3(brief)
+
+
+@shared_task(
+    soft_time_limit=120,
+    time_limit=180,
+    max_retries=1,
+)
+def import_wix_attachments_task(brief_id: str, file_specs: list[dict]) -> dict:
+    """Download files referenced by a Wix submission and attach them to the
+    brief's first user message. Failures on individual files are logged and
+    skipped so the follow-up first-reply task still runs."""
+    try:
+        brief = Brief.objects.get(id=brief_id)
+    except Brief.DoesNotExist:
+        logger.warning("Brief not found for Wix import: brief_id=%s", brief_id)
+        return {"imported": 0}
+
+    first_user_message = (
+        brief.chat_messages.filter(role="user").order_by("created_at").first()
+    )
+    if not first_user_message:
+        logger.warning("No user message for Wix import: brief_id=%s", brief_id)
+        return {"imported": 0}
+
+    extra_hosts = tuple(getattr(settings, "WIX_EXTRA_ALLOWED_HOSTS", []) or [])
+    allowed_hosts = WIX_FILE_HOST_SUFFIXES + extra_hosts
+
+    imported = 0
+    for spec in file_specs or []:
+        if not isinstance(spec, dict):
+            continue
+        url = spec.get("url") or ""
+        filename = (spec.get("filename") or "attachment")[:255]
+        downloaded = download_remote_file(
+            url,
+            allowed_host_suffixes=allowed_hosts,
+            max_bytes=MAX_ATTACHMENT_SIZE_BYTES,
+        )
+        if downloaded is None:
+            continue
+        data, mime = downloaded
+        BriefAttachment.objects.create(
+            brief=brief,
+            message=first_user_message,
+            file=ContentFile(data, name=filename),
+            filename=filename,
+            mime_type=mime,
+            size_bytes=len(data),
+        )
+        imported += 1
+
+    return {"imported": imported}
 
 
 @shared_task(

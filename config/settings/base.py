@@ -53,6 +53,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # ------------------------------------------------------------------------------
 HMAC_SECRET = env("HMAC_SECRET")
 API_KEY = env("API_KEY")
+# Shared secret for the Wix landing-form webhook. Empty disables the endpoint
+# (every request gets 401), so the integration is off until the secret is set.
+WIX_WEBHOOK_SECRET = env("WIX_WEBHOOK_SECRET", default="")
+# Extra host suffixes appended to the built-in Wix allow-list for the file
+# downloader. Intended for local development only — keep empty in production.
+WIX_EXTRA_ALLOWED_HOSTS = env.list("WIX_EXTRA_ALLOWED_HOSTS", default=[])
 
 # AIVUS BRIEF AI
 # ------------------------------------------------------------------------------

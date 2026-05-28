@@ -48,6 +48,8 @@ class Brief(models.Model):
     )
 
     title = models.CharField(max_length=255, blank=True, default="")
+    contact_email = models.CharField(max_length=254, blank=True, default="")
+    contact_name = models.CharField(max_length=255, blank=True, default="")
     document_language = models.CharField(max_length=10, blank=True, default="")
     conversation_status = models.CharField(
         max_length=20,

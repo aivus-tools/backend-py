@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import secrets
@@ -9,7 +10,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
 
-import magic
+from celery import chain
 from celery.result import AsyncResult
 from django.conf import settings
 from django.db import transaction
@@ -37,6 +38,9 @@ from aivus_backend.projects.api.serializers import serialize_brief_v3
 from aivus_backend.projects.api.serializers import serialize_brief_v3_detail
 from aivus_backend.projects.api.serializers import serialize_brief_v3_list_item
 from aivus_backend.projects.api.serializers import serialize_chat_message_v3
+from aivus_backend.projects.attachments import ALLOWED_MIME_TYPES
+from aivus_backend.projects.attachments import MAX_ATTACHMENT_SIZE_BYTES
+from aivus_backend.projects.attachments import sniff_mime
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
@@ -45,6 +49,7 @@ from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
+from aivus_backend.projects.tasks import import_wix_attachments_task
 from aivus_backend.projects.tasks import persist_message_traces
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
@@ -62,15 +67,6 @@ MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
 MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
 MAX_ATTACHMENTS_PER_BRIEF_ANON = 3
-MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024
-ALLOWED_MIME_TYPES = {
-    "application/pdf",
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/gif",
-    "text/plain",
-}
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 
 
@@ -333,23 +329,6 @@ def _process_chat(
     return assistant_message, result, None
 
 
-def _sniff_mime(uploaded) -> str:
-    """Detect MIME type from file contents via libmagic, not the client-declared
-    Content-Type. Rewinds the file pointer so the caller can still read it."""
-    try:
-        sample = uploaded.read(4096)
-    finally:
-        try:
-            uploaded.seek(0)
-        except Exception:
-            logger.exception("Cannot rewind uploaded file")
-    try:
-        return magic.from_buffer(sample, mime=True) or ""
-    except Exception:
-        logger.exception("magic.from_buffer failed")
-        return ""
-
-
 def _validate_attachment_file(
     request, limit_count: int, existing_count: int
 ) -> tuple[UploadedFile | None, JsonResponse | None]:
@@ -369,7 +348,7 @@ def _validate_attachment_file(
             {"error": f"Unsupported file type: {declared_mime}"}, status=400
         )
 
-    detected_mime = _sniff_mime(uploaded).lower()
+    detected_mime = sniff_mime(uploaded).lower()
     if detected_mime and detected_mime not in ALLOWED_MIME_TYPES:
         logger.warning(
             "Attachment MIME mismatch: declared=%s detected=%s",
@@ -419,7 +398,7 @@ def _validate_audio_upload(
             ),
         )
 
-    detected_mime = _sniff_mime(uploaded).lower()
+    detected_mime = sniff_mime(uploaded).lower()
     base_detected = detected_mime.split(";")[0].strip()
     if (
         detected_mime
@@ -1139,6 +1118,144 @@ def public_brief_share_document_pdf(request, token, document_id):
 # ---------------------------------------------------------------------------
 # Public (anonymous) endpoints
 # ---------------------------------------------------------------------------
+
+
+def _wix_str(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _collect_wix_files(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    files = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = _wix_str(item.get("url"))
+        if not url:
+            continue
+        filename = (
+            _wix_str(item.get("filename"))
+            or _wix_str(item.get("displayName"))
+            or "attachment"
+        )
+        files.append({"url": url, "filename": filename[:255]})
+    return files
+
+
+def _extract_wix_submission_text(submissions) -> str:
+    if not isinstance(submissions, list):
+        return ""
+    best = ""
+    for item in submissions:
+        if not isinstance(item, dict):
+            continue
+        value = _wix_str(item.get("value"))
+        if len(value) > len(best):
+            best = value
+    return best
+
+
+def _extract_wix_payload(body: dict) -> dict:
+    """Normalise both the compact Velo contract and the Wix Automation
+    submission payload into {email, name, message, files}."""
+    email = _wix_str(body.get("email"))
+    name = _wix_str(body.get("name"))
+    message = _wix_str(body.get("message"))
+    files = _collect_wix_files(body.get("files"))
+
+    contact = body.get("contact")
+    if isinstance(contact, dict):
+        if not email:
+            email = _wix_str(contact.get("email"))
+        if not name:
+            contact_name = contact.get("name")
+            if isinstance(contact_name, dict):
+                name = _wix_str(contact_name.get("first")) or _wix_str(
+                    contact_name.get("last")
+                )
+
+    if not message:
+        message = _wix_str(body.get("field:long_answer"))
+    if not message:
+        message = _extract_wix_submission_text(body.get("submissions"))
+
+    if not files:
+        files = _collect_wix_files(body.get("field:initial_files"))
+
+    return {"email": email, "name": name, "message": message, "files": files}
+
+
+def _verify_wix_secret(request) -> bool:
+    expected = getattr(settings, "WIX_WEBHOOK_SECRET", "")
+    if not expected:
+        return False
+    provided = request.headers.get("X-Aivus-Webhook-Secret", "")
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+def public_brief_ai_from_wix(request):
+    """Create an anonymous brief from a Wix landing form submission, remember the
+    contact email and start the first AI reply. Returns the public brief URL for
+    Wix to redirect the visitor to."""
+    if not _verify_wix_secret(request):
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+    if not isinstance(body, dict):
+        return JsonResponse({"error": "Invalid payload"}, status=400)
+
+    payload = _extract_wix_payload(body)
+
+    message, error = _validate_message(payload)
+    if error or message is None:
+        return error or JsonResponse({"error": "Message is required"}, status=400)
+
+    file_specs = payload["files"][:MAX_ATTACHMENTS_PER_BRIEF_ANON]
+    token = secrets.token_urlsafe(48)
+
+    with transaction.atomic():
+        brief = Brief.objects.create(
+            client=None,
+            anonymous_token=token,
+            contact_email=payload["email"][:254],
+            contact_name=payload["name"][:255],
+        )
+        ChatMessage.objects.create(
+            brief=brief,
+            user=None,
+            anonymous_token=token,
+            role="user",
+            content=message,
+        )
+        Brief.objects.filter(id=brief.id).update(message_count=F("message_count") + 1)
+
+    if file_specs:
+        async_result = chain(
+            import_wix_attachments_task.s(str(brief.id), file_specs),
+            generate_first_reply_task.si(str(brief.id)),
+        ).apply_async()
+        task_id = async_result.id
+    else:
+        task_id = generate_first_reply_task.delay(str(brief.id)).id
+
+    base_url = getattr(settings, "FRONTEND_URL", "https://go.aivus.co").rstrip("/")
+    brief_url = f"{base_url}/public-brief/{brief.id}?token={token}&taskId={task_id}"
+    return JsonResponse(
+        {
+            "briefId": str(brief.id),
+            "token": token,
+            "taskId": task_id,
+            "briefUrl": brief_url,
+        },
+        status=201,
+    )
 
 
 @csrf_exempt

@@ -202,6 +202,11 @@ urlpatterns = [
     ),
     # AI Brief V3 (public/anonymous)
     path(
+        "public/briefs/ai/from-wix",
+        views_brief_v3.public_brief_ai_from_wix,
+        name="public_brief_ai_from_wix",
+    ),
+    path(
         "public/briefs/ai/drafts",
         views_brief_v3.public_brief_ai_drafts,
         name="public_brief_ai_drafts",

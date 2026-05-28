@@ -69,7 +69,7 @@ def _audio_file(name="voice.webm", content=b"FAKEWEBM", mime="audio/webm"):
 
 def _patch_sniff_to(monkeypatch, mime: str) -> None:
     monkeypatch.setattr(
-        "aivus_backend.projects.api.views_brief_v3._sniff_mime",
+        "aivus_backend.projects.api.views_brief_v3.sniff_mime",
         lambda *_args, **_kw: mime,
     )
 

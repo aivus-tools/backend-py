@@ -17,6 +17,8 @@ CELERY_FLOWER_PASSWORD=admin123
 # ------------------------------------------------------------------------------
 HMAC_SECRET=local-hmac-secret-for-development
 API_KEY=local-api-key-for-development
+WIX_WEBHOOK_SECRET=local-dev-wix-secret
+WIX_EXTRA_ALLOWED_HOSTS=host.docker.internal
 
 DJANGO_DEBUG=True
 DEBUG=True
