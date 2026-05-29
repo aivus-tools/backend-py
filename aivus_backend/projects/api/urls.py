@@ -247,8 +247,8 @@ urlpatterns = [
         name="public_brief_ai_detail",
     ),
     path(
-        "public/briefs/ai/<uuid:brief_id>/claim",
-        views_brief_v3.public_brief_ai_claim,
-        name="public_brief_ai_claim",
+        "client/briefs/ai/<uuid:brief_id>/claim",
+        views_brief_v3.client_brief_ai_claim,
+        name="client_brief_ai_claim",
     ),
 ]

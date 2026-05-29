@@ -243,7 +243,7 @@ def test_claim_preserves_contact_email(api_client, wix_url, enable_webhook):
     from django.conf import settings
 
     claim_response = api_client.post(
-        reverse("projects_api:public_brief_ai_claim", args=[brief_id]),
+        reverse("projects_api:client_brief_ai_claim", args=[brief_id]),
         HTTP_X_API_KEY=settings.API_KEY,
         HTTP_X_USER_ID=str(user.id),
         HTTP_X_USER_GROUP=user.group,

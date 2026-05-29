@@ -1554,7 +1554,7 @@ def public_brief_ai_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-def public_brief_ai_claim(request, brief_id):
+def client_brief_ai_claim(request, brief_id):
     token = request.headers.get("X-Brief-Token", "")
     if not token:
         return JsonResponse({"error": "X-Brief-Token is required"}, status=400)
