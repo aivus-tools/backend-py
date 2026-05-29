@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import secrets
+import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
@@ -1224,7 +1225,7 @@ def public_brief_ai_from_wix(request):
         brief = Brief.objects.create(
             client=None,
             anonymous_token=token,
-            contact_email=payload["email"][:254],
+            contact_email=payload["email"].strip().lower()[:254],
             contact_name=payload["name"][:255],
         )
         ChatMessage.objects.create(
@@ -1236,14 +1237,20 @@ def public_brief_ai_from_wix(request):
         )
         Brief.objects.filter(id=brief.id).update(message_count=F("message_count") + 1)
 
+    # ATOMIC_REQUESTS wraps the whole view in a transaction; enqueue tasks only
+    # after the outer commit so the worker actually sees the brief in Postgres.
+    brief_id_str = str(brief.id)
+    task_id = str(uuid.uuid4())
     if file_specs:
-        async_result = chain(
-            import_wix_attachments_task.s(str(brief.id), file_specs),
-            generate_first_reply_task.si(str(brief.id)),
-        ).apply_async()
-        task_id = async_result.id
+        signature = chain(
+            import_wix_attachments_task.s(brief_id_str, file_specs),
+            generate_first_reply_task.si(brief_id_str).set(task_id=task_id),
+        )
     else:
-        task_id = generate_first_reply_task.delay(str(brief.id)).id
+        signature = generate_first_reply_task.signature(
+            args=(brief_id_str,), task_id=task_id
+        )
+    transaction.on_commit(signature.apply_async)
 
     base_url = getattr(settings, "FRONTEND_URL", "https://go.aivus.co").rstrip("/")
     brief_url = f"{base_url}/public-brief/{brief.id}?token={token}&taskId={task_id}"

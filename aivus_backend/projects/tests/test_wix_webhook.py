@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
@@ -16,11 +15,6 @@ from aivus_backend.users.models import Client as ClientModel
 from aivus_backend.users.models import User
 
 WEBHOOK_SECRET = "wix-test-secret"
-
-
-class _TaskMock:
-    def __init__(self, task_id: str) -> None:
-        self.id = task_id
 
 
 @pytest.fixture
@@ -47,9 +41,8 @@ def _headers(secret: str = WEBHOOK_SECRET) -> dict:
 @pytest.mark.django_db
 def test_webhook_happy_path_without_files(api_client, wix_url, enable_webhook):
     with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=_TaskMock("task-1"),
-    ) as delay_mock:
+        "aivus_backend.projects.api.views_brief_v3.transaction.on_commit"
+    ) as on_commit_mock:
         response = api_client.post(
             wix_url,
             data=json.dumps(
@@ -61,12 +54,12 @@ def test_webhook_happy_path_without_files(api_client, wix_url, enable_webhook):
 
     assert response.status_code == 201
     data = response.json()
-    assert data["taskId"] == "task-1"
+    assert data["taskId"]
     assert data["token"]
     brief_id = data["briefId"]
     assert data["briefUrl"] == (
         f"https://go.aivus.co/public-brief/{brief_id}"
-        f"?token={data['token']}&taskId=task-1"
+        f"?token={data['token']}&taskId={data['taskId']}"
     )
 
     brief = Brief.objects.get(id=brief_id)
@@ -78,27 +71,20 @@ def test_webhook_happy_path_without_files(api_client, wix_url, enable_webhook):
     message = brief.chat_messages.get(role="user")
     assert message.content == "30s film"
     assert message.anonymous_token == brief.anonymous_token
-    delay_mock.assert_called_once_with(str(brief.id))
+    on_commit_mock.assert_called_once()
 
 
 @pytest.mark.django_db
 def test_webhook_with_files_chains_import_then_reply(
     api_client, wix_url, enable_webhook
 ):
-    chain_result = MagicMock()
-    chain_result.apply_async.return_value = _TaskMock("chain-task")
     files = [
         {"url": f"https://static.wixstatic.com/media/file{i}.pdf"} for i in range(4)
     ]
 
     with (
-        patch(
-            "aivus_backend.projects.api.views_brief_v3.chain",
-            return_value=chain_result,
-        ) as chain_mock,
-        patch(
-            "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay"
-        ) as delay_mock,
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"),
     ):
         response = api_client.post(
             wix_url,
@@ -108,8 +94,7 @@ def test_webhook_with_files_chains_import_then_reply(
         )
 
     assert response.status_code == 201
-    assert response.json()["taskId"] == "chain-task"
-    delay_mock.assert_not_called()
+    assert response.json()["taskId"]
     chain_mock.assert_called_once()
     import_signature = chain_mock.call_args.args[0]
     passed_specs = import_signature.args[1]
@@ -155,10 +140,7 @@ def test_webhook_requires_message(api_client, wix_url, enable_webhook):
 
 @pytest.mark.django_db
 def test_webhook_email_optional(api_client, wix_url, enable_webhook):
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=_TaskMock("task-2"),
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         response = api_client.post(
             wix_url,
             data=json.dumps({"message": "no email here"}),
@@ -189,13 +171,10 @@ def test_webhook_parses_automation_payload(api_client, wix_url, enable_webhook):
             "email": "example@email.com",
         },
     }
-    chain_result = MagicMock()
-    chain_result.apply_async.return_value = _TaskMock("chain-2")
-
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.chain",
-        return_value=chain_result,
-    ) as chain_mock:
+    with (
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"),
+    ):
         response = api_client.post(
             wix_url,
             data=json.dumps(payload),
@@ -222,11 +201,28 @@ def test_serialize_brief_v3_exposes_contact_email():
 
 
 @pytest.mark.django_db
+def test_serialize_brief_v3_exposes_contact_name():
+    brief = Brief.objects.create(client=None, contact_name="Jamie Brooks")
+    assert serialize_brief_v3(brief)["contactName"] == "Jamie Brooks"
+
+
+@pytest.mark.django_db
+def test_webhook_normalizes_contact_email(api_client, wix_url, enable_webhook):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            wix_url,
+            data=json.dumps({"email": "  Lead@Example.COM ", "message": "hi"}),
+            content_type="application/json",
+            **_headers(),
+        )
+    assert response.status_code == 201
+    brief = Brief.objects.get(id=response.json()["briefId"])
+    assert brief.contact_email == "lead@example.com"
+
+
+@pytest.mark.django_db
 def test_claim_preserves_contact_email(api_client, wix_url, enable_webhook):
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=_TaskMock("task-3"),
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         response = api_client.post(
             wix_url,
             data=json.dumps({"email": "lead@example.com", "message": "hi"}),
