@@ -221,10 +221,10 @@ def _call_gemini(
     if json_mode:
         config_kwargs["response_mime_type"] = "application/json"
 
-    # Gemini 3.1 Pro enables dynamic "thinking" by default which eats into
-    # max_output_tokens and can truncate JSON replies mid-stream. Cap the
-    # thinking budget so the visible answer always has room to complete.
-    if model.startswith("gemini-3"):
+    # Gemini 2.5 and 3.x enable dynamic "thinking" by default which eats into
+    # max_output_tokens and can truncate (or fully empty) the visible answer.
+    # Cap the thinking budget so the visible answer always has room to complete.
+    if model.startswith(("gemini-3", "gemini-2.5")):
         try:
             config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
                 thinking_budget=0,
