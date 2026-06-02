@@ -221,6 +221,44 @@ def _build_date_rule() -> str:
     )
 
 
+def _build_contact_rule(brief: Brief) -> str:
+    """Build a contact-fallback block for the system prompt.
+
+    Resolves client's name/email with this priority:
+    1. Explicit values from the Wix form (Brief.contact_name / contact_email).
+    2. Owner profile (Brief.client.owner.name / .email) if the brief is claimed.
+
+    Returns an empty string when nothing is known — caller must skip the block.
+    """
+    contact_name = (brief.contact_name or "").strip()
+    contact_email = (brief.contact_email or "").strip()
+
+    owner = None
+    if brief.client_id is not None:
+        client = getattr(brief, "client", None)
+        owner = getattr(client, "owner", None) if client else None
+
+    if not contact_name and owner is not None:
+        contact_name = (getattr(owner, "name", "") or "").strip()
+    if not contact_email and owner is not None:
+        contact_email = (getattr(owner, "email", "") or "").strip()
+
+    if not contact_name and not contact_email:
+        return ""
+
+    parts: list[str] = []
+    if contact_name:
+        parts.append(f"name: {contact_name}")
+    if contact_email:
+        parts.append(f"email: {contact_email}")
+    details = ", ".join(parts)
+    return (
+        "Client contact details (use these as a fallback only if the user "
+        "hasn't stated their name or email in the conversation; otherwise "
+        f"prefer what they said): {details}."
+    )
+
+
 def _build_system_prompt(  # noqa: PLR0913
     main_body: str,
     master_template_body: str,
@@ -229,6 +267,7 @@ def _build_system_prompt(  # noqa: PLR0913
     market_rule: str,
     auth_rule: str = "",
     date_rule: str = "",
+    contact_rule: str = "",
 ) -> str:
     parts = [main_body.strip()]
     if master_template_body.strip():
@@ -243,6 +282,8 @@ def _build_system_prompt(  # noqa: PLR0913
         parts.append(date_rule.strip())
     if auth_rule.strip():
         parts.append(auth_rule.strip())
+    if contact_rule.strip():
+        parts.append(contact_rule.strip())
     return "\n\n".join(parts)
 
 
@@ -761,6 +802,7 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
         language_rule=_build_language_rule(doc_language),
         market_rule=_build_market_rule(doc_language),
         date_rule=_build_date_rule(),
+        contact_rule=_build_contact_rule(brief),
     )
 
     finalization_text = finalization_body.strip() or "Please finalize the brief now."
