@@ -230,7 +230,7 @@ def _call_gemini(
                 thinking_budget=0,
             )
         except Exception:
-            logger.debug("ThinkingConfig not supported for %s", model)
+            logger.warning("ThinkingConfig not supported for %s", model)
 
     response = client.models.generate_content(
         model=model,

@@ -142,12 +142,10 @@ def test_client_start_after_draft_with_attachment(
     assert upload_resp.status_code == 201
     attachment_id = upload_resp.json()["id"]
 
-    # 3. Start with attachment — mock Celery task
-    task_mock = _TaskMock(task_id="task-start-1")
+    # 3. Start with attachment — enqueue happens on_commit, which we suppress
     with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=task_mock,
-    ):
+        "aivus_backend.projects.api.views_brief_v3.transaction.on_commit"
+    ) as on_commit_mock:
         start_resp = api_client.post(
             reverse("projects_api:client_brief_ai_start", args=[brief_id]),
             data=json.dumps(
@@ -160,7 +158,12 @@ def test_client_start_after_draft_with_attachment(
             **_auth_headers(client_user),
         )
     assert start_resp.status_code == 201
-    assert start_resp.json()["taskId"] == "task-start-1"
+    task_id = start_resp.json()["taskId"]
+    assert task_id
+    on_commit_mock.assert_called_once()
+
+    brief = Brief.objects.get(id=brief_id)
+    assert brief.pending_task_id == task_id
 
     # Attachment is linked to the user message
     first_user_msg = ChatMessage.objects.get(brief_id=brief_id, role="user")
@@ -439,11 +442,6 @@ def test_attachment_to_part_uses_gs_uri_in_gcs_mode(settings, client_profile, tm
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
-
-
-class _TaskMock:
-    def __init__(self, task_id: str) -> None:
-        self.id = task_id
 
 
 def _file(name: str, content: bytes, mime: str):
@@ -1061,11 +1059,7 @@ def test_client_start_stores_document_language_from_body(
     """POST /start with documentLanguage persists it on the brief before task."""
     brief = Brief.objects.create(client=client_profile)
 
-    task_mock = _TaskMock(task_id="task-lang-1")
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=task_mock,
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         resp = api_client.post(
             reverse("projects_api:client_brief_ai_start", args=[brief.id]),
             data=json.dumps({"message": "Hi", "documentLanguage": "ru"}),
@@ -1075,6 +1069,7 @@ def test_client_start_stores_document_language_from_body(
     assert resp.status_code == 201
     brief.refresh_from_db()
     assert brief.document_language == "ru"
+    assert brief.pending_task_id == resp.json()["taskId"]
 
 
 @pytest.mark.django_db
@@ -1102,11 +1097,7 @@ def test_client_finalize_overrides_document_language(
         conversation_status="ready_to_finalize",
     )
 
-    task_mock = _TaskMock(task_id="task-lang-2")
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task.delay",
-        return_value=task_mock,
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         resp = api_client.post(
             reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
             data=json.dumps({"documentLanguage": "en"}),
@@ -1116,6 +1107,7 @@ def test_client_finalize_overrides_document_language(
     assert resp.status_code == 200
     brief.refresh_from_db()
     assert brief.document_language == "en"
+    assert brief.pending_task_id == resp.json()["taskId"]
 
 
 @pytest.mark.django_db
@@ -1128,11 +1120,7 @@ def test_client_finalize_without_body_keeps_document_language(
         conversation_status="ready_to_finalize",
     )
 
-    task_mock = _TaskMock(task_id="task-lang-3")
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task.delay",
-        return_value=task_mock,
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         resp = api_client.post(
             reverse("projects_api:client_brief_ai_finalize", args=[brief.id]),
             **_auth_headers(client_user),
@@ -1140,6 +1128,7 @@ def test_client_finalize_without_body_keeps_document_language(
     assert resp.status_code == 200
     brief.refresh_from_db()
     assert brief.document_language == "ru"
+    assert brief.pending_task_id == resp.json()["taskId"]
 
 
 @pytest.mark.django_db
@@ -1205,11 +1194,7 @@ def test_public_start_stores_document_language_from_body(
         client=None,
         anonymous_token="tok-lang",
     )
-    task_mock = _TaskMock(task_id="task-lang-4")
-    with patch(
-        "aivus_backend.projects.api.views_brief_v3.generate_first_reply_task.delay",
-        return_value=task_mock,
-    ):
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
         resp = api_client.post(
             reverse("projects_api:public_brief_ai_start", args=[brief.id]),
             data=json.dumps({"message": "Hi", "documentLanguage": "ru"}),
@@ -1219,3 +1204,4 @@ def test_public_start_stores_document_language_from_body(
     assert resp.status_code == 201
     brief.refresh_from_db()
     assert brief.document_language == "ru"
+    assert brief.pending_task_id == resp.json()["taskId"]
