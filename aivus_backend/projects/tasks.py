@@ -1,6 +1,7 @@
 import logging
 import time
 from decimal import Decimal
+from typing import Any
 
 from celery import shared_task
 from django.conf import settings
@@ -23,6 +24,11 @@ from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import LLMCallTrace
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task
+def clear_brief_pending_task(brief_id: str) -> None:
+    Brief.objects.filter(id=brief_id).update(pending_task_id="")
 
 
 def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
@@ -85,6 +91,7 @@ def generate_first_reply_task(brief_id: str) -> dict:
 
     if brief.message_count > 1:
         logger.warning("Brief already has assistant reply, skipping: %s", brief_id)
+        Brief.objects.filter(id=brief.id).update(pending_task_id="")
         return serialize_brief_v3(brief)
 
     first_user_message = (
@@ -92,6 +99,7 @@ def generate_first_reply_task(brief_id: str) -> dict:
     )
     if not first_user_message:
         logger.warning("No user message found for brief %s", brief_id)
+        Brief.objects.filter(id=brief.id).update(pending_task_id="")
         return {"error": "No user message"}
 
     attachments = list(
@@ -119,6 +127,7 @@ def generate_first_reply_task(brief_id: str) -> dict:
             total_output_tokens=F("total_output_tokens") + result["output_tokens"],
             total_cost_usd=F("total_cost_usd") + Decimal(str(result["cost_usd"])),
             message_count=F("message_count") + 1,
+            pending_task_id="",
         )
 
         chat_message = ChatMessage.objects.create(
@@ -227,29 +236,37 @@ def finalize_brief_task(brief_id: str) -> dict:
         result.get("cost_usd"),
     )
 
+    # Auto-title is computed BEFORE the finalized state is exposed: clearing
+    # pending_task_id is the signal the client uses to stop polling, so the title
+    # must land in the same transaction. Otherwise the client renders the brief as
+    # "Untitled" until a manual reload. Best-effort: a title failure must not block
+    # finalization.
+    new_title = ""
+    if not brief.title:
+        try:
+            new_title = generate_brief_title(brief) or ""
+        except Exception:
+            logger.exception("auto-title failed brief_id=%s", brief.id)
+
     with transaction.atomic():
-        Brief.objects.filter(id=brief.id).update(
-            status="COMPLETED",
-            conversation_status="finalized",
-            total_input_tokens=F("total_input_tokens") + result["input_tokens"],
-            total_output_tokens=F("total_output_tokens") + result["output_tokens"],
-            total_cost_usd=F("total_cost_usd") + Decimal(str(result["cost_usd"])),
-        )
+        update_kwargs: dict[str, Any] = {
+            "status": "COMPLETED",
+            "conversation_status": "finalized",
+            "total_input_tokens": F("total_input_tokens") + result["input_tokens"],
+            "total_output_tokens": F("total_output_tokens") + result["output_tokens"],
+            "total_cost_usd": F("total_cost_usd") + Decimal(str(result["cost_usd"])),
+            "pending_task_id": "",
+        }
+        if new_title and not brief.title:
+            update_kwargs["title"] = new_title
+        Brief.objects.filter(id=brief.id).update(**update_kwargs)
         for document in result["documents"]:
             persist_final_document_traces(document, result.get("traces", []))
 
     brief.refresh_from_db()
 
-    # Post-finalize side-effects: auto-title + feedback-request chat message.
-    # Both are best-effort — a failure here must not roll back the finalize.
-    try:
-        title = generate_brief_title(brief)
-        if title and not brief.title:
-            brief.title = title
-            brief.save(update_fields=["title", "updated_at"])
-    except Exception:
-        logger.exception("auto-title failed brief_id=%s", brief.id)
-
+    # feedback-request chat message is best-effort — a failure here must not roll
+    # back the finalize.
     try:
         already_asked = ChatMessage.objects.filter(
             brief=brief, kind=ChatMessage.KIND_FEEDBACK_REQUEST

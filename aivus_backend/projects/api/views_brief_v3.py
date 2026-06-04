@@ -48,6 +48,7 @@ from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
 from aivus_backend.projects.tasks import import_wix_attachments_task
@@ -529,6 +530,8 @@ def client_brief_ai_start(request, brief_id):
 
     attachment_ids = _parse_attachment_ids(body)
 
+    brief_id_str = str(brief.id)
+    task_id = str(uuid.uuid4())
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
             brief=brief,
@@ -536,7 +539,10 @@ def client_brief_ai_start(request, brief_id):
             role="user",
             content=message,
         )
-        update_kwargs: dict[str, Any] = {"message_count": F("message_count") + 1}
+        update_kwargs: dict[str, Any] = {
+            "message_count": F("message_count") + 1,
+            "pending_task_id": task_id,
+        }
         if document_language:
             update_kwargs["document_language"] = document_language
         Brief.objects.filter(id=brief.id).update(**update_kwargs)
@@ -548,9 +554,15 @@ def client_brief_ai_start(request, brief_id):
                 message__isnull=True,
             ).update(message=user_message)
 
-    task = generate_first_reply_task.delay(str(brief.id))
+    transaction.on_commit(
+        lambda: generate_first_reply_task.apply_async(
+            args=[brief_id_str],
+            task_id=task_id,
+            link_error=clear_brief_pending_task.si(brief_id_str),
+        )
+    )
     return JsonResponse(
-        {"briefId": str(brief.id), "taskId": task.id},
+        {"briefId": brief_id_str, "taskId": task_id},
         status=201,
     )
 
@@ -563,32 +575,24 @@ def client_brief_ai_status(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    task_id = request.GET.get("taskId", "")
-    if not task_id:
-        return JsonResponse({"error": "taskId is required"}, status=400)
-
-    result = AsyncResult(task_id)
-    if result.ready():
-        if result.successful():
-            brief.refresh_from_db()
-            return JsonResponse(
-                {
-                    "status": "done",
-                    "result": serialize_brief_v3_detail(
-                        brief, user=_get_request_user(request)
-                    ),
-                }
+    brief.refresh_from_db()
+    if brief.pending_task_id:
+        result = AsyncResult(brief.pending_task_id)
+        if result.failed():
+            logger.error(
+                "Generation task failed: brief_id=%s error=%s",
+                brief_id,
+                result.result,
             )
-        logger.error(
-            "Generation task failed: brief_id=%s error=%s",
-            brief_id,
-            result.result,
-        )
-        return JsonResponse(
-            {"status": "failed", "error": "Brief generation failed."},
-            status=500,
-        )
-    return JsonResponse({"status": "pending"})
+            return JsonResponse({"status": "failed", "error": "Generation failed"})
+        return JsonResponse({"status": "pending"})
+
+    return JsonResponse(
+        {
+            "status": "done",
+            "result": serialize_brief_v3_detail(brief, user=_get_request_user(request)),
+        }
+    )
 
 
 @csrf_exempt
@@ -940,8 +944,18 @@ def client_brief_ai_finalize(request, brief_id):
             brief.document_language = document_language
             brief.save(update_fields=["document_language", "updated_at"])
 
-    task = finalize_brief_task.delay(str(brief.id))
-    return JsonResponse({"taskId": task.id})
+    brief_id_str = str(brief.id)
+    task_id = str(uuid.uuid4())
+    with transaction.atomic():
+        Brief.objects.filter(id=brief.id).update(pending_task_id=task_id)
+    transaction.on_commit(
+        lambda: finalize_brief_task.apply_async(
+            args=[brief_id_str],
+            task_id=task_id,
+            link_error=clear_brief_pending_task.si(brief_id_str),
+        )
+    )
+    return JsonResponse({"taskId": task_id})
 
 
 @csrf_exempt
@@ -1125,6 +1139,14 @@ def _wix_str(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _normalize_contact_email(value: str) -> str:
+    return (value or "").strip().lower()[:254]
+
+
+def _normalize_contact_name(value: str) -> str:
+    return (value or "").strip()[:255]
+
+
 def _collect_wix_files(raw) -> list[dict]:
     if not isinstance(raw, list):
         return []
@@ -1195,6 +1217,60 @@ def _verify_wix_secret(request) -> bool:
     return bool(provided) and hmac.compare_digest(provided, expected)
 
 
+def _create_inbound_brief(  # noqa: PLR0913
+    *,
+    message: str,
+    contact_email: str = "",
+    contact_name: str = "",
+    file_specs: list[dict] | None = None,
+    source: str = "",
+    vendor=None,
+) -> tuple[Brief, str, str]:
+    file_specs = file_specs or []
+    token = secrets.token_urlsafe(48)
+    task_id = str(uuid.uuid4())
+
+    with transaction.atomic():
+        brief = Brief.objects.create(
+            client=None,
+            anonymous_token=token,
+            contact_email=_normalize_contact_email(contact_email),
+            contact_name=_normalize_contact_name(contact_name),
+        )
+        ChatMessage.objects.create(
+            brief=brief,
+            user=None,
+            anonymous_token=token,
+            role="user",
+            content=message,
+        )
+        Brief.objects.filter(id=brief.id).update(
+            message_count=F("message_count") + 1,
+            pending_task_id=task_id,
+        )
+
+    brief_id_str = str(brief.id)
+    if file_specs:
+        signature = chain(
+            import_wix_attachments_task.s(brief_id_str, file_specs),
+            generate_first_reply_task.si(brief_id_str).set(task_id=task_id),
+        )
+    else:
+        signature = generate_first_reply_task.signature(
+            args=(brief_id_str,), task_id=task_id
+        )
+
+    # ATOMIC_REQUESTS wraps the whole view in a transaction; enqueueing on_commit
+    # guarantees the worker only sees the brief after pending_task_id is committed,
+    # so there is no reverse race against the status endpoint.
+    transaction.on_commit(
+        lambda: signature.apply_async(
+            link_error=clear_brief_pending_task.si(brief_id_str)
+        )
+    )
+    return brief, task_id, token
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
@@ -1218,39 +1294,13 @@ def public_brief_ai_from_wix(request):
     if error or message is None:
         return error or JsonResponse({"error": "Message is required"}, status=400)
 
-    file_specs = payload["files"][:MAX_ATTACHMENTS_PER_BRIEF_ANON]
-    token = secrets.token_urlsafe(48)
-
-    with transaction.atomic():
-        brief = Brief.objects.create(
-            client=None,
-            anonymous_token=token,
-            contact_email=payload["email"].strip().lower()[:254],
-            contact_name=payload["name"][:255],
-        )
-        ChatMessage.objects.create(
-            brief=brief,
-            user=None,
-            anonymous_token=token,
-            role="user",
-            content=message,
-        )
-        Brief.objects.filter(id=brief.id).update(message_count=F("message_count") + 1)
-
-    # ATOMIC_REQUESTS wraps the whole view in a transaction; enqueue tasks only
-    # after the outer commit so the worker actually sees the brief in Postgres.
-    brief_id_str = str(brief.id)
-    task_id = str(uuid.uuid4())
-    if file_specs:
-        signature = chain(
-            import_wix_attachments_task.s(brief_id_str, file_specs),
-            generate_first_reply_task.si(brief_id_str).set(task_id=task_id),
-        )
-    else:
-        signature = generate_first_reply_task.signature(
-            args=(brief_id_str,), task_id=task_id
-        )
-    transaction.on_commit(signature.apply_async)
+    brief, task_id, token = _create_inbound_brief(
+        message=message,
+        contact_email=payload["email"],
+        contact_name=payload["name"],
+        file_specs=payload["files"][:MAX_ATTACHMENTS_PER_BRIEF_ANON],
+        source="wix",
+    )
 
     base_url = getattr(settings, "FRONTEND_URL", "https://go.aivus.co").rstrip("/")
     brief_url = f"{base_url}/public-brief/{brief.id}?token={token}&taskId={task_id}"
@@ -1306,6 +1356,8 @@ def public_brief_ai_start(request, brief_id):
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
 
+    brief_id_str = str(brief.id)
+    task_id = str(uuid.uuid4())
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
             brief=brief,
@@ -1314,7 +1366,10 @@ def public_brief_ai_start(request, brief_id):
             role="user",
             content=message,
         )
-        update_kwargs: dict[str, Any] = {"message_count": F("message_count") + 1}
+        update_kwargs: dict[str, Any] = {
+            "message_count": F("message_count") + 1,
+            "pending_task_id": task_id,
+        }
         if document_language:
             update_kwargs["document_language"] = document_language
         Brief.objects.filter(id=brief.id).update(**update_kwargs)
@@ -1326,9 +1381,15 @@ def public_brief_ai_start(request, brief_id):
                 message__isnull=True,
             ).update(message=user_message)
 
-    task = generate_first_reply_task.delay(str(brief.id))
+    transaction.on_commit(
+        lambda: generate_first_reply_task.apply_async(
+            args=[brief_id_str],
+            task_id=task_id,
+            link_error=clear_brief_pending_task.si(brief_id_str),
+        )
+    )
     return JsonResponse(
-        {"briefId": str(brief.id), "taskId": task.id},
+        {"briefId": brief_id_str, "taskId": task_id},
         status=201,
     )
 
@@ -1342,26 +1403,19 @@ def public_brief_ai_status(request, brief_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    task_id = request.GET.get("taskId", "")
-    if not task_id:
-        return JsonResponse({"error": "taskId is required"}, status=400)
+    brief.refresh_from_db()
+    if brief.pending_task_id:
+        result = AsyncResult(brief.pending_task_id)
+        if result.failed():
+            return JsonResponse({"status": "failed", "error": "Generation failed"})
+        return JsonResponse({"status": "pending"})
 
-    result = AsyncResult(task_id)
-    if result.ready():
-        if result.successful():
-            brief.refresh_from_db()
-            return JsonResponse(
-                {
-                    "status": "done",
-                    "result": serialize_brief_v3_detail(
-                        brief, user=_get_request_user(request)
-                    ),
-                }
-            )
-        return JsonResponse(
-            {"status": "failed", "error": "Generation failed"}, status=500
-        )
-    return JsonResponse({"status": "pending"})
+    return JsonResponse(
+        {
+            "status": "done",
+            "result": serialize_brief_v3_detail(brief, user=_get_request_user(request)),
+        }
+    )
 
 
 @csrf_exempt
@@ -1564,6 +1618,8 @@ def client_brief_ai_claim(request, brief_id):
         return JsonResponse({"error": "Client profile not found"}, status=403)
 
     now = timezone.now()
+    should_finalize = False
+    finalize_task_id = ""
     with transaction.atomic():
         rows = Brief.objects.filter(
             id=brief_id,
@@ -1584,21 +1640,31 @@ def client_brief_ai_claim(request, brief_id):
             anonymous_token=token,
         ).update(anonymous_token="")
 
-    brief = Brief.objects.filter(id=brief_id).first()
-    if not brief:
-        return JsonResponse({"error": "Brief not found"}, status=404)
+        brief = Brief.objects.filter(id=brief_id).first()
+        if not brief:
+            return JsonResponse({"error": "Brief not found"}, status=404)
+
+        should_finalize = (
+            brief.conversation_status == "ready_to_finalize"
+            and brief.status != "COMPLETED"
+            and not brief.final_documents.exists()
+        )
+        if should_finalize:
+            finalize_task_id = str(uuid.uuid4())
+            Brief.objects.filter(id=brief.id).update(pending_task_id=finalize_task_id)
 
     payload = serialize_brief_v3_detail(brief, user=_get_request_user(request))
 
-    if (
-        brief.conversation_status == "ready_to_finalize"
-        and brief.status != "COMPLETED"
-        and not brief.final_documents.exists()
-    ):
-        try:
-            task = finalize_brief_task.delay(str(brief.id))
-            payload["finalizingTaskId"] = task.id
-        except Exception:
-            logger.exception("Auto-finalize on claim failed brief_id=%s", brief.id)
+    if should_finalize:
+        brief_id_str = str(brief.id)
+        transaction.on_commit(
+            lambda: finalize_brief_task.apply_async(
+                args=[brief_id_str],
+                task_id=finalize_task_id,
+                link_error=clear_brief_pending_task.si(brief_id_str),
+            )
+        )
+        payload["finalizingTaskId"] = finalize_task_id
+        payload["pendingTaskId"] = finalize_task_id
 
     return JsonResponse(payload)
