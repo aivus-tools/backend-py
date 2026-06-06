@@ -236,5 +236,16 @@ if SENTRY_DSN:
 # QA2-005: Production CSRF_TRUSTED_ORIGINS
 CSRF_TRUSTED_ORIGINS = ["https://go.aivus.co", "https://app.aivus.co"]
 
+# E2E confirmation-token endpoint
+# ------------------------------------------------------------------------------
+# Defense in depth: the test-only e2e_confirmation_token endpoint must never
+# serve on the real production host, even if E2E_CONFIRMATION_TOKEN_ENABLED is
+# mis-set. Staging and prod share this settings module, so we honor the flag
+# only on non-prod environments, identified by SENTRY_ENVIRONMENT (default
+# "production" -> fail closed). Staging must set SENTRY_ENVIRONMENT to a
+# non-"production" value (e.g. "staging") for the endpoint to be reachable.
+if env("SENTRY_ENVIRONMENT", default="production") == "production":
+    E2E_CONFIRMATION_TOKEN_ENABLED = False
+
 # Your stuff...
 # ------------------------------------------------------------------------------

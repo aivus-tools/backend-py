@@ -690,6 +690,7 @@ def reset_password(request):
 
 @require_http_methods(["GET"])
 @public_endpoint
+@ratelimit(key="ip", rate="120/m", method="GET", block=True)
 def e2e_confirmation_token(request):
     """
     Return the latest e-mail confirmation token for an address (test only).
@@ -698,17 +699,23 @@ def e2e_confirmation_token(request):
     Header: X-E2E-Token-Secret: <E2E_CONFIRMATION_TOKEN_SECRET>
 
     Lets staging E2E confirm registrations without reading a mailbox when the
-    e-mail backend is real (Resend) instead of Mailpit. Hard-gated: 404 unless
-    E2E_CONFIRMATION_TOKEN_ENABLED is set, 403 unless the secret header matches
-    a non-empty configured secret. MUST stay disabled in production.
-    """
-    if not settings.E2E_CONFIRMATION_TOKEN_ENABLED:
-        return JsonResponse({"error": "Not found"}, status=404)
+    e-mail backend is real (Resend) instead of Mailpit.
 
-    expected_secret = settings.E2E_CONFIRMATION_TOKEN_SECRET
+    Hard-gated: a single 404 (indistinguishable from a missing route) unless
+    E2E_CONFIRMATION_TOKEN_ENABLED is set AND the X-E2E-Token-Secret header
+    matches a non-empty configured secret (constant-time, bytes-compared).
+    config/settings/production.py additionally force-disables this on the real
+    production host (SENTRY_ENVIRONMENT == "production"). MUST stay disabled in
+    production.
+    """
     provided_secret = request.headers.get("X-E2E-Token-Secret", "")
-    if not expected_secret or not compare_digest(provided_secret, expected_secret):
-        return JsonResponse({"error": "Forbidden"}, status=403)
+    expected_secret = settings.E2E_CONFIRMATION_TOKEN_SECRET
+    if (
+        not settings.E2E_CONFIRMATION_TOKEN_ENABLED
+        or not expected_secret
+        or not compare_digest(provided_secret.encode(), expected_secret.encode())
+    ):
+        return JsonResponse({"error": "Not found"}, status=404)
 
     email = (request.GET.get("email") or "").strip()
     if not email:
@@ -723,6 +730,6 @@ def e2e_confirmation_token(request):
         .first()
     )
     if not token_obj:
-        return JsonResponse({"error": "Token not found"}, status=404)
+        return JsonResponse({"error": "Not found"}, status=404)
 
     return JsonResponse({"token": token_obj.token})

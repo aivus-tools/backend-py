@@ -45,23 +45,37 @@ class TestE2EConfirmationToken:
         E2E_CONFIRMATION_TOKEN_ENABLED=True,
         E2E_CONFIRMATION_TOKEN_SECRET=SECRET,
     )
-    def test_wrong_secret_returns_403(self, api_client, user_with_token):
+    def test_wrong_secret_returns_404(self, api_client, user_with_token):
+        # 404 (not 403) so an enabled endpoint is indistinguishable from a
+        # missing route — no signal that there is a secret to guess.
         response = api_client.get(
             f"{URL}?email=confirm-me@example.com",
             headers={"X-E2E-Token-Secret": "wrong"},
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
     @override_settings(
         E2E_CONFIRMATION_TOKEN_ENABLED=True,
         E2E_CONFIRMATION_TOKEN_SECRET="",
     )
-    def test_empty_configured_secret_returns_403(self, api_client, user_with_token):
+    def test_empty_configured_secret_returns_404(self, api_client, user_with_token):
         response = api_client.get(
             f"{URL}?email=confirm-me@example.com",
             headers={"X-E2E-Token-Secret": ""},
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
+
+    @override_settings(
+        E2E_CONFIRMATION_TOKEN_ENABLED=True,
+        E2E_CONFIRMATION_TOKEN_SECRET=SECRET,
+    )
+    def test_non_ascii_secret_header_returns_404(self, api_client, user_with_token):
+        # bytes-compare must not raise on a non-ASCII header (no 500).
+        response = api_client.get(
+            f"{URL}?email=confirm-me@example.com",
+            headers={"X-E2E-Token-Secret": "wrøng-ключ"},
+        )
+        assert response.status_code == 404
 
     @override_settings(
         E2E_CONFIRMATION_TOKEN_ENABLED=True,
