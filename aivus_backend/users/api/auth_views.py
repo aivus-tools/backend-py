@@ -686,3 +686,43 @@ def reset_password(request):
     except Exception:
         logger.exception("Reset password error")
         return JsonResponse({"error": "An internal error occurred"}, status=500)
+
+
+@require_http_methods(["GET"])
+@public_endpoint
+def e2e_confirmation_token(request):
+    """
+    Return the latest e-mail confirmation token for an address (test only).
+
+    GET /api/v1/auth/e2e-confirmation-token?email=...
+    Header: X-E2E-Token-Secret: <E2E_CONFIRMATION_TOKEN_SECRET>
+
+    Lets staging E2E confirm registrations without reading a mailbox when the
+    e-mail backend is real (Resend) instead of Mailpit. Hard-gated: 404 unless
+    E2E_CONFIRMATION_TOKEN_ENABLED is set, 403 unless the secret header matches
+    a non-empty configured secret. MUST stay disabled in production.
+    """
+    if not settings.E2E_CONFIRMATION_TOKEN_ENABLED:
+        return JsonResponse({"error": "Not found"}, status=404)
+
+    expected_secret = settings.E2E_CONFIRMATION_TOKEN_SECRET
+    provided_secret = request.headers.get("X-E2E-Token-Secret", "")
+    if not expected_secret or not compare_digest(provided_secret, expected_secret):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    email = (request.GET.get("email") or "").strip()
+    if not email:
+        return JsonResponse({"error": "email is required"}, status=400)
+
+    token_obj = (
+        AuthToken.objects.filter(
+            user__email__iexact=email,
+            token_type=TokenType.EMAIL_CONFIRMATION,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if not token_obj:
+        return JsonResponse({"error": "Token not found"}, status=404)
+
+    return JsonResponse({"token": token_obj.token})

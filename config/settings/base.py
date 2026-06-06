@@ -59,6 +59,14 @@ WIX_WEBHOOK_SECRET = env("WIX_WEBHOOK_SECRET", default="")
 # Extra host suffixes appended to the built-in Wix allow-list for the file
 # downloader. Intended for local development only — keep empty in production.
 WIX_EXTRA_ALLOWED_HOSTS = env.list("WIX_EXTRA_ALLOWED_HOSTS", default=[])
+# Test-only endpoint that exposes the latest e-mail confirmation token for an
+# address, so staging E2E can confirm registrations without reading a mailbox.
+# Hard-gated: both must be set and it MUST stay disabled in production.
+E2E_CONFIRMATION_TOKEN_ENABLED = env.bool(
+    "E2E_CONFIRMATION_TOKEN_ENABLED",
+    default=False,
+)
+E2E_CONFIRMATION_TOKEN_SECRET = env("E2E_CONFIRMATION_TOKEN_SECRET", default="")
 
 # AIVUS BRIEF AI
 # ------------------------------------------------------------------------------
