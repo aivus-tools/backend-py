@@ -898,6 +898,7 @@ class BriefAttachment(models.Model):
     mime_type = models.CharField(max_length=128)
     size_bytes = models.BigIntegerField(default=0)
     gemini_file_uri = models.CharField(max_length=512, blank=True, default="")
+    extracted_text = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

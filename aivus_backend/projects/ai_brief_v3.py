@@ -30,6 +30,8 @@ from aivus_backend.core.llm import LLMResponse
 from aivus_backend.core.llm import call_llm
 from aivus_backend.core.llm import call_llm_json
 from aivus_backend.core.sanitize import sanitize_html
+from aivus_backend.projects.attachments import DOCX_MIME
+from aivus_backend.projects.attachments import extract_docx_text
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFinalDocument
@@ -298,6 +300,9 @@ def _attachment_to_part(attachment: BriefAttachment) -> dict[str, Any] | None:
     if not mime:
         mime = "application/octet-stream"
 
+    if mime == DOCX_MIME:
+        return _docx_attachment_to_text_part(attachment)
+
     if getattr(settings, "STORAGE_BACKEND", "local") == "gcs":
         bucket = getattr(settings, "GS_BUCKET_NAME", "")
         if bucket:
@@ -315,6 +320,39 @@ def _attachment_to_part(attachment: BriefAttachment) -> dict[str, Any] | None:
         return None
 
     return {"type": "inline_bytes", "data": data, "mime_type": mime}
+
+
+def _docx_attachment_to_text_part(
+    attachment: BriefAttachment,
+) -> dict[str, Any] | None:
+    """Gemini cannot read .docx, so extract its text and pass it as a text part.
+
+    The extracted text is cached on the attachment so the document is parsed
+    once rather than on every subsequent chat turn.
+    """
+    text = attachment.extracted_text
+    if not text:
+        try:
+            with attachment.file.open("rb") as fh:
+                data = fh.read()
+        except Exception:
+            logger.exception("Cannot read docx attachment %s", attachment.id)
+            return None
+        text = extract_docx_text(data)
+        if text:
+            attachment.extracted_text = text
+            try:
+                attachment.save(update_fields=["extracted_text"])
+            except Exception:
+                logger.exception("Cannot cache docx text for %s", attachment.id)
+
+    if not text:
+        return None
+
+    return {
+        "type": "text",
+        "text": f"[Attached document: {attachment.filename}]\n\n{text}",
+    }
 
 
 def _build_user_parts(

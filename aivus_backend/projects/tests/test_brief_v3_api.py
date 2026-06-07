@@ -440,6 +440,80 @@ def test_attachment_to_part_uses_gs_uri_in_gcs_mode(settings, client_profile, tm
 
 
 # ----------------------------------------------------------------------------
+# docx attachments
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_docx_attachment_accepted_when_sniffed_as_zip(
+    api_client, client_user, client_profile, monkeypatch
+):
+    from aivus_backend.projects.attachments import DOCX_MIME
+
+    brief = Brief.objects.create(client=client_profile)
+    # Some libmagic versions sniff a .docx (a zip container) as application/zip;
+    # the declared docx must still be accepted.
+    monkeypatch.setattr(
+        "aivus_backend.projects.api.views_brief_v3.sniff_mime",
+        lambda *_args, **_kw: "application/zip",
+    )
+    resp = api_client.post(
+        reverse("projects_api:client_brief_ai_attachments", args=[brief.id]),
+        data={"file": _file("brief.docx", _docx_bytes("Hello"), DOCX_MIME)},
+        **_auth_headers(client_user),
+    )
+    assert resp.status_code == 201
+    assert BriefAttachment.objects.filter(brief=brief, mime_type=DOCX_MIME).exists()
+
+
+def test_extract_docx_text_reads_paragraphs_and_tables():
+    import io
+
+    from docx import Document
+
+    from aivus_backend.projects.attachments import extract_docx_text
+
+    document = Document()
+    document.add_paragraph("Project brief")
+    table = document.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Budget"
+    table.rows[0].cells[1].text = "5000"
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    text = extract_docx_text(buffer.getvalue())
+    assert "Project brief" in text
+    assert "Budget | 5000" in text
+
+
+@pytest.mark.django_db
+def test_attachment_to_part_docx_returns_text_and_caches(client_profile):
+    from django.core.files.base import ContentFile
+
+    from aivus_backend.projects.ai_brief_v3 import _attachment_to_part
+    from aivus_backend.projects.attachments import DOCX_MIME
+
+    brief = Brief.objects.create(client=client_profile)
+    attachment = BriefAttachment.objects.create(
+        brief=brief,
+        filename="brief.docx",
+        mime_type=DOCX_MIME,
+        size_bytes=10,
+    )
+    attachment.file.save(
+        "brief.docx", ContentFile(_docx_bytes("Launch video brief")), save=True
+    )
+
+    part = _attachment_to_part(attachment)
+    assert part is not None
+    assert part["type"] == "text"
+    assert "Launch video brief" in part["text"]
+
+    attachment.refresh_from_db()
+    assert "Launch video brief" in attachment.extracted_text
+
+
+# ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
 
@@ -448,6 +522,19 @@ def _file(name: str, content: bytes, mime: str):
     from django.core.files.uploadedfile import SimpleUploadedFile
 
     return SimpleUploadedFile(name, content, content_type=mime)
+
+
+def _docx_bytes(*paragraphs: str) -> bytes:
+    import io
+
+    from docx import Document
+
+    document = Document()
+    for text in paragraphs:
+        document.add_paragraph(text)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 # ----------------------------------------------------------------------------

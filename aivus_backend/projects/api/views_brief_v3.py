@@ -40,6 +40,8 @@ from aivus_backend.projects.api.serializers import serialize_brief_v3_detail
 from aivus_backend.projects.api.serializers import serialize_brief_v3_list_item
 from aivus_backend.projects.api.serializers import serialize_chat_message_v3
 from aivus_backend.projects.attachments import ALLOWED_MIME_TYPES
+from aivus_backend.projects.attachments import DOCX_DETECTED_ALIASES
+from aivus_backend.projects.attachments import DOCX_MIME
 from aivus_backend.projects.attachments import MAX_ATTACHMENT_SIZE_BYTES
 from aivus_backend.projects.attachments import sniff_mime
 from aivus_backend.projects.models import Brief
@@ -351,7 +353,8 @@ def _validate_attachment_file(
         )
 
     detected_mime = sniff_mime(uploaded).lower()
-    if detected_mime and detected_mime not in ALLOWED_MIME_TYPES:
+    docx_ok = declared_mime == DOCX_MIME and detected_mime in DOCX_DETECTED_ALIASES
+    if detected_mime and detected_mime not in ALLOWED_MIME_TYPES and not docx_ok:
         logger.warning(
             "Attachment MIME mismatch: declared=%s detected=%s",
             declared_mime,
