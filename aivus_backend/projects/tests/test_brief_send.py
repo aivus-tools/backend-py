@@ -199,6 +199,35 @@ def test_public_send_no_resend_when_already_rfp(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_resend_allowed_when_only_rfp_project_soft_deleted(
+    api_client, vendor, anon_brief
+):
+    """H2: _brief_already_sent_to_vendor must ignore soft-deleted projects. A
+    soft-deleted RFP project means the brief was never really sent, so a resend
+    must be accepted instead of falsely returning 409 already_sent."""
+    Project.objects.filter(brief=anon_brief, vendor=vendor).update(
+        status=ProjectStatus.RFP, deleted_at=timezone.now()
+    )
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    chain_mock.assert_called_once()
+
+
+@pytest.mark.django_db
 def test_public_send_ready_with_documents_skips_finalize(api_client, vendor):
     """A ready_to_finalize brief whose document already exists (rendered on ready
     and possibly edited by the anonymous client) must not be re-finalized: the

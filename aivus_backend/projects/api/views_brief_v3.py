@@ -1372,7 +1372,7 @@ SENT_PROJECT_STATUSES = {
 
 def _brief_already_sent_to_vendor(brief: Brief, vendor: Vendor) -> bool:
     return (
-        Project.objects.filter(brief=brief, vendor=vendor)
+        Project.objects.filter(brief=brief, vendor=vendor, deleted_at__isnull=True)
         .filter(status__in=SENT_PROJECT_STATUSES)
         .exists()
     )
