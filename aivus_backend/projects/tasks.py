@@ -39,12 +39,13 @@ def clear_brief_pending_task(brief_id: str) -> None:
 def set_brief_pending_task(brief_id: str, task_id: str) -> dict:
     """Re-assert the brief's pending marker mid-chain.
 
-    finalize_brief_task clears pending_task_id when it completes (the chat flow
-    relies on that to stop polling). Inside the Send chain the brief must stay
-    "pending" until the project is promoted, so this step restores the marker
-    after finalize and before the promotion/email steps.
+    Inside the Send chain the brief must stay "pending" until the project is
+    promoted. The preceding finalize step now runs with keep_pending=True so the
+    marker normally never drops, making this a no-op re-assert; it remains as a
+    belt-and-braces guard for any path that clears the marker before promotion.
+    A single atomic update sets the marker and clears any stale error so there is
+    no clear-then-set window where the status endpoint could read it empty.
     """
-    Brief.objects.filter(id=brief_id).update(pending_task_id="")
     Brief.objects.filter(id=brief_id).update(
         pending_task_id=task_id, pending_task_error=""
     )
@@ -242,7 +243,18 @@ def import_wix_attachments_task(brief_id: str, file_specs: list[dict]) -> dict:
     retry_backoff=True,
     max_retries=1,
 )
-def finalize_brief_task(brief_id: str) -> dict:
+def finalize_brief_task(brief_id: str, *, keep_pending: bool = False) -> dict:  # noqa: C901
+    """Generate the brief's final documents and flip it to finalized.
+
+    SF-1: when this task is the first step of a Send chain (``keep_pending=True``)
+    it must not clear ``pending_task_id``. Clearing it would open a window between
+    this task finishing and the next chain step re-arming the marker, during which
+    the status endpoint would report ``done`` even though the project is still at
+    DRAFT and no emails were sent — the client would redirect to success too early.
+    Leaving the Send chain's marker in place keeps the brief ``pending`` until the
+    tail clear step runs after the project is promoted to RFP. A standalone finalize
+    (chat flow) keeps the default and clears the marker so polling can stop.
+    """
     with transaction.atomic():
         try:
             brief = Brief.objects.select_for_update().get(id=brief_id)
@@ -265,7 +277,8 @@ def finalize_brief_task(brief_id: str) -> dict:
             logger.info(
                 "Brief already finalized, skipping re-finalize: brief_id=%s", brief_id
             )
-            Brief.objects.filter(id=brief.id).update(pending_task_id="")
+            if not keep_pending:
+                Brief.objects.filter(id=brief.id).update(pending_task_id="")
             return serialize_brief_v3_detail(brief)
 
     started_at = time.monotonic()
@@ -309,8 +322,11 @@ def finalize_brief_task(brief_id: str) -> dict:
             "total_input_tokens": F("total_input_tokens") + result["input_tokens"],
             "total_output_tokens": F("total_output_tokens") + result["output_tokens"],
             "total_cost_usd": F("total_cost_usd") + Decimal(str(result["cost_usd"])),
-            "pending_task_id": "",
         }
+        # SF-1: inside a Send chain (keep_pending) the marker must survive so the
+        # status endpoint keeps reporting "pending" until the project is promoted.
+        if not keep_pending:
+            update_kwargs["pending_task_id"] = ""
         if new_title and not brief.title:
             update_kwargs["title"] = new_title
         Brief.objects.filter(id=brief.id).update(**update_kwargs)

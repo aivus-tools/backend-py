@@ -404,6 +404,159 @@ def test_set_brief_pending_task_restores_marker():
     assert brief.pending_task_id == "restored-id"
 
 
+@pytest.mark.django_db
+def test_set_brief_pending_task_clears_stale_error():
+    """A re-asserted marker must also clear any stale failure so a re-armed Send
+    is not reported as failed."""
+    from aivus_backend.projects.tasks import set_brief_pending_task
+
+    brief = Brief.objects.create(
+        client=None, pending_task_id="", pending_task_error="old-fail"
+    )
+    set_brief_pending_task.run(str(brief.id), "restored-id")
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "restored-id"
+    assert brief.pending_task_error == ""
+
+
+# --- SF-1: finalize inside a Send chain must not drop the pending marker ------
+
+
+@pytest.mark.django_db
+def test_finalize_keep_pending_leaves_marker_set():
+    """SF-1: finalize_brief_task(keep_pending=True) is the first Send-chain step.
+    It must NOT clear pending_task_id; otherwise a status poll between finalize
+    finishing and the project being promoted would see no marker and report
+    "done", redirecting the client to success before the RFP promotion + emails.
+    The Send chain arms the marker before finalize runs, so the marker must still
+    be set after finalize completes."""
+    from unittest.mock import patch as _patch
+
+    from aivus_backend.projects import tasks
+    from aivus_backend.projects.models import BriefFinalDocument
+
+    brief = Brief.objects.create(
+        client=None,
+        title="Existing Title",
+        conversation_status="ready_to_finalize",
+        document_language="en",
+        pending_task_id="send-chain-id",
+    )
+    document = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<h1>Brief</h1>"
+    )
+    fake_docs = {
+        "documents": [document],
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "fake",
+        "traces": [],
+    }
+    with _patch.object(tasks, "generate_final_documents", return_value=fake_docs):
+        tasks.finalize_brief_task.run(str(brief.id), keep_pending=True)
+
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "send-chain-id"
+    assert brief.conversation_status == "finalized"
+
+
+@pytest.mark.django_db
+def test_finalize_keep_pending_skip_path_leaves_marker():
+    """SF-1: the already-finalized fast path must also honour keep_pending and
+    leave the Send-chain marker intact."""
+    from unittest.mock import patch as _patch
+
+    from aivus_backend.projects import tasks
+    from aivus_backend.projects.models import BriefFinalDocument
+
+    brief = Brief.objects.create(
+        client=None,
+        conversation_status="finalized",
+        status="COMPLETED",
+        pending_task_id="send-chain-id",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    with _patch.object(tasks, "generate_final_documents") as generate_mock:
+        tasks.finalize_brief_task.run(str(brief.id), keep_pending=True)
+
+    generate_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "send-chain-id"
+
+
+@pytest.mark.django_db
+def test_finalize_standalone_still_clears_marker():
+    """A standalone finalize (chat flow, keep_pending default False) must still
+    clear the marker so the client stops polling."""
+    from unittest.mock import patch as _patch
+
+    from aivus_backend.projects import tasks
+    from aivus_backend.projects.models import BriefFinalDocument
+
+    brief = Brief.objects.create(
+        client=None,
+        title="Existing Title",
+        conversation_status="ready_to_finalize",
+        document_language="en",
+        pending_task_id="standalone-id",
+    )
+    document = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<h1>Brief</h1>"
+    )
+    fake_docs = {
+        "documents": [document],
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "fake",
+        "traces": [],
+    }
+    with _patch.object(tasks, "generate_final_documents", return_value=fake_docs):
+        tasks.finalize_brief_task.run(str(brief.id))
+
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+
+
+@pytest.mark.django_db
+def test_public_status_pending_during_send_after_finalize(api_client, vendor):
+    """SF-1 end-to-end: after the Send chain's finalize completes but before the
+    project is promoted to RFP, the status endpoint must report "pending", not
+    "done". With keep_pending the marker is still set, so the AsyncResult branch
+    runs and returns pending."""
+    from unittest.mock import patch as _patch
+
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="sf1-window",
+        conversation_status="finalized",
+        source="personal_link",
+        pending_task_id="send-chain-id",
+    )
+    # Project still at DRAFT (not yet promoted by mark_project_sent_task).
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+
+    class _Running:
+        def failed(self):
+            return False
+
+    with _patch(
+        "aivus_backend.projects.api.views_brief_v3.AsyncResult",
+        return_value=_Running(),
+    ):
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="sf1-window",
+        )
+    assert response.status_code == 200
+    assert response.json() == {"status": "pending"}
+
+
 # --- task idempotency --------------------------------------------------------
 
 

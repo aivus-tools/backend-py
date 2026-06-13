@@ -1467,11 +1467,14 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
             pending_task_id=send_chain_task_id, pending_task_error=""
         )
         if needs_finalize:
-            # finalize_brief_task clears pending_task_id when it completes, so the
-            # marker is re-asserted right after it to keep the brief "pending"
-            # until the project is actually promoted.
+            # SF-1: finalize runs with keep_pending=True so it never clears the
+            # Send chain's marker. The brief therefore stays "pending" continuously
+            # from here until the tail clear step, closing the window where the
+            # status endpoint could report "done" before the project is promoted
+            # to RFP. set_brief_pending_task re-asserts the marker as a belt-and-
+            # braces guard against a finalize retry path that misses keep_pending.
             workflow = chain(
-                finalize_brief_task.si(brief_id_str),
+                finalize_brief_task.si(brief_id_str, keep_pending=True),
                 set_brief_pending_task.si(brief_id_str, send_chain_task_id),
                 mark_signature,
                 send_signature,
