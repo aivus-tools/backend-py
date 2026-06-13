@@ -245,20 +245,32 @@ def projects_list(request):  # noqa: C901, PLR0912, PLR0915
                 except Client.DoesNotExist:
                     return JsonResponse({"error": "Client not found"}, status=404)
 
-            project = Project.objects.create(
-                name=name,
-                vendor=vendor,
-                brief=brief,
-                team=team,
-                status=status,
-                crm_id=crm_id,
-                description=description,
-                client=client,
-                client_name=client_name,
-                irs_ein=irs_ein,
-                brand_name=brand_name,
-                agency_name=agency_name,
-            )
+            try:
+                with transaction.atomic():
+                    project = Project.objects.create(
+                        name=name,
+                        vendor=vendor,
+                        brief=brief,
+                        team=team,
+                        status=status,
+                        crm_id=crm_id,
+                        description=description,
+                        client=client,
+                        client_name=client_name,
+                        irs_ein=irs_ein,
+                        brand_name=brand_name,
+                        agency_name=agency_name,
+                    )
+            except IntegrityError as ex:
+                # uniq_active_project_per_vendor_brief (migration 0038): a second
+                # active project for the same vendor+brief is a conflict, not a
+                # server error. Without this the bare create raised a 500.
+                if "uniq_active_project_per_vendor_brief" in str(ex):
+                    return JsonResponse(
+                        {"error": "This brief is already linked to a project"},
+                        status=409,
+                    )
+                raise
 
             # Create collaborators
             for collab in collaborators:
