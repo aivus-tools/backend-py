@@ -103,6 +103,20 @@ def test_public_send_requires_email(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_rejects_malformed_email(api_client, vendor, anon_brief):
+    """SF-2: a syntactically invalid email is rejected with 400 before dispatch."""
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "not-an-email"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 400
+    anon_brief.refresh_from_db()
+    assert anon_brief.contact_email == ""
+
+
+@pytest.mark.django_db
 def test_public_send_unknown_slug_404(api_client, anon_brief):
     response = api_client.post(
         reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),

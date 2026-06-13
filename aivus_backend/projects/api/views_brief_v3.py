@@ -14,6 +14,8 @@ from typing import Any
 from celery import chain
 from celery.result import AsyncResult
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import F
 from django.http import HttpResponse
@@ -1212,6 +1214,14 @@ def _normalize_contact_email(value: str) -> str:
     return (value or "").strip().lower()[:254]
 
 
+def _is_valid_email(value: str) -> bool:
+    try:
+        validate_email(value)
+    except ValidationError:
+        return False
+    return True
+
+
 def _normalize_contact_name(value: str) -> str:
     return (value or "").strip()[:255]
 
@@ -1739,6 +1749,8 @@ def public_brief_ai_send(request, brief_id):
     recipient_email = _normalize_contact_email(body.get("email") or "")
     if not recipient_email:
         return JsonResponse({"error": "email is required"}, status=400)
+    if not _is_valid_email(recipient_email):
+        return JsonResponse({"error": "Enter a valid email address"}, status=400)
 
     if recipient_email != brief.contact_email:
         Brief.objects.filter(id=brief.id).update(contact_email=recipient_email)
