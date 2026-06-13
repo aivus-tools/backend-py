@@ -25,6 +25,7 @@ from django_ratelimit.decorators import ratelimit
 
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.projects import stt
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
@@ -1239,6 +1240,7 @@ def _create_inbound_brief(  # noqa: PLR0913
             anonymous_token=token,
             contact_email=_normalize_contact_email(contact_email),
             contact_name=_normalize_contact_name(contact_name),
+            source=source or BriefSource.DIRECT,
         )
         ChatMessage.objects.create(
             brief=brief,

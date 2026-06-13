@@ -9,6 +9,7 @@ from django.db import models
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.core.enums import BriefPromptSlug
+from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import ConversationStatus
 from aivus_backend.core.enums import FeedbackRating
@@ -36,6 +37,12 @@ class Brief(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     status = models.CharField(
         max_length=20, choices=BriefStatus.choices, default=BriefStatus.DRAFT
+    )
+    source = models.CharField(
+        max_length=20,
+        choices=BriefSource.choices,
+        default=BriefSource.DIRECT,
+        db_index=True,
     )
     details = models.JSONField(default=dict)
     structured_data = models.JSONField(default=dict, blank=True)

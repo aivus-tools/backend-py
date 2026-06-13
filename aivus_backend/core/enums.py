@@ -40,6 +40,15 @@ class BriefStatus(models.TextChoices):
     COMPLETED = "COMPLETED", "Completed"
 
 
+class BriefSource(models.TextChoices):
+    """Where the brief originated from."""
+
+    DIRECT = "direct", "Direct"
+    PERSONAL_LINK = "personal_link", "Personal vendor link"
+    WEBHOOK = "webhook", "Vendor webhook"
+    WIX = "wix", "Wix landing form"
+
+
 class AuthType(models.TextChoices):
     """Authentication type choices."""
 

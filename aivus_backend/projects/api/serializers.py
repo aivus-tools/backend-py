@@ -414,6 +414,7 @@ def serialize_brief_v3(brief: Brief, *, user=None) -> dict:
     return {
         "id": str(brief.id),
         "status": brief.status,
+        "source": brief.source,
         "title": brief.title,
         "contactEmail": brief.contact_email,
         "contactName": brief.contact_name,
