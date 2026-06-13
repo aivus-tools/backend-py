@@ -9,6 +9,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
 
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.ai_brief_v3 import feedback_question_for
 from aivus_backend.projects.ai_brief_v3 import generate_brief_title
 from aivus_backend.projects.ai_brief_v3 import generate_final_documents
@@ -20,8 +21,10 @@ from aivus_backend.projects.attachments import WIX_FILE_HOST_SUFFIXES
 from aivus_backend.projects.attachments import download_remote_file
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
+from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import LLMCallTrace
+from aivus_backend.projects.models import Project
 
 logger = logging.getLogger(__name__)
 
@@ -284,3 +287,102 @@ def finalize_brief_task(brief_id: str) -> dict:
         )
 
     return serialize_brief_v3_detail(brief)
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
+    """Promote the vendor's lead project to RFP once the brief is finalized.
+
+    Idempotent: a project already at RFP or beyond is left untouched so a
+    double Send (double click, retry, browser back) never produces a second
+    project. For the logged-in "pick an existing brief" flow no DRAFT project
+    exists yet, so one is created directly at RFP.
+    """
+    promoted_statuses = {
+        ProjectStatus.RFP,
+        ProjectStatus.REVIEWING,
+        ProjectStatus.ONGOING,
+    }
+    with transaction.atomic():
+        brief = Brief.objects.filter(id=brief_id).first()
+        if not brief:
+            logger.warning("mark_project_sent: brief not found %s", brief_id)
+            return {"ok": False}
+
+        project, created = Project.objects.select_for_update().get_or_create(
+            vendor_id=vendor_id,
+            brief=brief,
+            defaults={
+                "name": (brief.title or "New brief lead")[:255],
+                "status": ProjectStatus.RFP,
+                "client_id": brief.client_id,
+            },
+        )
+        if created:
+            return {"ok": True, "projectId": str(project.id), "alreadySent": False}
+        if project.status in promoted_statuses:
+            return {"ok": True, "projectId": str(project.id), "alreadySent": True}
+
+        project.status = ProjectStatus.RFP
+        if not (project.name or "").strip() or project.name == "New brief lead":
+            project.name = (brief.title or project.name or "New brief lead")[:255]
+        if brief.client_id and not project.client_id:
+            project.client_id = brief.client_id
+        project.save(update_fields=["status", "name", "client", "updated_at"])
+
+    return {"ok": True, "projectId": str(project.id), "alreadySent": False}
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def send_emails_task(
+    brief_id: str,
+    vendor_id: str,
+    recipient_email: str = "",
+    language: str = "en",
+) -> dict:
+    """Create the public share and dispatch client + vendor lead emails.
+
+    Runs after the project is at RFP. The client email is only sent when an
+    email was provided (anonymous Send); the vendor email always fires. The
+    BriefShare get_or_create reuses the same public share clients use today.
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = Brief.objects.filter(id=brief_id).first()
+    if not brief:
+        logger.warning("send_emails: brief not found %s", brief_id)
+        return {"ok": False}
+
+    project = (
+        Project.objects.filter(vendor_id=vendor_id, brief=brief)
+        .select_related("vendor", "vendor__owner")
+        .first()
+    )
+    if not project:
+        logger.warning("send_emails: project not found brief=%s", brief_id)
+        return {"ok": False}
+
+    share, _created = BriefShare.objects.get_or_create(brief=brief)
+
+    if recipient_email:
+        try:
+            brief_emails.send_client_lead_email(
+                brief, recipient_email, share.token, language
+            )
+        except Exception:
+            logger.exception("client lead email failed brief=%s", brief_id)
+
+    try:
+        brief_emails.send_vendor_lead_email(project, brief, language)
+    except Exception:
+        logger.exception("vendor lead email failed brief=%s", brief_id)
+
+    return {"ok": True, "shareToken": share.token}

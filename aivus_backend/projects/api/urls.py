@@ -183,6 +183,11 @@ urlpatterns = [
         views_brief_v3.client_brief_ai_final_document_pdf,
         name="client_brief_ai_final_document_pdf",
     ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/send",
+        views_brief_v3.client_brief_ai_send,
+        name="client_brief_ai_send",
+    ),
     # Brief share (authenticated owner)
     path(
         "client/briefs/ai/<uuid:brief_id>/share",
@@ -215,6 +220,11 @@ urlpatterns = [
         "public/briefs/ai/by-slug/<slug:slug>/drafts",
         views_brief_v3.public_brief_ai_by_slug_drafts,
         name="public_brief_ai_by_slug_drafts",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/send",
+        views_brief_v3.public_brief_ai_send,
+        name="public_brief_ai_send",
     ),
     path(
         "public/briefs/ai/drafts",

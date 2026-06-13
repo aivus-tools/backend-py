@@ -57,7 +57,9 @@ from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
 from aivus_backend.projects.tasks import import_wix_attachments_task
+from aivus_backend.projects.tasks import mark_project_sent_task
 from aivus_backend.projects.tasks import persist_message_traces
+from aivus_backend.projects.tasks import send_emails_task
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
@@ -1222,6 +1224,69 @@ def _project_name_for_brief(brief: Brief) -> str:
     return (title or "New brief lead")[:255]
 
 
+SENDABLE_CONVERSATION_STATUSES = {"ready_to_finalize", "finalized"}
+SENT_PROJECT_STATUSES = {
+    ProjectStatus.RFP,
+    ProjectStatus.REVIEWING,
+    ProjectStatus.ONGOING,
+}
+
+
+def _brief_already_sent_to_vendor(brief: Brief, vendor: Vendor) -> bool:
+    return (
+        Project.objects.filter(brief=brief, vendor=vendor)
+        .filter(status__in=SENT_PROJECT_STATUSES)
+        .exists()
+    )
+
+
+def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language: str):
+    """Validate and enqueue the Send chain.
+
+    Returns a JsonResponse. The chain finalizes the brief first when it has not
+    been finalized yet, then promotes the vendor project to RFP and sends the
+    emails. Every step is idempotent so retries and double-Send are safe.
+    """
+    if brief.conversation_status not in SENDABLE_CONVERSATION_STATUSES:
+        return JsonResponse({"error": "Brief is not ready to send"}, status=400)
+    if _brief_already_sent_to_vendor(brief, vendor):
+        return JsonResponse({"error": "Brief already sent to this vendor"}, status=409)
+
+    brief_id_str = str(brief.id)
+    vendor_id_str = str(vendor.id)
+    needs_finalize = brief.conversation_status != "finalized" or not (
+        brief.final_documents.exists()
+    )
+
+    finalize_task_id = str(uuid.uuid4())
+    mark_signature = mark_project_sent_task.si(brief_id_str, vendor_id_str)
+    send_signature = send_emails_task.si(
+        brief_id_str, vendor_id_str, recipient_email, language
+    )
+
+    with transaction.atomic():
+        if needs_finalize:
+            Brief.objects.filter(id=brief.id).update(pending_task_id=finalize_task_id)
+            workflow = chain(
+                finalize_brief_task.si(brief_id_str).set(task_id=finalize_task_id),
+                mark_signature,
+                send_signature,
+            )
+        else:
+            workflow = chain(mark_signature, send_signature)
+
+    transaction.on_commit(
+        lambda: workflow.apply_async(
+            link_error=clear_brief_pending_task.si(brief_id_str)
+        )
+    )
+
+    response: dict[str, Any] = {"ok": True}
+    if needs_finalize:
+        response["finalizingTaskId"] = finalize_task_id
+    return JsonResponse(response)
+
+
 def _resolve_vendor_by_slug(slug: str) -> Vendor | None:
     """Resolve an active vendor from a brief-link slug.
 
@@ -1418,6 +1483,48 @@ def public_brief_ai_by_slug_drafts(request, slug):
         {"briefId": str(brief.id), "token": token},
         status=201,
     )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="10/h", method="POST")
+def public_brief_ai_send(request, brief_id):
+    """Anonymous Send: finalize (if needed), attach the vendor project, email.
+
+    The vendor is resolved from the ``slug`` in the body; the contact email is
+    required so the client receives their copy. The response shape is uniform
+    regardless of whether the email already has an account (anti-enumeration).
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    slug = (body.get("slug") or "").strip()
+    vendor = _resolve_vendor_by_slug(slug) if slug else None
+    if not vendor:
+        return JsonResponse(
+            {"error": "This agency is no longer accepting briefs"}, status=404
+        )
+
+    recipient_email = _normalize_contact_email(body.get("email") or "")
+    if not recipient_email:
+        return JsonResponse({"error": "email is required"}, status=400)
+
+    if recipient_email != brief.contact_email:
+        Brief.objects.filter(id=brief.id).update(contact_email=recipient_email)
+        brief.contact_email = recipient_email
+
+    language = brief_emails.resolve_email_language(
+        brief, request.headers.get("Accept-Language", "")
+    )
+    return _dispatch_send(brief, vendor, recipient_email, language)
 
 
 @csrf_exempt
@@ -1708,6 +1815,40 @@ def public_brief_ai_detail(request, brief_id):
     messages = brief.chat_messages.prefetch_related("feedbacks", "attachments").all()
     data["messages"] = [serialize_chat_message_v3(x) for x in messages]
     return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT")
+@conditional_ratelimit(key="user", rate="20/h", method="POST")
+def client_brief_ai_send(request, brief_id):
+    """Authenticated Send: attach the brief to the chosen vendor as a project.
+
+    No email is asked of the client (they are already in the cabinet); the
+    vendor is resolved from the ``slug`` in the body. The same idempotent chain
+    promotes/creates the project and notifies the vendor.
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = _get_brief_for_client(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    slug = (body.get("slug") or "").strip()
+    vendor = _resolve_vendor_by_slug(slug) if slug else None
+    if not vendor:
+        return JsonResponse(
+            {"error": "This agency is no longer accepting briefs"}, status=404
+        )
+
+    language = brief_emails.resolve_email_language(
+        brief, request.headers.get("Accept-Language", "")
+    )
+    return _dispatch_send(brief, vendor, "", language)
 
 
 @csrf_exempt
