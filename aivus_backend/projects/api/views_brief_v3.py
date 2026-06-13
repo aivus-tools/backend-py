@@ -509,6 +509,38 @@ def client_brief_ai_list(request):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT")
+def client_brief_ai_sent_to_vendor(request):
+    """List the client's briefs already sent to the vendor behind ``slug``.
+
+    A brief counts as sent once it has a project for that vendor at RFP or
+    beyond. The frontend uses this to hide the Send button for briefs already
+    delivered to the vendor on the branded page.
+    """
+    client_id = request.user_data.get("client_id")
+    slug = (request.GET.get("slug") or "").strip()
+    if not client_id or not slug:
+        return JsonResponse({"briefIds": []})
+
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"briefIds": []})
+
+    brief_ids = (
+        Project.objects.filter(
+            vendor=vendor,
+            brief__client_id=client_id,
+            brief__deleted_at__isnull=True,
+            status__in=SENT_PROJECT_STATUSES,
+        )
+        .values_list("brief_id", flat=True)
+        .distinct()
+    )
+    return JsonResponse({"briefIds": [str(x) for x in brief_ids]})
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
 @conditional_ratelimit(key="user", rate="20/m", method="POST")
