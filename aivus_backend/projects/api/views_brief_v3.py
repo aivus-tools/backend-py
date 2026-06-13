@@ -1299,6 +1299,20 @@ def _brief_already_sent_to_vendor(brief: Brief, vendor: Vendor) -> bool:
     )
 
 
+def _brief_already_sent(brief: Brief) -> bool:
+    """True once the brief has been sent to any vendor (project at RFP+).
+
+    After Send the vendor reads the very same brief — there is no copy — so the
+    anonymous client must not be able to keep editing the document the vendor is
+    already looking at.
+    """
+    return (
+        Project.objects.filter(brief=brief)
+        .filter(status__in=SENT_PROJECT_STATUSES)
+        .exists()
+    )
+
+
 def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language: str):
     """Validate and enqueue the Send chain.
 
@@ -2153,6 +2167,14 @@ def public_brief_ai_final_document_update(request, brief_id, document_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    # Once the brief is sent the vendor reads this very document (no copy), so an
+    # anonymous edit after Send would silently change what the vendor sees. Lock
+    # editing as soon as any vendor project reaches RFP.
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
 
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:

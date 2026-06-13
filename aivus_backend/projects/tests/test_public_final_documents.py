@@ -10,8 +10,12 @@ from django.test import Client as DjangoTestClient
 from django.urls import reverse
 
 from aivus_backend.core.enums import FinalDocumentKind
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefFinalDocument
+from aivus_backend.projects.models import Project
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 
 
 @pytest.fixture
@@ -188,3 +192,30 @@ def test_patch_final_document_requires_html(api_client, anon_brief_with_document
         HTTP_X_BRIEF_TOKEN="final-doc-token",
     )
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_patch_final_document_blocked_after_send(api_client, anon_brief_with_document):
+    """Once the brief is sent (project at RFP) the vendor reads this very
+    document, so an anonymous PATCH after Send must be rejected (MF-6)."""
+    brief, document = anon_brief_with_document
+    owner = User.objects.create_user(
+        email="docs-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="Docs Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>sneaky edit</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 409
+    document.refresh_from_db()
+    assert "sneaky edit" not in document.html
