@@ -252,6 +252,16 @@ urlpatterns = [
         name="public_brief_ai_attachment_delete",
     ),
     path(
+        "public/briefs/ai/<uuid:brief_id>/final-documents",
+        views_brief_v3.public_brief_ai_final_documents,
+        name="public_brief_ai_final_documents",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/final-documents/<uuid:document_id>",
+        views_brief_v3.public_brief_ai_final_document_update,
+        name="public_brief_ai_final_document_update",
+    ),
+    path(
         "public/briefs/ai/<uuid:brief_id>",
         views_brief_v3.public_brief_ai_detail,
         name="public_brief_ai_detail",

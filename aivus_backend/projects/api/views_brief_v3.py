@@ -1711,6 +1711,64 @@ def public_brief_ai_detail(request, brief_id):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+def public_brief_ai_final_documents(request, brief_id):
+    """Token-scoped read of the anonymous brief's final documents (S2-7)."""
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    documents = brief.final_documents.order_by("kind")
+    return JsonResponse(
+        {
+            "briefId": str(brief.id),
+            "conversationStatus": brief.conversation_status,
+            "documents": [serialize_brief_final_document(x) for x in documents],
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="60/m", method="PATCH")
+def public_brief_ai_final_document_update(request, brief_id, document_id):
+    """Token-scoped edit of an anonymous brief's final document (S2-7).
+
+    Mirrors the authenticated editor PATCH so the white-label anonymous client
+    can review and tweak the document before Send.
+    """
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
+    if not document:
+        return JsonResponse({"error": "Document not found"}, status=404)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    html = body.get("html")
+    if not isinstance(html, str):
+        return JsonResponse({"error": "html is required"}, status=400)
+    if len(html) > MAX_FINAL_DOCUMENT_HTML_LENGTH:
+        return JsonResponse({"error": "Document too large"}, status=400)
+
+    document.html = sanitize_html(html)
+
+    plain_text = body.get("plainText")
+    if isinstance(plain_text, str):
+        document.plain_text = plain_text[:MAX_FINAL_DOCUMENT_HTML_LENGTH]
+
+    document.save(update_fields=["html", "plain_text", "updated_at"])
+    return JsonResponse(serialize_brief_final_document(document))
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
 def client_brief_ai_claim(request, brief_id):
