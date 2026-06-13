@@ -35,6 +35,10 @@ def anon_brief_with_document(db):
     return brief, document
 
 
+def _run_on_commit(func):
+    func()
+
+
 @pytest.mark.django_db
 def test_get_final_documents_with_token(api_client, anon_brief_with_document):
     brief, document = anon_brief_with_document
@@ -47,59 +51,83 @@ def test_get_final_documents_with_token(api_client, anon_brief_with_document):
     assert body["briefId"] == str(brief.id)
     assert len(body["documents"]) == 1
     assert body["documents"][0]["id"] == str(document.id)
+    assert body["generating"] is False
 
 
 @pytest.mark.django_db
-def test_get_final_documents_finalizes_on_ready_when_empty(api_client):
+def test_get_final_documents_dispatches_finalize_when_ready_and_empty(api_client):
     brief = Brief.objects.create(
         client=None,
         anonymous_token="ready-no-docs",
         conversation_status="ready_to_finalize",
     )
 
-    def _fake_generate(*, brief):
-        BriefFinalDocument.objects.create(
-            brief=brief,
-            kind=FinalDocumentKind.PRODUCTION_BRIEF,
-            html="<p>Generated on ready</p>",
-            plain_text="Generated on ready",
-        )
-        return {"documents": [], "input_tokens": 0, "output_tokens": 0, "cost_usd": 0}
-
-    with patch(
-        "aivus_backend.projects.ai_brief_v3.generate_final_documents",
-        side_effect=_fake_generate,
-    ) as generate_mock:
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+        ) as finalize_mock,
+    ):
         response = api_client.get(
             reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
             HTTP_X_BRIEF_TOKEN="ready-no-docs",
         )
 
     assert response.status_code == 200
-    generate_mock.assert_called_once()
     body = response.json()
-    assert len(body["documents"]) == 1
-    assert "Generated on ready" in body["documents"][0]["html"]
+    assert body["documents"] == []
+    assert body["generating"] is True
     assert body["conversationStatus"] == "ready_to_finalize"
+    finalize_mock.apply_async.assert_called_once()
     brief.refresh_from_db()
-    assert brief.conversation_status == "ready_to_finalize"
+    assert brief.pending_task_id != ""
 
 
 @pytest.mark.django_db
-def test_get_final_documents_does_not_regenerate_when_present(
+def test_get_final_documents_does_not_redispatch_when_pending(api_client):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="already-pending",
+        conversation_status="ready_to_finalize",
+        pending_task_id="existing-task",
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="already-pending",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generating"] is True
+    finalize_mock.apply_async.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "existing-task"
+
+
+@pytest.mark.django_db
+def test_get_final_documents_not_generating_when_present(
     api_client, anon_brief_with_document
 ):
     brief, _document = anon_brief_with_document
     with patch(
-        "aivus_backend.projects.ai_brief_v3.generate_final_documents"
-    ) as generate_mock:
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
         response = api_client.get(
             reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
             HTTP_X_BRIEF_TOKEN="final-doc-token",
         )
 
     assert response.status_code == 200
-    generate_mock.assert_not_called()
+    body = response.json()
+    assert body["generating"] is False
+    finalize_mock.apply_async.assert_not_called()
 
 
 @pytest.mark.django_db

@@ -2026,36 +2026,48 @@ def client_brief_ai_send(request, brief_id):
     return _dispatch_send(brief, vendor, "", language)
 
 
-def _ensure_final_documents_for_ready(brief: Brief) -> None:
-    """Generate final documents once the brief is ready, before Send/finalize.
+def _dispatch_finalize_if_ready(brief: Brief) -> bool:
+    """Kick off finalize asynchronously when the ready brief has no documents.
 
     The branded anonymous flow shows and edits the document before Send, but the
-    documents only exist after finalize. When the brief reaches
-    ``ready_to_finalize`` and has no documents yet, finalize-on-ready renders them
-    via the shared generator while leaving ``conversation_status`` untouched, so
-    Send still runs its own finalize step idempotently. A locked re-check guards
-    against two concurrent reads each kicking off generation. LLM failure is
-    swallowed: the endpoint then returns an empty document set rather than 500.
+    documents only exist after finalize. Running the LLM inside the request (and
+    under a row lock) would block a worker and the brief row, so generation is
+    dispatched to ``finalize_brief_task`` instead. Idempotency is guarded by
+    ``pending_task_id``: an in-flight finalize is never dispatched twice. The
+    front-end polls this endpoint until the documents appear.
+
+    Returns True when generation is in progress (either freshly dispatched or
+    already pending), False otherwise.
     """
     if brief.conversation_status != "ready_to_finalize":
-        return
+        return False
     if brief.final_documents.exists():
-        return
+        return False
 
-    from aivus_backend.projects.ai_brief_v3 import (  # noqa: PLC0415
-        generate_final_documents,
-    )
+    finalize_task_id = str(uuid.uuid4())
+    dispatched = False
+    with transaction.atomic():
+        locked = Brief.objects.select_for_update().get(id=brief.id)
+        if locked.conversation_status != "ready_to_finalize":
+            return False
+        if BriefFinalDocument.objects.filter(brief=locked).exists():
+            return False
+        if locked.pending_task_id:
+            # A finalize is already running; the poller waits for it.
+            return True
+        Brief.objects.filter(id=locked.id).update(pending_task_id=finalize_task_id)
+        dispatched = True
 
-    try:
-        with transaction.atomic():
-            locked = Brief.objects.select_for_update().get(id=brief.id)
-            if locked.conversation_status != "ready_to_finalize":
-                return
-            if BriefFinalDocument.objects.filter(brief=locked).exists():
-                return
-            generate_final_documents(brief=locked)
-    except Exception:
-        logger.exception("finalize-on-ready failed brief_id=%s", brief.id)
+    if dispatched:
+        brief_id_str = str(brief.id)
+        transaction.on_commit(
+            lambda: finalize_brief_task.apply_async(
+                args=[brief_id_str],
+                task_id=finalize_task_id,
+                link_error=clear_brief_pending_task.si(brief_id_str),
+            )
+        )
+    return True
 
 
 @csrf_exempt
@@ -2065,21 +2077,24 @@ def _ensure_final_documents_for_ready(brief: Brief) -> None:
 def public_brief_ai_final_documents(request, brief_id):
     """Token-scoped read of the anonymous brief's final documents (S2-7).
 
-    Finalize-on-ready ensures the anonymous client can view the document before
-    Send even though no finalize ran yet.
+    When the brief is ready but has no documents yet, finalize is dispatched
+    asynchronously and the response carries ``generating: true`` with an empty
+    document list; the front-end polls until the documents appear. No LLM call
+    runs inside the request.
     """
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
-    _ensure_final_documents_for_ready(brief)
+    generating = _dispatch_finalize_if_ready(brief)
 
-    documents = brief.final_documents.order_by("kind")
+    documents = list(brief.final_documents.order_by("kind"))
     return JsonResponse(
         {
             "briefId": str(brief.id),
             "conversationStatus": brief.conversation_status,
             "documents": [serialize_brief_final_document(x) for x in documents],
+            "generating": generating and not documents,
         }
     )
 
@@ -2097,8 +2112,6 @@ def public_brief_ai_final_document_update(request, brief_id, document_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
-
-    _ensure_final_documents_for_ready(brief)
 
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:
