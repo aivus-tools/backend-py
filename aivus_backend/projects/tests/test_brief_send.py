@@ -159,6 +159,46 @@ def test_public_send_no_resend_when_already_rfp(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_ready_with_documents_skips_finalize(api_client, vendor):
+    """A ready_to_finalize brief whose document already exists (rendered on ready
+    and possibly edited by the anonymous client) must not be re-finalized: the
+    Send chain skips generation so manual edits survive."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="ready-edited",
+        conversation_status="ready_to_finalize",
+    )
+    document = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Manually edited</p>"
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+        ) as finalize_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="ready-edited",
+        )
+    assert response.status_code == 200
+    assert "finalizingTaskId" not in response.json()
+    chain_mock.assert_called_once()
+    finalize_mock.si.assert_not_called()
+    document.refresh_from_db()
+    assert "Manually edited" in document.html
+
+
+@pytest.mark.django_db
 def test_public_send_finalized_skips_finalize(api_client, vendor):
     brief = Brief.objects.create(
         client=None,

@@ -1318,9 +1318,11 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
                 {"error": "Brief already sent to this vendor"}, status=409
             )
 
-        needs_finalize = locked.conversation_status != "finalized" or not (
-            locked.final_documents.exists()
-        )
+        # Only generate when no documents exist yet. The branded anonymous flow
+        # renders the document on ready (finalize-on-ready) and lets the client
+        # edit it before Send; re-running finalize here would discard those
+        # manual edits. Documents already present are taken as-is.
+        needs_finalize = not locked.final_documents.exists()
         if needs_finalize:
             Brief.objects.filter(id=locked.id).update(pending_task_id=finalize_task_id)
             workflow = chain(
