@@ -53,6 +53,18 @@ def test_by_slug_resolves_active_vendor(api_client, vendor_with_slug):
 
 
 @pytest.mark.django_db
+def test_by_slug_resolves_case_insensitively(api_client, vendor_with_slug):
+    """A MixedCase link must still resolve; stored slugs are always lowercase."""
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_by_slug", args=["Acme-Films"])
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["valid"] is True
+    assert body["slug"] == "Acme-Films"
+
+
+@pytest.mark.django_db
 def test_by_slug_unknown_returns_404(api_client):
     response = api_client.get(
         reverse("projects_api:public_brief_ai_by_slug", args=["nope-nope"])

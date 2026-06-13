@@ -14,6 +14,7 @@ from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
+from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.core.slugs import validate_slug
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
@@ -609,7 +610,7 @@ def vendor_slug_check(request):
     if vendor is None:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
-    raw = (request.GET.get("slug") or "").strip()
+    raw = normalize_slug(request.GET.get("slug") or "")
     if validate_slug(raw) is not None:
         return JsonResponse({"available": False})
 
@@ -675,7 +676,7 @@ def _apply_lead_notification_email(settings, data):
 
 
 def _apply_slug(settings, data):
-    raw = (data.get("slug") if isinstance(data.get("slug"), str) else "").strip()
+    raw = normalize_slug(data.get("slug") if isinstance(data.get("slug"), str) else "")
     if not raw:
         settings.slug = None
         return None

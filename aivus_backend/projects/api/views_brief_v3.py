@@ -28,6 +28,7 @@ from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.core.sanitize import sanitize_html
+from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.projects import stt
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
@@ -1348,11 +1349,16 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
 def _resolve_vendor_by_slug(slug: str) -> Vendor | None:
     """Resolve an active vendor from a brief-link slug.
 
-    Soft-deleted vendors are filtered manually because the FK uses no on_delete
-    cascade for deleted_at; a slug pointing at a deleted vendor must 404.
+    The incoming slug is normalised to lowercase before the lookup so a
+    MixedCase link still resolves; stored slugs are always lowercase. Soft-deleted
+    vendors are filtered manually because the FK uses no on_delete cascade for
+    deleted_at; a slug pointing at a deleted vendor must 404.
     """
+    normalized = normalize_slug(slug)
+    if not normalized:
+        return None
     settings_row = (
-        VendorSettings.objects.filter(slug=slug).select_related("vendor").first()
+        VendorSettings.objects.filter(slug=normalized).select_related("vendor").first()
     )
     if not settings_row:
         return None

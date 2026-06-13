@@ -260,6 +260,45 @@ def test_slug_check_invalid_format(api_client, vendor_user):
 
 
 @pytest.mark.django_db
+def test_slug_check_normalizes_case(api_client, vendor_user):
+    """A MixedCase candidate is checked as its lowercase form, so a clash with an
+    existing lowercase slug is detected rather than treated as a new free slug."""
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+
+    other_user = User.objects.create_user(
+        email="case-holder@example.com",
+        password="p@ssw0rd",
+        name="Holder",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Holder Studio", owner=other_user)
+    VendorSettings.objects.create(vendor=other_vendor, slug="held-slug")
+
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "Held-Slug"}, **_auth(user)
+    )
+    assert response.json() == {"available": False}
+
+
+@pytest.mark.django_db
+def test_patch_normalizes_slug_case(api_client, vendor_user):
+    """Saving a MixedCase slug stores the lowercase form rather than rejecting."""
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+    response = api_client.patch(
+        reverse("vendor-settings"),
+        data=json.dumps({"slug": "My-Studio"}),
+        content_type="application/json",
+        **_auth(user),
+    )
+    assert response.status_code == 200
+    assert response.json()["slug"] == "my-studio"
+    vendor.refresh_from_db()
+    assert VendorSettings.objects.get(vendor=vendor).slug == "my-studio"
+
+
+@pytest.mark.django_db
 def test_slug_suggest_avoids_collision(api_client, vendor_user):
     user, vendor = vendor_user
     VendorSettings.objects.create(vendor=vendor)
