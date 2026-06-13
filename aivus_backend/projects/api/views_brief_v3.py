@@ -1404,7 +1404,9 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
     emails. Every step is idempotent so retries and double-Send are safe.
     """
     if brief.conversation_status not in SENDABLE_CONVERSATION_STATUSES:
-        return JsonResponse({"error": "Brief is not ready to send"}, status=400)
+        return JsonResponse(
+            {"error": "Brief is not ready to send", "code": "not_ready"}, status=400
+        )
 
     brief_id_str = str(brief.id)
     vendor_id_str = str(vendor.id)
@@ -1428,7 +1430,8 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         locked = Brief.objects.select_for_update().get(id=brief.id)
         if _brief_already_sent_to_vendor(locked, vendor):
             return JsonResponse(
-                {"error": "Brief already sent to this vendor"}, status=409
+                {"error": "Brief already sent to this vendor", "code": "already_sent"},
+                status=409,
             )
 
         # Only generate when no documents exist yet. The branded anonymous flow
@@ -1451,12 +1454,13 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # Either way we leave the existing marker intact and tell the client to
         # retry, so the in-flight task is never disturbed.
         if locked.pending_task_id:
-            message = (
-                "Brief is still generating, try again shortly"
-                if needs_finalize
-                else "Brief is already being sent, try again shortly"
-            )
-            return JsonResponse({"error": message}, status=409)
+            if needs_finalize:
+                message = "Brief is still generating, try again shortly"
+                code = "still_generating"
+            else:
+                message = "Brief is already being sent, try again shortly"
+                code = "already_being_sent"
+            return JsonResponse({"error": message, "code": code}, status=409)
         # Arm the pending marker and clear any stale failure from a previous Send
         # so the status endpoint reports "pending" again, not the old "failed".
         Brief.objects.filter(id=locked.id).update(
@@ -1852,7 +1856,9 @@ def public_brief_ai_send(request, brief_id):
 
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
-        return JsonResponse({"error": "Brief not found"}, status=404)
+        return JsonResponse(
+            {"error": "Brief not found", "code": "brief_not_found"}, status=404
+        )
 
     body, error = _parse_json_body(request)
     if error:
@@ -1862,19 +1868,31 @@ def public_brief_ai_send(request, brief_id):
     vendor = _resolve_vendor_by_slug(slug) if slug else None
     if not vendor:
         return JsonResponse(
-            {"error": "This agency is no longer accepting briefs"}, status=404
+            {
+                "error": "This agency is no longer accepting briefs",
+                "code": "agency_not_found",
+            },
+            status=404,
         )
 
     # The brief was started on one vendor's branded link; reject a Send whose slug
     # points at a different vendor than the brief's existing project (slug swap).
     if not _public_send_vendor_matches_brief(brief, vendor):
-        return JsonResponse({"error": "Brief does not belong to this link"}, status=409)
+        return JsonResponse(
+            {"error": "Brief does not belong to this link", "code": "vendor_mismatch"},
+            status=409,
+        )
 
     recipient_email = _normalize_contact_email(body.get("email") or "")
     if not recipient_email:
-        return JsonResponse({"error": "email is required"}, status=400)
+        return JsonResponse(
+            {"error": "email is required", "code": "email_required"}, status=400
+        )
     if not _is_valid_email(recipient_email):
-        return JsonResponse({"error": "Enter a valid email address"}, status=400)
+        return JsonResponse(
+            {"error": "Enter a valid email address", "code": "invalid_email"},
+            status=400,
+        )
 
     if recipient_email != brief.contact_email:
         Brief.objects.filter(id=brief.id).update(contact_email=recipient_email)
@@ -2199,7 +2217,9 @@ def client_brief_ai_send(request, brief_id):
 
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
-        return JsonResponse({"error": "Brief not found"}, status=404)
+        return JsonResponse(
+            {"error": "Brief not found", "code": "brief_not_found"}, status=404
+        )
 
     body, error = _parse_json_body(request)
     if error:
@@ -2209,7 +2229,11 @@ def client_brief_ai_send(request, brief_id):
     vendor = _resolve_vendor_by_slug(slug) if slug else None
     if not vendor:
         return JsonResponse(
-            {"error": "This agency is no longer accepting briefs"}, status=404
+            {
+                "error": "This agency is no longer accepting briefs",
+                "code": "agency_not_found",
+            },
+            status=404,
         )
 
     language = brief_emails.resolve_email_language(

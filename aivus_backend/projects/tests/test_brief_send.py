@@ -722,3 +722,210 @@ def test_public_status_reports_failed_on_send_error(api_client, vendor):
     # The flag is cleared after reporting so a fresh Send can re-arm.
     brief.refresh_from_db()
     assert brief.pending_task_error == ""
+
+
+# --- MF-2: machine-readable error codes on every Send error branch -----------
+
+
+@pytest.mark.django_db
+def test_public_send_brief_not_found_code(api_client, vendor):
+    """An unknown brief token returns 404 with code=brief_not_found."""
+    missing_id = "00000000-0000-0000-0000-000000000000"
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[missing_id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="whatever",
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "brief_not_found"
+
+
+@pytest.mark.django_db
+def test_public_send_agency_not_found_code(api_client, anon_brief):
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "ghost", "email": "client@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "agency_not_found"
+
+
+@pytest.mark.django_db
+def test_public_send_soft_deleted_vendor_agency_not_found_code(
+    api_client, vendor, anon_brief
+):
+    Vendor.objects.filter(id=vendor.id).update(deleted_at=timezone.now())
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "agency_not_found"
+
+
+@pytest.mark.django_db
+def test_public_send_vendor_mismatch_code(api_client, vendor, anon_brief):
+    other_user = User.objects.create_user(
+        email="mismatch-vendor@example.com",
+        password="p@ssw0rd",
+        name="Other",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Other Studio", owner=other_user)
+    VendorSettings.objects.create(
+        vendor=other_vendor, slug="mismatch-studio", company_name="Other Studio Co"
+    )
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "mismatch-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "vendor_mismatch"
+
+
+@pytest.mark.django_db
+def test_public_send_email_required_code(api_client, vendor, anon_brief):
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "send-studio"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "email_required"
+
+
+@pytest.mark.django_db
+def test_public_send_invalid_email_code(api_client, vendor, anon_brief):
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "not-an-email"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_email"
+
+
+@pytest.mark.django_db
+def test_public_send_not_ready_code(api_client, vendor):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="not-ready-code",
+        conversation_status="in_progress",
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="not-ready-code",
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "not_ready"
+
+
+@pytest.mark.django_db
+def test_public_send_already_sent_code(api_client, vendor, anon_brief):
+    Project.objects.filter(brief=anon_brief, vendor=vendor).update(
+        status=ProjectStatus.RFP
+    )
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "already_sent"
+
+
+@pytest.mark.django_db
+def test_public_send_still_generating_code(api_client, vendor):
+    """needs_finalize (no documents yet) + pending marker yields still_generating."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="still-generating",
+        conversation_status="ready_to_finalize",
+        pending_task_id="inflight-finalize",
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="still-generating",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "still_generating"
+
+
+@pytest.mark.django_db
+def test_public_send_already_being_sent_code(api_client, vendor):
+    """No finalize needed (documents exist) + pending marker yields
+    already_being_sent: a previous Send chain already owns the brief."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="already-being-sent",
+        conversation_status="finalized",
+        pending_task_id="inflight-send",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+        data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="already-being-sent",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "already_being_sent"
+
+
+@pytest.mark.django_db
+def test_client_send_brief_not_found_code(api_client, client_user):
+    user, _client_profile = client_user
+    missing_id = "00000000-0000-0000-0000-000000000000"
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_send", args=[missing_id]),
+        data=json.dumps({"slug": "send-studio"}),
+        content_type="application/json",
+        **_client_auth(user),
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "brief_not_found"
+
+
+@pytest.mark.django_db
+def test_client_send_agency_not_found_code(api_client, vendor, client_user):
+    user, client_profile = client_user
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_send", args=[brief.id]),
+        data=json.dumps({"slug": "ghost"}),
+        content_type="application/json",
+        **_client_auth(user),
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "agency_not_found"
