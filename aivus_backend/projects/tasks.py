@@ -364,9 +364,14 @@ def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
             logger.warning("mark_project_sent: brief not found %s", brief_id)
             return {"ok": False}
 
+        # Filter deleted_at to match the conditional unique constraint
+        # (uniq_active_project_per_vendor_brief, deleted_at IS NULL). Without it
+        # get_or_create would match a soft-deleted lead and resurrect it at RFP
+        # while leaving deleted_at set, instead of creating a fresh active project.
         project, created = Project.objects.select_for_update().get_or_create(
             vendor_id=vendor_id,
             brief=brief,
+            deleted_at__isnull=True,
             defaults={
                 "name": (brief.title or "New brief lead")[:255],
                 "status": ProjectStatus.RFP,

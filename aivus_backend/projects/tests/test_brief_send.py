@@ -592,6 +592,29 @@ def test_send_emails_task_is_idempotent_across_chains(vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_mark_project_sent_ignores_soft_deleted_project(vendor, anon_brief):
+    """SF-12: a soft-deleted lead project must not be resurrected. mark_project_sent
+    filters deleted_at to match the conditional unique constraint and creates a
+    fresh active project instead of promoting the deleted one."""
+    deleted = Project.objects.get(brief=anon_brief, vendor=vendor)
+    deleted.deleted_at = timezone.now()
+    deleted.save(update_fields=["deleted_at"])
+
+    result = mark_project_sent_task.run(str(anon_brief.id), str(vendor.id))
+    assert result["ok"] is True
+
+    deleted.refresh_from_db()
+    assert deleted.deleted_at is not None
+    assert deleted.status == ProjectStatus.DRAFT
+
+    active = Project.objects.get(
+        brief=anon_brief, vendor=vendor, deleted_at__isnull=True
+    )
+    assert active.id != deleted.id
+    assert active.status == ProjectStatus.RFP
+
+
+@pytest.mark.django_db
 def test_send_emails_task_creates_share_and_emails(vendor, anon_brief):
     with (
         patch(
