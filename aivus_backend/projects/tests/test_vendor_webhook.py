@@ -233,6 +233,80 @@ def test_webhook_ip_rate_limit_fires_before_key_check(webhook_url):
     assert verify_mock.call_count == 1
 
 
+@pytest.mark.django_db
+def test_webhook_vendor_rate_limit_trips_at_limit_and_is_per_vendor(vendor_with_key):
+    """SF-4: the per-vendor 50/h limit caps a single vendor's webhook leads and is
+    keyed by vendor_id, so one vendor hitting the cap does not throttle another.
+
+    Rate limiting is disabled in the default test settings, so we enable it and
+    drive _webhook_vendor_ratelimited directly. The cache is cleared so the limiter
+    starts fresh. The first 50 calls for a vendor pass; the 51st trips. A second
+    vendor with a separate id is unaffected.
+    """
+    from django.core.cache import cache
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import _webhook_vendor_ratelimited
+
+    _user, vendor, _key = vendor_with_key
+    other_user = User.objects.create_user(
+        email="other-webhook-vendor@example.com",
+        password="p@ssw0rd",
+        name="Other Vendor",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Other Studio", owner=other_user)
+
+    cache.clear()
+    factory = RequestFactory()
+
+    def _request():
+        return factory.post("/service/public/briefs/ai/from-webhook")
+
+    with override_settings(RATELIMIT_ENABLE=True):
+        # The 50/h allowance: the first 50 calls are allowed, the 51st trips.
+        results = [_webhook_vendor_ratelimited(_request(), vendor) for _ in range(50)]
+        assert not any(results)
+        assert _webhook_vendor_ratelimited(_request(), vendor) is True
+        # A different vendor is keyed separately and is not throttled.
+        assert _webhook_vendor_ratelimited(_request(), other_vendor) is False
+
+
+@pytest.mark.django_db
+def test_webhook_returns_429_when_vendor_rate_limited(
+    api_client, webhook_url, vendor_with_key
+):
+    """SF-4: when the per-vendor limit trips, the endpoint answers 429 after the
+    key resolves and creates nothing."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3._webhook_vendor_ratelimited",
+        return_value=True,
+    ):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps({"email": "lead@ext.com", "message": "hi"}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 429
+    assert Brief.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_webhook_vendor_rate_limit_disabled_in_tests_by_default(vendor_with_key):
+    """Without RATELIMIT_ENABLE the helper is a no-op so unrelated tests are not
+    throttled by accumulated state."""
+    from django.test import RequestFactory
+
+    from aivus_backend.projects.api.views_brief_v3 import _webhook_vendor_ratelimited
+
+    _user, vendor, _key = vendor_with_key
+    request = RequestFactory().post("/service/public/briefs/ai/from-webhook")
+    assert _webhook_vendor_ratelimited(request, vendor) is False
+
+
 # --- key management endpoints ------------------------------------------------
 
 
