@@ -183,6 +183,11 @@ MIDDLEWARE = [
 # contract expects (PRD §8).
 RATELIMIT_VIEW = "aivus_backend.core.ratelimit.ratelimited_view"
 
+# Number of trusted reverse-proxy hops in front of Django (see resolve_client_ip).
+# Defaults to 0 (trust no proxy) so a spoofed X-Forwarded-For never wins in dev;
+# production overrides it with the real client -> Traefik -> Next.js -> Django count.
+RATELIMIT_TRUSTED_PROXY_COUNT = 0
+
 # Exempt API endpoints from CSRF validation (using HMAC instead)
 CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]
 # QA2-016: Set CSRF_COOKIE_HTTPONLY to True for security
