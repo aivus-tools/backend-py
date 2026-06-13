@@ -32,11 +32,38 @@ from .models import Template
 CONTENT_PREVIEW_LENGTH = 80
 
 
+class AnonymousDraftFilter(admin.SimpleListFilter):
+    """Filter abandoned anonymous drafts: no client and not finalized.
+
+    These are leads a visitor started on a personal link and never finished.
+    Stage 2 keeps them (the vendor still sees the in-progress lead); cleanup is
+    a manual admin action, never automatic.
+    """
+
+    title = "anonymous draft"
+    parameter_name = "anonymous_draft"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "Anonymous drafts"), ("no", "Claimed or finalized")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.filter(client__isnull=True).exclude(
+                conversation_status="finalized"
+            )
+        if self.value() == "no":
+            return queryset.filter(client__isnull=False) | queryset.filter(
+                conversation_status="finalized"
+            )
+        return queryset
+
+
 @admin.register(Brief)
 class BriefAdmin(ModelAdmin):
     list_display = [
         "id",
         "status",
+        "source",
         "conversation_status",
         "title",
         "document_language",
@@ -46,7 +73,14 @@ class BriefAdmin(ModelAdmin):
         "created_at",
     ]
     search_fields = ["id", "title", "client__name", "anonymous_token"]
-    list_filter = ["status", "conversation_status", "document_language", "created_at"]
+    list_filter = [
+        "status",
+        "source",
+        "conversation_status",
+        "document_language",
+        AnonymousDraftFilter,
+        "created_at",
+    ]
     readonly_fields = [
         "created_at",
         "updated_at",
@@ -57,6 +91,20 @@ class BriefAdmin(ModelAdmin):
         "message_count",
     ]
     ordering = ["-created_at"]
+    actions = ["delete_anonymous_drafts"]
+
+    @admin.action(description="Delete selected anonymous drafts (hard delete)")
+    def delete_anonymous_drafts(self, request, queryset):
+        deletable = queryset.filter(client__isnull=True).exclude(
+            conversation_status="finalized"
+        )
+        skipped = queryset.count() - deletable.count()
+        deleted_count = deletable.count()
+        deletable.delete()
+        message = f"Deleted {deleted_count} anonymous draft(s)."
+        if skipped:
+            message += f" Skipped {skipped} claimed or finalized brief(s)."
+        self.message_user(request, message)
 
 
 class ProjectCollaboratorInline(admin.TabularInline):
