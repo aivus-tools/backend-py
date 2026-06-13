@@ -1694,15 +1694,18 @@ def public_brief_ai_from_wix(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/h", method="POST")
 def public_brief_ai_from_webhook(request):
     """Create a vendor lead via the per-vendor webhook key.
 
     Authenticates with the X-Aivus-Webhook-Key header (separate from the global
     Wix secret), creates the inbound brief with source=webhook and immediately
-    attaches an RFP project to the vendor. An IP rate-limit fires before the key
-    is resolved so an attacker cannot brute-force keys; once the key resolves a
-    second 50/h per vendor_id limit caps a leaked key from flooding the inbox.
+    attaches an RFP project to the vendor. The IP rate-limit fires before the key
+    is resolved so an attacker cannot brute-force keys; it sits above the 50/h
+    per-vendor limit (PRD §6/§8) so a legitimate vendor posting from a single
+    server IP is bounded by the vendor limit, not the anti-brute IP limit. Once
+    the key resolves the 50/h per vendor_id limit caps a leaked key from flooding
+    the inbox.
     """
     vendor = _verify_vendor_webhook_key(request)
     if not vendor:
