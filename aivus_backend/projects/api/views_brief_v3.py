@@ -1436,6 +1436,25 @@ def _resolve_vendor_by_slug(slug: str) -> Vendor | None:
     return vendor
 
 
+def _public_send_vendor_matches_brief(brief: Brief, vendor: Vendor) -> bool:
+    """Guard the anonymous Send against slug swapping.
+
+    A personal-link brief is started on one vendor's branded page, which attaches
+    exactly one DRAFT project to that vendor. The slug in the Send body must point
+    back at that same vendor; otherwise an anonymous client could swap the slug
+    and send the lead to the wrong agency. When the brief has no project yet
+    (started outside the by-slug flow) the resolved vendor is accepted as-is.
+    """
+    existing_vendor_ids = set(
+        Project.objects.filter(brief=brief, deleted_at__isnull=True)
+        .values_list("vendor_id", flat=True)
+        .distinct()
+    )
+    if not existing_vendor_ids:
+        return True
+    return vendor.id in existing_vendor_ids
+
+
 def _vendor_public_branding(vendor: Vendor, slug: str) -> dict:
     settings_row = VendorSettings.objects.filter(vendor=vendor).first()
     logo_url = None
@@ -1763,6 +1782,11 @@ def public_brief_ai_send(request, brief_id):
         return JsonResponse(
             {"error": "This agency is no longer accepting briefs"}, status=404
         )
+
+    # The brief was started on one vendor's branded link; reject a Send whose slug
+    # points at a different vendor than the brief's existing project (slug swap).
+    if not _public_send_vendor_matches_brief(brief, vendor):
+        return JsonResponse({"error": "Brief does not belong to this link"}, status=409)
 
     recipient_email = _normalize_contact_email(body.get("email") or "")
     if not recipient_email:

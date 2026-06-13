@@ -140,6 +140,32 @@ def test_public_send_soft_deleted_vendor_404(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_rejects_slug_of_other_vendor(api_client, vendor, anon_brief):
+    """SF-5: the brief's DRAFT project belongs to `vendor`. A Send whose slug
+    resolves to a different vendor (slug swap) must be rejected with 409."""
+    other_user = User.objects.create_user(
+        email="other-send-vendor@example.com",
+        password="p@ssw0rd",
+        name="Other",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Other Studio", owner=other_user)
+    VendorSettings.objects.create(
+        vendor=other_vendor, slug="other-studio", company_name="Other Studio Co"
+    )
+
+    response = api_client.post(
+        reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+        data=json.dumps({"slug": "other-studio", "email": "c@example.com"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="send-token",
+    )
+    assert response.status_code == 409
+    # The lead must not have leaked to the wrong vendor.
+    assert not Project.objects.filter(brief=anon_brief, vendor=other_vendor).exists()
+
+
+@pytest.mark.django_db
 def test_public_send_not_ready_400(api_client, vendor):
     brief = Brief.objects.create(
         client=None,
