@@ -124,11 +124,57 @@ def test_webhook_revoked_key_401(api_client, webhook_url, vendor_with_key):
 
 
 @pytest.mark.django_db
-def test_webhook_missing_message_400(api_client, webhook_url, vendor_with_key):
+def test_webhook_missing_message_still_creates_lead(
+    api_client, webhook_url, vendor_with_key
+):
+    """SF-5: an external form may submit only contact details with no message. We
+    must not lose the lead — the brief is created with a placeholder message and
+    the project still lands at the vendor."""
+    _user, vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps({"email": "lead@ext.com"}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 201
+    brief = Brief.objects.get(id=response.json()["briefId"])
+    assert brief.contact_email == "lead@ext.com"
+    first_message = brief.chat_messages.order_by("created_at").first()
+    assert first_message is not None
+    assert first_message.content.strip()
+    assert Project.objects.filter(brief=brief, vendor=vendor).exists()
+
+
+@pytest.mark.django_db
+def test_webhook_blank_message_still_creates_lead(
+    api_client, webhook_url, vendor_with_key
+):
+    """SF-5: a whitespace-only message is treated the same as a missing one."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps({"email": "lead@ext.com", "message": "   "}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 201
+    assert Brief.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_webhook_overlong_message_400(api_client, webhook_url, vendor_with_key):
+    """An over-long message is still rejected even though empty ones are allowed."""
+    from aivus_backend.projects.api.views_brief_v3 import MAX_MESSAGE_LENGTH
+
     _user, _vendor, key_row = vendor_with_key
     response = api_client.post(
         webhook_url,
-        data=json.dumps({"email": "lead@ext.com"}),
+        data=json.dumps(
+            {"email": "lead@ext.com", "message": "x" * (MAX_MESSAGE_LENGTH + 1)}
+        ),
         content_type="application/json",
         HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
     )

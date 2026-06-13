@@ -80,6 +80,9 @@ MESSAGE_LIMIT_AUTH = 100
 MESSAGE_LIMIT_ANON = 50
 MAX_BRIEF_COST_USD = Decimal("5.00")
 MAX_MESSAGE_LENGTH = 10000
+# Stand-in first message for a webhook lead that arrives with contact details but
+# no message text, so an empty-message external form does not lose the lead.
+WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER = "New inquiry submitted via website form."
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
 MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
@@ -1722,9 +1725,14 @@ def public_brief_ai_from_webhook(request):
 
     payload = _extract_wix_payload(body)
 
-    message, error = _validate_message(payload)
-    if error or message is None:
-        return error or JsonResponse({"error": "Message is required"}, status=400)
+    # SF-5: an external form may submit only contact details with no message. We
+    # must not drop a lead over an empty message, so substitute a placeholder
+    # before validation; an over-long message is still rejected.
+    message = (payload.get("message") or "").strip()
+    if not message:
+        message = WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return JsonResponse({"error": "Message too long"}, status=400)
 
     brief, task_id, token = _create_inbound_brief(
         message=message,
