@@ -945,6 +945,103 @@ def test_finalized_status_is_sticky_after_followup_chat(
 
 
 @pytest.mark.django_db
+def test_public_finalized_chat_forwards_document_html(api_client, seeded_prompts):
+    """SF-3: anonymous public chat must forward the editor's documentHtml so the
+    AI edits on top of the client's in-flight manual changes."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="sf3-token",
+        conversation_status="finalized",
+        document_language="en",
+        source="personal_link",
+    )
+
+    fake_result = {
+        "reply": "done",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+        "updated_documents": [],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
+        return_value=fake_result,
+    ) as runner_mock:
+        resp = api_client.post(
+            reverse("projects_api:public_brief_ai_chat", args=[brief.id]),
+            data=json.dumps(
+                {"message": "make it flexible", "documentHtml": "<p>edited live</p>"}
+            ),
+            content_type="application/json",
+            **_public_headers("sf3-token"),
+        )
+    assert resp.status_code == 200
+    _, kwargs = runner_mock.call_args
+    assert kwargs["current_document_html"] == "<p>edited live</p>"
+
+
+@pytest.mark.django_db
+def test_process_finalized_turn_uses_supplied_document_html(
+    client_user, client_profile, seeded_prompts
+):
+    """The supplied documentHtml replaces the persisted document in the prompt's
+    CURRENT_DOCUMENTS block, so the AI sees the client's latest edits."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_finalized_turn
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>stale persisted</p>"
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["user"] = messages[-1]["content"]
+        return (
+            {"reply": "ok", "edits": []},
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        process_finalized_turn(
+            brief=brief,
+            user_message="tweak it",
+            attachments=[],
+            history=[],
+            current_document_html="<p>fresh client edit</p>",
+        )
+
+    doc_block = next(
+        part["text"]
+        for part in captured["user"]
+        if part.get("type") == "text" and "CURRENT_DOCUMENTS" in part.get("text", "")
+    )
+    assert "fresh client edit" in doc_block
+    assert "stale persisted" not in doc_block
+
+
+@pytest.mark.django_db
 def test_process_brief_turn_handles_list_response_from_llm(
     client_user, client_profile, seeded_prompts
 ):

@@ -752,6 +752,7 @@ def process_finalized_turn(
     user_message: str,
     attachments: list[BriefAttachment] | None = None,
     history: list[ChatMessage] | None = None,
+    current_document_html: str | None = None,
 ) -> dict[str, Any]:
     attachments = attachments or []
     history = history or []
@@ -783,6 +784,15 @@ def process_finalized_turn(
         brief=brief, kind__in=list(_EDITABLE_DOCUMENTS)
     )
     documents: dict[str, BriefFinalDocument] = {doc.kind: doc for doc in document_qs}
+
+    # Honour the client's in-flight manual edits to the production brief: the
+    # editor sends the live document HTML with the chat message, which may be
+    # ahead of the persisted version. Seed it onto the in-memory document so the
+    # AI reads (and edits on top of) exactly what the client sees.
+    if current_document_html is not None:
+        production = documents.get("production_brief")
+        if production is not None:
+            production.html = sanitize_html(current_document_html)
 
     user_parts = _build_user_parts(user_message, attachments)
     user_parts.append({"type": "text", "text": _current_documents_block(documents)})

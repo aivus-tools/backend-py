@@ -147,6 +147,19 @@ def _parse_attachment_ids(body) -> list[str]:
     return [str(x) for x in ids if x]
 
 
+def _parse_document_html(body) -> str | None:
+    """Read the editor's live document HTML from a chat body.
+
+    The brief editor posts ``documentHtml`` with every message so the AI edits
+    on top of the client's in-flight manual changes. Returns None when absent or
+    not a string; capped at the same limit as the document PATCH endpoint.
+    """
+    html = body.get("documentHtml")
+    if not isinstance(html, str):
+        return None
+    return html[:MAX_FINAL_DOCUMENT_HTML_LENGTH]
+
+
 def _get_brief_for_client(brief_id, request) -> Brief | None:
     client_id = request.user_data.get("client_id")
     if not client_id:
@@ -287,6 +300,7 @@ def _process_chat(
     brief: Brief,
     user_message_obj: ChatMessage,
     message_text: str,
+    current_document_html: str | None = None,
 ) -> tuple[ChatMessage | None, dict | None, JsonResponse | None]:
     # Post-finalize feedback branch: if the last assistant message was a
     # feedback_request, treat the user reply as feedback text and short-circuit
@@ -306,11 +320,13 @@ def _process_chat(
         )
     )
 
-    turn_runner = (
-        process_finalized_turn
-        if brief.conversation_status == "finalized"
-        else process_brief_turn
-    )
+    is_finalized = brief.conversation_status == "finalized"
+    turn_runner = process_finalized_turn if is_finalized else process_brief_turn
+    # documentHtml is only meaningful once the editable document exists (finalized
+    # turn); pre-finalize chat has no document yet.
+    extra_kwargs: dict[str, Any] = {}
+    if is_finalized and current_document_html is not None:
+        extra_kwargs["current_document_html"] = current_document_html
 
     try:
         result = turn_runner(
@@ -318,6 +334,7 @@ def _process_chat(
             user_message=message_text,
             attachments=attachments,
             history=history,
+            **extra_kwargs,
         )
     except Exception:
         logger.exception(
@@ -701,6 +718,7 @@ def client_brief_ai_chat(request, brief_id):
         return JsonResponse({"error": "User not found"}, status=401)
 
     attachment_ids = _parse_attachment_ids(body)
+    document_html = _parse_document_html(body)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
@@ -719,7 +737,7 @@ def client_brief_ai_chat(request, brief_id):
 
     brief.refresh_from_db()
     assistant_message, result, error_response = _process_chat(
-        brief, user_message, message
+        brief, user_message, message, current_document_html=document_html
     )
     if error_response or assistant_message is None or result is None:
         return error_response or JsonResponse(
@@ -1904,6 +1922,7 @@ def public_brief_ai_chat(request, brief_id):
 
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
+    document_html = _parse_document_html(body)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
@@ -1923,7 +1942,7 @@ def public_brief_ai_chat(request, brief_id):
 
     brief.refresh_from_db()
     assistant_message, result, error_response = _process_chat(
-        brief, user_message, message
+        brief, user_message, message, current_document_html=document_html
     )
     if error_response or assistant_message is None or result is None:
         return error_response or JsonResponse(
