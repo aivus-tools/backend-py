@@ -125,7 +125,7 @@ def test_vendor_lead_email_links_to_dashboard_project():
 
     send_mock.assert_called_once()
     project_url = send_mock.call_args.kwargs["context"]["project_url"]
-    assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}"
+    assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}/details"
     assert "/app/projects/" not in project_url
 
 

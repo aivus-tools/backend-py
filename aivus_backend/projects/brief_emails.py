@@ -55,7 +55,7 @@ def _share_url(token: str) -> str:
 
 
 def _project_url(project) -> str:
-    return f"{_frontend_url()}/app/dashboard/{project.id}"
+    return f"{_frontend_url()}/app/dashboard/{project.id}/details"
 
 
 def _brief_pdf_attachment(brief) -> tuple[str, str, str] | None:
