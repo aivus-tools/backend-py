@@ -46,6 +46,11 @@ urlpatterns = [
         user_views.vendor_settings_logo,
         name="vendor-settings-logo",
     ),
+    path(
+        "api/v1/vendor/settings/slug/suggest",
+        user_views.vendor_slug_suggest,
+        name="vendor-slug-suggest",
+    ),
     path("api/v1/vendor/settings", user_views.vendor_settings, name="vendor-settings"),
     # Catalog API
     path("api/v1/", include("aivus_backend.catalog.api.urls", namespace="catalog_api")),

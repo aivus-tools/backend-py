@@ -292,6 +292,14 @@ class VendorSettings(models.Model):
     logo = models.ImageField(upload_to="vendor_logos/", null=True, blank=True)
     company_name = models.CharField(max_length=255, blank=True, default="")
     agency_name = models.CharField(max_length=255, blank=True, default="")
+    slug = models.SlugField(
+        max_length=40,
+        unique=True,
+        db_index=True,
+        null=True,
+        blank=True,
+    )
+    lead_notification_email = models.EmailField(blank=True, default="")
     fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)

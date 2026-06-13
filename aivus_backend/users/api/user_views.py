@@ -6,17 +6,22 @@ from decimal import Decimal
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
+from django.db import IntegrityError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
+from aivus_backend.core.slugs import validate_slug
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+from aivus_backend.users.slug_suggest import ensure_default_slug
+from aivus_backend.users.slug_suggest import suggest_slug
 
 MAX_NAME_LENGTH = 255
 MAX_LANGUAGE_LENGTH = 5
@@ -483,31 +488,53 @@ def vendor_settings(request):
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
 
     if request.method == "GET":
+        ensure_default_slug(settings)
         return JsonResponse(_build_vendor_settings_response(settings))
 
+    return _patch_vendor_settings(settings, request)
+
+
+_VENDOR_PERCENT_FIELDS = {
+    "fringesPercent": "fringes_percent",
+    "handlingPercent": "handling_percent",
+    "markupPercent": "markup_percent",
+    "productionInsurancePercent": "production_insurance_percent",
+    "productionFeePercent": "production_fee_percent",
+    "postMarkupPercent": "post_markup_percent",
+    "postInsurancePercent": "post_insurance_percent",
+    "postTaxPercent": "post_tax_percent",
+}
+
+
+def _assign_vendor_settings_fields(settings, data):
+    if "companyName" in data:
+        settings.company_name = data["companyName"]
+    if "agencyName" in data:
+        settings.agency_name = data["agencyName"]
+    if "leadNotificationEmail" in data:
+        error = _apply_lead_notification_email(settings, data)
+        if error:
+            return error
+    if "slug" in data:
+        error = _apply_slug(settings, data)
+        if error:
+            return error
+    for json_key, model_field in _VENDOR_PERCENT_FIELDS.items():
+        if json_key in data:
+            setattr(settings, model_field, Decimal(str(data[json_key])))
+    return None
+
+
+def _patch_vendor_settings(settings, request):
     try:
         data = json.loads(request.body)
-
-        if "companyName" in data:
-            settings.company_name = data["companyName"]
-        if "agencyName" in data:
-            settings.agency_name = data["agencyName"]
-
-        percent_fields_map = {
-            "fringesPercent": "fringes_percent",
-            "handlingPercent": "handling_percent",
-            "markupPercent": "markup_percent",
-            "productionInsurancePercent": "production_insurance_percent",
-            "productionFeePercent": "production_fee_percent",
-            "postMarkupPercent": "post_markup_percent",
-            "postInsurancePercent": "post_insurance_percent",
-            "postTaxPercent": "post_tax_percent",
-        }
-        for json_key, model_field in percent_fields_map.items():
-            if json_key in data:
-                setattr(settings, model_field, Decimal(str(data[json_key])))
-
-        settings.save()
+        error = _assign_vendor_settings_fields(settings, data)
+        if error:
+            return error
+        try:
+            settings.save()
+        except IntegrityError:
+            return JsonResponse({"error": "This link is taken"}, status=409)
         return JsonResponse(_build_vendor_settings_response(settings))
 
     except json.JSONDecodeError:
@@ -548,6 +575,57 @@ def vendor_settings_logo(request):
     return JsonResponse({"logoUrl": settings.logo.url})
 
 
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_slug_suggest(request):
+    user_data = request.user_data
+    user_id = user_data.get("id")
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    vendor = Vendor.objects.filter(owner=user).first()
+    if not vendor:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
+    slug = suggest_slug(settings, use_llm=True)
+    return JsonResponse({"slug": slug})
+
+
+def _apply_lead_notification_email(settings, data):
+    raw = data.get("leadNotificationEmail")
+    email = (raw or "").strip()
+    if email:
+        try:
+            validate_email(email)
+        except ValidationError:
+            return JsonResponse({"error": "Invalid email"}, status=400)
+    settings.lead_notification_email = email
+    return None
+
+
+def _apply_slug(settings, data):
+    raw = (data.get("slug") if isinstance(data.get("slug"), str) else "").strip()
+    if not raw:
+        settings.slug = None
+        return None
+    error = validate_slug(raw)
+    if error:
+        return JsonResponse({"error": error}, status=400)
+    if (
+        VendorSettingsModel.objects.filter(slug=raw)
+        .exclude(vendor_id=settings.vendor_id)
+        .exists()
+    ):
+        return JsonResponse({"error": "This link is taken"}, status=409)
+    settings.slug = raw
+    return None
+
+
 def _build_vendor_settings_response(settings):
     return {
         "id": str(settings.id),
@@ -555,6 +633,8 @@ def _build_vendor_settings_response(settings):
         "logoUrl": settings.logo.url if settings.logo else None,
         "companyName": settings.company_name,
         "agencyName": settings.agency_name,
+        "slug": settings.slug or None,
+        "leadNotificationEmail": settings.lead_notification_email,
         "fringesPercent": str(settings.fringes_percent),
         "handlingPercent": str(settings.handling_percent),
         "markupPercent": str(settings.markup_percent),
