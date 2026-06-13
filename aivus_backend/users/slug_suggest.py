@@ -97,13 +97,3 @@ def suggest_slug(vendor_settings, *, use_llm: bool = True) -> str:
     if not fallback or is_reserved_slug(fallback):
         fallback = f"vendor-{uuid.uuid4().hex[:8]}"
     return _ensure_available(fallback, exclude_vendor_id=exclude_vendor_id)
-
-
-def ensure_default_slug(vendor_settings) -> str:
-    """Lazily assign a slug on first read when the vendor has none yet."""
-    if vendor_settings.slug:
-        return vendor_settings.slug
-    slug = suggest_slug(vendor_settings, use_llm=True)
-    vendor_settings.slug = slug
-    vendor_settings.save(update_fields=["slug", "updated_at"])
-    return slug

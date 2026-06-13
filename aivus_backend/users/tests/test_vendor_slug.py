@@ -75,33 +75,19 @@ def test_reserved_slugs_include_frontend_segments():
 
 
 @pytest.mark.django_db
-def test_get_settings_lazy_assigns_slug_via_llm(api_client, vendor_user):
+def test_get_settings_returns_null_slug_without_llm_or_persist(api_client, vendor_user):
     user, vendor = vendor_user
-    with patch(
-        "aivus_backend.users.slug_suggest._llm_candidate", return_value="pixel-forge"
-    ):
+    with patch("aivus_backend.users.slug_suggest._llm_candidate") as llm_mock:
         response = api_client.get(reverse("vendor-settings"), **_auth(user))
 
     assert response.status_code == 200
-    assert response.json()["slug"] == "pixel-forge"
-    assert VendorSettings.objects.get(vendor=vendor).slug == "pixel-forge"
+    assert response.json()["slug"] is None
+    llm_mock.assert_not_called()
+    assert VendorSettings.objects.get(vendor=vendor).slug is None
 
 
 @pytest.mark.django_db
-def test_get_settings_falls_back_to_slugify_on_llm_error(api_client, vendor_user):
-    user, _vendor = vendor_user
-    with patch(
-        "aivus_backend.users.slug_suggest._llm_candidate",
-        side_effect=RuntimeError("llm down"),
-    ):
-        response = api_client.get(reverse("vendor-settings"), **_auth(user))
-
-    assert response.status_code == 200
-    assert response.json()["slug"] == "pixel-forge-studio"
-
-
-@pytest.mark.django_db
-def test_get_settings_is_idempotent_for_slug(api_client, vendor_user):
+def test_get_settings_returns_persisted_slug(api_client, vendor_user):
     user, vendor = vendor_user
     VendorSettings.objects.create(vendor=vendor, slug="fixed-slug")
     with patch("aivus_backend.users.slug_suggest._llm_candidate") as llm_mock:

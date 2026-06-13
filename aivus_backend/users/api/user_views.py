@@ -21,7 +21,6 @@ from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.models import VendorSettings as VendorSettingsModel
 from aivus_backend.users.models import VendorWebhookKey
-from aivus_backend.users.slug_suggest import ensure_default_slug
 from aivus_backend.users.slug_suggest import suggest_slug
 
 MAX_NAME_LENGTH = 255
@@ -489,7 +488,6 @@ def vendor_settings(request):
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
 
     if request.method == "GET":
-        ensure_default_slug(settings)
         return JsonResponse(_build_vendor_settings_response(settings))
 
     return _patch_vendor_settings(settings, request)
