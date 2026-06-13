@@ -56,11 +56,14 @@ def serialize_client_manager(manager: ClientManager) -> dict:
 
 def serialize_project(project: Project, include_relations: bool = True) -> dict:  # noqa: FBT001, FBT002
     """Serialize Project model to dict."""
+    brief = project.brief if project.brief_id else None
     result = {
         "id": str(project.id),
         "name": project.name,
         "vendorId": str(project.vendor_id),
         "briefId": str(project.brief_id) if project.brief_id else None,
+        "briefConversationStatus": brief.conversation_status if brief else None,
+        "hasContactEmail": bool(brief.contact_email) if brief else False,
         "teamId": str(project.team_id) if project.team_id else None,
         "status": project.status,
         # New fields
