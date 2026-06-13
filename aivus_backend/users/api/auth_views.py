@@ -110,9 +110,31 @@ def _ensure_client_profile(user):
 def _try_claim_pending_brief(user):
     if not user.pending_brief_id or not user.pending_brief_token:
         return None
-    client = _ensure_client_profile(user)
     from aivus_backend.projects.models import Brief  # noqa: PLC0415
     from aivus_backend.projects.models import ChatMessage  # noqa: PLC0415
+
+    pending = Brief.objects.filter(
+        id=user.pending_brief_id,
+        anonymous_token=user.pending_brief_token,
+        client__isnull=True,
+        deleted_at__isnull=True,
+    ).first()
+    # Mirror client_brief_ai_claim: a brief carrying a contact email may only be
+    # claimed by the matching account. On mismatch we drop the pending pointer and
+    # skip the claim silently so the registration/login response stays successful.
+    if pending is not None:
+        contact_email = (pending.contact_email or "").strip()
+        if contact_email and contact_email.casefold() != (user.email or "").casefold():
+            logger.info(
+                "Skipping pending-brief claim: contact email does not match user %s",
+                user.email,
+            )
+            user.pending_brief_id = None
+            user.pending_brief_token = None
+            user.save(update_fields=["pending_brief_id", "pending_brief_token"])
+            return None
+
+    client = _ensure_client_profile(user)
 
     now = timezone.now()
     with transaction.atomic():
