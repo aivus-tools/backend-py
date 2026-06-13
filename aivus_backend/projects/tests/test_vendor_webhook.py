@@ -73,6 +73,31 @@ def test_webhook_valid_key_creates_brief_and_project(
 
 
 @pytest.mark.django_db
+def test_webhook_notifies_vendor(api_client, webhook_url, vendor_with_key):
+    _user, vendor, key_row = vendor_with_key
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=lambda func: func(),
+        ),
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock,
+    ):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps({"email": "lead@ext.com", "message": "Need a 30s spot"}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+
+    assert response.status_code == 201
+    vendor_mock.assert_called_once()
+    project = vendor_mock.call_args.args[0]
+    assert project.vendor_id == vendor.id
+
+
+@pytest.mark.django_db
 def test_webhook_invalid_key_401(api_client, webhook_url, vendor_with_key):
     response = api_client.post(
         webhook_url,

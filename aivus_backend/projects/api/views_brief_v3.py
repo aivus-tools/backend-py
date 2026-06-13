@@ -1522,10 +1522,32 @@ def public_brief_ai_from_webhook(request):
         source="webhook",
         vendor=vendor,
     )
+    _notify_vendor_of_lead(brief, vendor, request)
     return JsonResponse(
         {"briefId": str(brief.id), "token": token, "taskId": task_id},
         status=201,
     )
+
+
+def _notify_vendor_of_lead(brief: Brief, vendor: Vendor, request) -> None:
+    """Dispatch the vendor lead notification for an inbound webhook brief.
+
+    Mirrors the Send flow's vendor email, scheduled on_commit so the worker only
+    runs once the brief and its project are persisted.
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    language = brief_emails.resolve_email_language(
+        brief, request.headers.get("Accept-Language", "")
+    )
+
+    def _dispatch() -> None:
+        project = Project.objects.filter(brief=brief, vendor=vendor).first()
+        if not project:
+            return
+        brief_emails.send_vendor_lead_email(project, brief, language)
+
+    transaction.on_commit(_dispatch)
 
 
 def _webhook_vendor_ratelimited(request, vendor) -> bool:
