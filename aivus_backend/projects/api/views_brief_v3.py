@@ -26,6 +26,7 @@ from django_ratelimit.decorators import ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import BriefSource
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.projects import stt
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
@@ -51,6 +52,7 @@ from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import Project
 from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
@@ -58,6 +60,8 @@ from aivus_backend.projects.tasks import import_wix_attachments_task
 from aivus_backend.projects.tasks import persist_message_traces
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
+from aivus_backend.users.models import VendorSettings
 
 if TYPE_CHECKING:
     from django.core.files.uploadedfile import UploadedFile
@@ -1213,6 +1217,48 @@ def _extract_wix_payload(body: dict) -> dict:
     return {"email": email, "name": name, "message": message, "files": files}
 
 
+def _project_name_for_brief(brief: Brief) -> str:
+    title = (brief.title or "").strip()
+    return (title or "New brief lead")[:255]
+
+
+def _resolve_vendor_by_slug(slug: str) -> Vendor | None:
+    """Resolve an active vendor from a brief-link slug.
+
+    Soft-deleted vendors are filtered manually because the FK uses no on_delete
+    cascade for deleted_at; a slug pointing at a deleted vendor must 404.
+    """
+    settings_row = (
+        VendorSettings.objects.filter(slug=slug).select_related("vendor").first()
+    )
+    if not settings_row:
+        return None
+    vendor = settings_row.vendor
+    if vendor.deleted_at is not None:
+        return None
+    return vendor
+
+
+def _vendor_public_branding(vendor: Vendor, slug: str) -> dict:
+    settings_row = VendorSettings.objects.filter(vendor=vendor).first()
+    logo_url = None
+    vendor_name = vendor.name
+    if settings_row:
+        if settings_row.logo:
+            logo_url = settings_row.logo.url
+        vendor_name = (
+            (settings_row.company_name or "").strip()
+            or (settings_row.agency_name or "").strip()
+            or vendor.name
+        )
+    return {
+        "valid": True,
+        "vendorName": vendor_name,
+        "vendorLogoUrl": logo_url,
+        "slug": slug,
+    }
+
+
 def _verify_wix_secret(request) -> bool:
     expected = getattr(settings, "WIX_WEBHOOK_SECRET", "")
     if not expected:
@@ -1316,6 +1362,60 @@ def public_brief_ai_from_wix(request):
             "taskId": task_id,
             "briefUrl": brief_url,
         },
+        status=201,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="60/h", method="GET")
+def public_brief_ai_by_slug(request, slug):
+    """Resolve a vendor brief-link slug to public branding for the start screen.
+
+    Returns 404 for unknown or soft-deleted vendors so the frontend can render
+    the "link not found" state without leaking vendor existence detail.
+    """
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"valid": False, "error": "Link not found"}, status=404)
+    return JsonResponse(_vendor_public_branding(vendor, slug))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+def public_brief_ai_by_slug_drafts(request, slug):
+    """Start an anonymous brief on a vendor's personal link.
+
+    Creates the draft brief (source=personal_link) and immediately attaches a
+    DRAFT project to the vendor so the lead shows up "in progress" before the
+    client finishes. The project is created in the bypass path because the
+    standard vendor guard forbids attaching anonymous briefs vendors did not
+    already touch — here the vendor explicitly owns the link.
+    """
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"error": "Link not found"}, status=404)
+
+    token = secrets.token_urlsafe(48)
+    with transaction.atomic():
+        brief = Brief.objects.create(
+            client=None,
+            anonymous_token=token,
+            source=BriefSource.PERSONAL_LINK,
+        )
+        Project.objects.get_or_create(
+            vendor=vendor,
+            brief=brief,
+            defaults={
+                "name": _project_name_for_brief(brief),
+                "status": ProjectStatus.DRAFT,
+            },
+        )
+    return JsonResponse(
+        {"briefId": str(brief.id), "token": token},
         status=201,
     )
 
