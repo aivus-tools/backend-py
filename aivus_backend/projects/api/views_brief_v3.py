@@ -1732,19 +1732,17 @@ def _notify_vendor_of_lead(brief: Brief, vendor: Vendor, request) -> None:
     """Dispatch the vendor lead notification for an inbound webhook brief.
 
     Mirrors the Send flow's vendor email, scheduled on_commit so the worker only
-    runs once the brief and its project are persisted.
+    runs once the brief and its project are persisted. The email language comes
+    from the vendor's own settings (resolved inside send_vendor_lead_email), not
+    the brief's document_language, which is empty for inbound webhook/wix leads.
     """
     from aivus_backend.projects import brief_emails  # noqa: PLC0415
-
-    language = brief_emails.resolve_email_language(
-        brief, request.headers.get("Accept-Language", "")
-    )
 
     def _dispatch() -> None:
         project = Project.objects.filter(brief=brief, vendor=vendor).first()
         if not project:
             return
-        brief_emails.send_vendor_lead_email(project, brief, language)
+        brief_emails.send_vendor_lead_email(project, brief)
 
     transaction.on_commit(_dispatch)
 

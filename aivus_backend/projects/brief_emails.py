@@ -42,6 +42,21 @@ def resolve_email_language(brief, accept_language: str = "") -> str:
     return resolve_language(brief.document_language or None, accept_language or None)
 
 
+def resolve_vendor_email_language(vendor) -> str:
+    """Language for the vendor notification, driven by the vendor's own settings.
+
+    The brief's ``document_language`` reflects the client's choice and is empty
+    for inbound leads (webhook / wix), so it must not drive the vendor's email.
+    Use the owner's ``UserSettings.language``, defaulting to English.
+    """
+    from aivus_backend.users.i18n import user_language  # noqa: PLC0415
+
+    owner = getattr(vendor, "owner", None)
+    if owner is None:
+        return "en"
+    return user_language(owner)
+
+
 def _client_register_url(brief, recipient_email: str, token: str) -> str:
     frontend = _frontend_url()
     params = {"email": recipient_email}
@@ -123,14 +138,20 @@ def send_client_lead_email(
     )
 
 
-def send_vendor_lead_email(project, brief, language: str) -> None:
-    """Notify the vendor that a new lead landed. No PDF, leads to the cabinet."""
+def send_vendor_lead_email(project, brief) -> None:
+    """Notify the vendor that a new lead landed. No PDF, leads to the cabinet.
+
+    The language follows the vendor's own settings, not the brief's
+    document_language: the latter is the client's choice and is empty for inbound
+    leads (webhook / wix), which would otherwise force the vendor email to English.
+    """
     from aivus_backend.users.tasks import send_to_recipient_email  # noqa: PLC0415
 
     recipient = _vendor_notification_recipient(project.vendor)
     if not recipient:
         logger.warning("no vendor notification recipient: vendor=%s", project.vendor_id)
         return
+    language = resolve_vendor_email_language(project.vendor)
     context = {
         "vendor_name": brief_vendor_name(brief, project=project),
         "contact_email": brief.contact_email,

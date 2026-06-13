@@ -432,7 +432,7 @@ def send_emails_task(
             logger.exception("client lead email failed brief=%s", brief_id)
 
     try:
-        brief_emails.send_vendor_lead_email(project, brief, language)
+        brief_emails.send_vendor_lead_email(project, brief)
     except Exception:
         logger.exception("vendor lead email failed brief=%s", brief_id)
 

@@ -121,12 +121,55 @@ def test_vendor_lead_email_links_to_dashboard_project():
     )
 
     with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as send_mock:
-        brief_emails.send_vendor_lead_email(project, brief, "en")
+        brief_emails.send_vendor_lead_email(project, brief)
 
     send_mock.assert_called_once()
     project_url = send_mock.call_args.kwargs["context"]["project_url"]
     assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}/details"
     assert "/app/projects/" not in project_url
+
+
+@pytest.mark.django_db
+def test_vendor_lead_email_language_from_vendor_settings_not_document_language():
+    """SF-10: the vendor notification language follows the vendor's own settings,
+    not the brief's document_language. Inbound webhook/wix leads carry an empty
+    document_language, so a vendor configured for Russian must still get a Russian
+    email instead of defaulting to English."""
+    from aivus_backend.users.models import UserSettings
+
+    owner = User.objects.create_user(
+        email="ru-vendor@example.com",
+        password="p@ssw0rd",
+        name="RU Owner",
+        group="VENDOR",
+    )
+    UserSettings.objects.create(user=owner, language="ru")
+    vendor = Vendor.objects.create(name="RU Studio", owner=owner)
+    brief = Brief.objects.create(
+        client=None, contact_email="lead@example.com", document_language=""
+    )
+    project = Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as send_mock:
+        brief_emails.send_vendor_lead_email(project, brief)
+
+    send_mock.assert_called_once()
+    assert send_mock.call_args.kwargs["template"] == "emails/vendor_lead_ru.html"
+    assert send_mock.call_args.kwargs["subject"] == brief_emails.VENDOR_SUBJECTS["ru"]
+
+
+@pytest.mark.django_db
+def test_resolve_vendor_email_language_defaults_to_en_without_settings():
+    owner = User.objects.create_user(
+        email="no-settings-vendor@example.com",
+        password="p@ssw0rd",
+        name="Owner",
+        group="VENDOR",
+    )
+    vendor = Vendor.objects.create(name="Default Studio", owner=owner)
+    assert brief_emails.resolve_vendor_email_language(vendor) == "en"
 
 
 @pytest.mark.django_db
