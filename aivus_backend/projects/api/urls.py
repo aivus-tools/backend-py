@@ -222,6 +222,11 @@ urlpatterns = [
         name="public_brief_ai_from_wix",
     ),
     path(
+        "public/briefs/ai/from-webhook",
+        views_brief_v3.public_brief_ai_from_webhook,
+        name="public_brief_ai_from_webhook",
+    ),
+    path(
         "public/briefs/ai/by-slug/<slug:slug>",
         views_brief_v3.public_brief_ai_by_slug,
         name="public_brief_ai_by_slug",

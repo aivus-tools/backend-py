@@ -1332,6 +1332,33 @@ def _verify_wix_secret(request) -> bool:
     return bool(provided) and hmac.compare_digest(provided, expected)
 
 
+def _verify_vendor_webhook_key(request) -> Vendor | None:
+    """Resolve the vendor from the per-vendor webhook key header.
+
+    Uses a constant-time compare against the active key. A revoked or unknown
+    key, or a soft-deleted vendor, returns None so the caller answers 401.
+    """
+    from aivus_backend.users.models import VendorWebhookKey  # noqa: PLC0415
+
+    provided = request.headers.get("X-Aivus-Webhook-Key", "")
+    if not provided:
+        return None
+
+    row = (
+        VendorWebhookKey.objects.filter(is_active=True)
+        .select_related("vendor")
+        .filter(key=provided)
+        .first()
+    )
+    if not row:
+        return None
+    if not hmac.compare_digest(row.key, provided):
+        return None
+    if row.vendor.deleted_at is not None:
+        return None
+    return row.vendor
+
+
 def _create_inbound_brief(  # noqa: PLR0913
     *,
     message: str,
@@ -1364,6 +1391,15 @@ def _create_inbound_brief(  # noqa: PLR0913
             message_count=F("message_count") + 1,
             pending_task_id=task_id,
         )
+        if vendor is not None:
+            Project.objects.get_or_create(
+                vendor=vendor,
+                brief=brief,
+                defaults={
+                    "name": _project_name_for_brief(brief),
+                    "status": ProjectStatus.RFP,
+                },
+            )
 
     brief_id_str = str(brief.id)
     if file_specs:
@@ -1428,6 +1464,65 @@ def public_brief_ai_from_wix(request):
             "briefUrl": brief_url,
         },
         status=201,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+def public_brief_ai_from_webhook(request):
+    """Create a vendor lead via the per-vendor webhook key.
+
+    Authenticates with the X-Aivus-Webhook-Key header (separate from the global
+    Wix secret), creates the inbound brief with source=webhook and immediately
+    attaches an RFP project to the vendor. Rate-limited 50/h per vendor_id once
+    the key resolves so a leaked key cannot flood a vendor's inbox.
+    """
+    vendor = _verify_vendor_webhook_key(request)
+    if not vendor:
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    if _webhook_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+    if not isinstance(body, dict):
+        return JsonResponse({"error": "Invalid payload"}, status=400)
+
+    payload = _extract_wix_payload(body)
+
+    message, error = _validate_message(payload)
+    if error or message is None:
+        return error or JsonResponse({"error": "Message is required"}, status=400)
+
+    brief, task_id, token = _create_inbound_brief(
+        message=message,
+        contact_email=payload["email"],
+        contact_name=payload["name"],
+        file_specs=payload["files"][:MAX_ATTACHMENTS_PER_BRIEF_ANON],
+        source="webhook",
+        vendor=vendor,
+    )
+    return JsonResponse(
+        {"briefId": str(brief.id), "token": token, "taskId": task_id},
+        status=201,
+    )
+
+
+def _webhook_vendor_ratelimited(request, vendor) -> bool:
+    if not getattr(settings, "RATELIMIT_ENABLE", True):
+        return False
+    from django_ratelimit.core import is_ratelimited  # noqa: PLC0415
+
+    return is_ratelimited(
+        request=request,
+        group="vendor_webhook",
+        key=lambda *_args: str(vendor.id),
+        rate="50/h",
+        method="POST",
+        increment=True,
     )
 
 

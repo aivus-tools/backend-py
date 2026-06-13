@@ -20,6 +20,7 @@ from aivus_backend.users.models import User
 from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+from aivus_backend.users.models import VendorWebhookKey
 from aivus_backend.users.slug_suggest import ensure_default_slug
 from aivus_backend.users.slug_suggest import suggest_slug
 
@@ -594,6 +595,47 @@ def vendor_slug_suggest(request):
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
     slug = suggest_slug(settings, use_llm=True)
     return JsonResponse({"slug": slug})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_webhook_key(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    key_row, _created = VendorWebhookKey.objects.get_or_create(vendor=vendor)
+    return JsonResponse(_build_webhook_key_response(key_row))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_webhook_key_rotate(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    key_row, _created = VendorWebhookKey.objects.get_or_create(vendor=vendor)
+    if not _created:
+        key_row.rotate()
+    return JsonResponse(_build_webhook_key_response(key_row))
+
+
+def _vendor_for_request(request):
+    user_id = request.user_data.get("id")
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    return Vendor.objects.filter(owner=user).first()
+
+
+def _build_webhook_key_response(key_row):
+    return {
+        "key": key_row.key,
+        "isActive": key_row.is_active,
+        "createdAt": key_row.created_at.isoformat() if key_row.created_at else None,
+        "rotatedAt": key_row.rotated_at.isoformat() if key_row.rotated_at else None,
+    }
 
 
 def _apply_lead_notification_email(settings, data):

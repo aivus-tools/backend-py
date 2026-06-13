@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from typing import ClassVar
 
@@ -324,6 +325,49 @@ class VendorSettings(models.Model):
         return f"Settings for {self.vendor.name}"
 
 
+def generate_webhook_key() -> str:
+    return secrets.token_urlsafe(32)
+
+
+class VendorWebhookKey(models.Model):
+    """Per-vendor secret for the inbound webhook lead endpoint.
+
+    Distinct from the global Wix secret. One active key per vendor; rotation
+    replaces the key immediately so the old value stops working at once.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.OneToOneField(
+        Vendor,
+        on_delete=models.CASCADE,
+        related_name="webhook_key",
+    )
+    key = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        default=generate_webhook_key,
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    rotated_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "vendor_webhook_key"
+
+    def __str__(self):
+        state = "active" if self.is_active else "inactive"
+        return f"Webhook key for {self.vendor_id} ({state})"
+
+    def rotate(self):
+        self.key = generate_webhook_key()
+        self.is_active = True
+        self.rotated_at = timezone.now()
+        self.revoked_at = None
+        self.save(update_fields=["key", "is_active", "rotated_at", "revoked_at"])
+
+
 # Import AuthToken to make it visible to Django migrations
 from .tokens import AuthToken  # noqa: E402
 from .tokens import TokenType  # noqa: E402
@@ -338,4 +382,5 @@ __all__ = [
     "UserTeam",
     "Vendor",
     "VendorSettings",
+    "VendorWebhookKey",
 ]
