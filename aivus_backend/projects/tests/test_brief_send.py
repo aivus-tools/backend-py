@@ -191,7 +191,8 @@ def test_public_send_ready_with_documents_skips_finalize(api_client, vendor):
             HTTP_X_BRIEF_TOKEN="ready-edited",
         )
     assert response.status_code == 200
-    assert "finalizingTaskId" not in response.json()
+    # The Send chain is always pollable, even when no finalize runs.
+    assert response.json()["finalizingTaskId"]
     chain_mock.assert_called_once()
     finalize_mock.si.assert_not_called()
     document.refresh_from_db()
@@ -225,7 +226,7 @@ def test_public_send_finalized_skips_finalize(api_client, vendor):
             HTTP_X_BRIEF_TOKEN="already-final",
         )
     assert response.status_code == 200
-    assert "finalizingTaskId" not in response.json()
+    assert response.json()["finalizingTaskId"]
     chain_mock.assert_called_once()
 
 
@@ -278,8 +279,54 @@ def test_client_send_creates_project_at_rfp(api_client, vendor, client_user):
         )
 
     assert response.status_code == 200
-    assert "finalizingTaskId" not in response.json()
+    assert response.json()["finalizingTaskId"]
     chain_mock.assert_called_once()
+
+
+# --- SF-8: pending stays set until promotion ---------------------------------
+
+
+@pytest.mark.django_db
+def test_send_marks_brief_pending_until_chain_clears(api_client, vendor):
+    """Send must leave the brief "pending" so the client cannot see "sent" before
+    the project is promoted. The returned finalizingTaskId equals the pending
+    marker and a clear step runs only at the end of the chain."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="pending-send",
+        conversation_status="finalized",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="pending-send",
+        )
+
+    assert response.status_code == 200
+    task_id = response.json()["finalizingTaskId"]
+    assert task_id
+    brief.refresh_from_db()
+    assert brief.pending_task_id == task_id
+
+
+@pytest.mark.django_db
+def test_set_brief_pending_task_restores_marker():
+    from aivus_backend.projects.tasks import set_brief_pending_task
+
+    brief = Brief.objects.create(client=None, pending_task_id="")
+    result = set_brief_pending_task.run(str(brief.id), "restored-id")
+    assert result["ok"] is True
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "restored-id"
 
 
 # --- task idempotency --------------------------------------------------------

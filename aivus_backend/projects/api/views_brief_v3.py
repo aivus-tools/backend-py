@@ -61,6 +61,7 @@ from aivus_backend.projects.tasks import import_wix_attachments_task
 from aivus_backend.projects.tasks import mark_project_sent_task
 from aivus_backend.projects.tasks import persist_message_traces
 from aivus_backend.projects.tasks import send_emails_task
+from aivus_backend.projects.tasks import set_brief_pending_task
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
@@ -1302,11 +1303,17 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
 
     brief_id_str = str(brief.id)
     vendor_id_str = str(vendor.id)
-    finalize_task_id = str(uuid.uuid4())
+    # One pending id tracks the entire Send chain (finalize, if needed, then the
+    # project promotion to RFP, then the emails). It is set before the chain runs
+    # and cleared by the tail step, so the status endpoint reports "pending" until
+    # the project has actually been promoted. Send never reports "sent" before the
+    # promotion — the client polls this id and only then shows success.
+    send_chain_task_id = str(uuid.uuid4())
     mark_signature = mark_project_sent_task.si(brief_id_str, vendor_id_str)
     send_signature = send_emails_task.si(
         brief_id_str, vendor_id_str, recipient_email, language
     )
+    clear_signature = clear_brief_pending_task.si(brief_id_str)
 
     # Serialize concurrent Sends on the brief row so a double click or retry
     # cannot enqueue two chains (which would create a duplicate project and a
@@ -1324,15 +1331,20 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # edit it before Send; re-running finalize here would discard those
         # manual edits. Documents already present are taken as-is.
         needs_finalize = not locked.final_documents.exists()
+        Brief.objects.filter(id=locked.id).update(pending_task_id=send_chain_task_id)
         if needs_finalize:
-            Brief.objects.filter(id=locked.id).update(pending_task_id=finalize_task_id)
+            # finalize_brief_task clears pending_task_id when it completes, so the
+            # marker is re-asserted right after it to keep the brief "pending"
+            # until the project is actually promoted.
             workflow = chain(
-                finalize_brief_task.si(brief_id_str).set(task_id=finalize_task_id),
+                finalize_brief_task.si(brief_id_str),
+                set_brief_pending_task.si(brief_id_str, send_chain_task_id),
                 mark_signature,
                 send_signature,
+                clear_signature,
             )
         else:
-            workflow = chain(mark_signature, send_signature)
+            workflow = chain(mark_signature, send_signature, clear_signature)
 
     transaction.on_commit(
         lambda: workflow.apply_async(
@@ -1340,9 +1352,7 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         )
     )
 
-    response: dict[str, Any] = {"ok": True}
-    if needs_finalize:
-        response["finalizingTaskId"] = finalize_task_id
+    response: dict[str, Any] = {"ok": True, "finalizingTaskId": send_chain_task_id}
     return JsonResponse(response)
 
 

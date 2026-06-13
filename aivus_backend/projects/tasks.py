@@ -34,6 +34,19 @@ def clear_brief_pending_task(brief_id: str) -> None:
     Brief.objects.filter(id=brief_id).update(pending_task_id="")
 
 
+@shared_task
+def set_brief_pending_task(brief_id: str, task_id: str) -> dict:
+    """Re-assert the brief's pending marker mid-chain.
+
+    finalize_brief_task clears pending_task_id when it completes (the chat flow
+    relies on that to stop polling). Inside the Send chain the brief must stay
+    "pending" until the project is promoted, so this step restores the marker
+    after finalize and before the promotion/email steps.
+    """
+    Brief.objects.filter(id=brief_id).update(pending_task_id=task_id)
+    return {"ok": True}
+
+
 def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
     if not traces:
         return
