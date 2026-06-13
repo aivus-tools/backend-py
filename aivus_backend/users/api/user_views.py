@@ -598,6 +598,32 @@ def vendor_slug_suggest(request):
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("VENDOR", "SYSTEM")
+def vendor_slug_check(request):
+    """Report whether the requested slug is free for this vendor to take.
+
+    Unavailable when the format is invalid, the name is reserved, or another
+    vendor already holds it. The vendor's own current slug counts as available
+    so re-saving an unchanged value does not flip to taken.
+    """
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    raw = (request.GET.get("slug") or "").strip()
+    if validate_slug(raw) is not None:
+        return JsonResponse({"available": False})
+
+    taken = (
+        VendorSettingsModel.objects.filter(slug=raw)
+        .exclude(vendor_id=vendor.id)
+        .exists()
+    )
+    return JsonResponse({"available": not taken})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
 def vendor_webhook_key(request):
     vendor = _vendor_for_request(request)
     if vendor is None:

@@ -195,6 +195,70 @@ def test_slug_suggest_endpoint(api_client, vendor_user):
     assert response.json()["slug"] == "suggested-one"
 
 
+# --- slug check endpoint -----------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_slug_check_available(api_client, vendor_user):
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "totally-free"}, **_auth(user)
+    )
+    assert response.status_code == 200
+    assert response.json() == {"available": True}
+
+
+@pytest.mark.django_db
+def test_slug_check_taken_by_other_vendor(api_client, vendor_user):
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+
+    other_user = User.objects.create_user(
+        email="holder@example.com",
+        password="p@ssw0rd",
+        name="Holder",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Holder Studio", owner=other_user)
+    VendorSettings.objects.create(vendor=other_vendor, slug="held-slug")
+
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "held-slug"}, **_auth(user)
+    )
+    assert response.json() == {"available": False}
+
+
+@pytest.mark.django_db
+def test_slug_check_own_slug_is_available(api_client, vendor_user):
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor, slug="mine-slug")
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "mine-slug"}, **_auth(user)
+    )
+    assert response.json() == {"available": True}
+
+
+@pytest.mark.django_db
+def test_slug_check_reserved(api_client, vendor_user):
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "brief"}, **_auth(user)
+    )
+    assert response.json() == {"available": False}
+
+
+@pytest.mark.django_db
+def test_slug_check_invalid_format(api_client, vendor_user):
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor)
+    response = api_client.get(
+        reverse("vendor-slug-check"), {"slug": "Bad Slug!"}, **_auth(user)
+    )
+    assert response.json() == {"available": False}
+
+
 @pytest.mark.django_db
 def test_slug_suggest_avoids_collision(api_client, vendor_user):
     user, vendor = vendor_user

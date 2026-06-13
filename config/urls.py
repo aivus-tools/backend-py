@@ -51,6 +51,11 @@ urlpatterns = [
         user_views.vendor_slug_suggest,
         name="vendor-slug-suggest",
     ),
+    path(
+        "api/v1/vendor/settings/slug/check",
+        user_views.vendor_slug_check,
+        name="vendor-slug-check",
+    ),
     path("api/v1/vendor/settings", user_views.vendor_settings, name="vendor-settings"),
     path(
         "api/v1/vendor/webhook-key/rotate",
