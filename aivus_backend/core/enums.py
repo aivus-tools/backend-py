@@ -103,6 +103,16 @@ class FinalDocumentKind(models.TextChoices):
     DELIVERABLES_CHECKLIST = "deliverables_checklist", "Deliverables Checklist"
 
 
+# Document kinds a client may see. The vendor outreach email (kind=vendor_email)
+# carries the vendor's outreach strategy and contacts — vendor PII that is exposed
+# only to the authenticated owner of the brief, never on public share links or
+# their PDFs (PRD §5).
+CLIENT_FACING_DOCUMENT_KINDS = (
+    FinalDocumentKind.PRODUCTION_BRIEF,
+    FinalDocumentKind.DELIVERABLES_CHECKLIST,
+)
+
+
 class BriefPromptSlug(models.TextChoices):
     MAIN_SYSTEM = "main_system_prompt", "Main system prompt"
     FINALIZATION = "finalization_prompt", "Finalization prompt"

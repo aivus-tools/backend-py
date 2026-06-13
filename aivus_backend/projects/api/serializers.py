@@ -1,5 +1,6 @@
 """Serializers for projects API."""
 
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
@@ -494,7 +495,11 @@ def serialize_brief_share(share: BriefShare) -> dict:
 
 def serialize_brief_share_public(share: BriefShare) -> dict:
     brief = share.brief
-    documents = list(brief.final_documents.order_by("kind"))
+    documents = list(
+        brief.final_documents.filter(kind__in=CLIENT_FACING_DOCUMENT_KINDS).order_by(
+            "kind"
+        )
+    )
     return {
         "token": share.token,
         "briefId": str(brief.id),

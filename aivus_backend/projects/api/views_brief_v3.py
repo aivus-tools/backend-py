@@ -27,8 +27,8 @@ from django_ratelimit.decorators import ratelimit
 
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.core.enums import BriefSource
-from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.core.slugs import normalize_slug
@@ -90,14 +90,10 @@ MAX_ATTACHMENTS_PER_BRIEF_ANON = 3
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 
 # The white-label anonymous flow shows the brief to an unauthenticated visitor on
-# the vendor's branded page. The vendor outreach email (kind=vendor_email) carries
-# the vendor's outreach strategy and contacts — vendor PII the client must not see
-# (PRD §5). Anonymous token reads/edits are restricted to these client-facing
-# kinds; vendor_email is exposed only to the authenticated owner of the brief.
-ANON_VISIBLE_DOCUMENT_KINDS = (
-    FinalDocumentKind.PRODUCTION_BRIEF,
-    FinalDocumentKind.DELIVERABLES_CHECKLIST,
-)
+# the vendor's branded page. Anonymous token reads/edits are restricted to the
+# client-facing kinds; vendor_email is exposed only to the authenticated owner of
+# the brief (PRD §5). Source of truth lives in core.enums.
+ANON_VISIBLE_DOCUMENT_KINDS = CLIENT_FACING_DOCUMENT_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -1267,7 +1263,7 @@ def public_brief_share_document_pdf(request, token, document_id):
         return JsonResponse({"error": "Share not found"}, status=404)
 
     document = BriefFinalDocument.objects.filter(
-        id=document_id, brief=share.brief
+        id=document_id, brief=share.brief, kind__in=ANON_VISIBLE_DOCUMENT_KINDS
     ).first()
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)

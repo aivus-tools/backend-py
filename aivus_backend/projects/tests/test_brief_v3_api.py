@@ -417,12 +417,17 @@ def test_share_flow(api_client, client_user, client_profile, seeded_prompts):
     assert create.status_code == 201
     token = create.json()["token"]
 
-    # Public GET returns 3 documents
+    # Public GET returns only the two client-facing documents; the vendor
+    # outreach email carries vendor PII and must never reach the public link.
     public = api_client.get(
         reverse("projects_api:public_brief_share_get", args=[token])
     )
     assert public.status_code == 200
-    assert len(public.json()["documents"]) == 3
+    public_body = public.json()
+    kinds = {doc["kind"] for doc in public_body["documents"]}
+    assert kinds == {"production_brief", "deliverables_checklist"}
+    assert "vendor_email" not in kinds
+    assert "Email body" not in json.dumps(public_body)
 
     # Toggle off → public GET 404
     patch_resp = api_client.patch(
@@ -450,6 +455,68 @@ def test_share_requires_finalized(
         **_auth_headers(client_user),
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_share_pdf_rejects_vendor_email(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """The public share PDF endpoint must refuse any document kind outside the
+    client-facing allow-list. The vendor outreach email is vendor PII (PRD §5)."""
+    brief = Brief.objects.create(
+        client=client_profile, conversation_status="finalized", title="Demo brief"
+    )
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>Vendor outreach strategy</p>"
+    )
+    token = api_client.post(
+        reverse("projects_api:client_brief_ai_share", args=[brief.id]),
+        **_auth_headers(client_user),
+    ).json()["token"]
+
+    with patch(
+        "aivus_backend.projects.brief_pdf.render_final_document_pdf"
+    ) as render_mock:
+        resp = api_client.get(
+            reverse(
+                "projects_api:public_brief_share_document_pdf",
+                args=[token, vendor_email.id],
+            )
+        )
+
+    assert resp.status_code == 404
+    render_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_share_pdf_serves_client_facing_document(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    brief = Brief.objects.create(
+        client=client_profile, conversation_status="finalized", title="Demo brief"
+    )
+    production = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Brief body</p>"
+    )
+    token = api_client.post(
+        reverse("projects_api:client_brief_ai_share", args=[brief.id]),
+        **_auth_headers(client_user),
+    ).json()["token"]
+
+    with patch(
+        "aivus_backend.projects.brief_pdf.render_final_document_pdf",
+        return_value=b"%PDF-1.4 stub",
+    ) as render_mock:
+        resp = api_client.get(
+            reverse(
+                "projects_api:public_brief_share_document_pdf",
+                args=[token, production.id],
+            )
+        )
+
+    assert resp.status_code == 200
+    assert resp["Content-Type"] == "application/pdf"
+    render_mock.assert_called_once()
 
 
 # ----------------------------------------------------------------------------
