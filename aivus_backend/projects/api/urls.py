@@ -22,6 +22,16 @@ urlpatterns = [
         views.project_thumbnail,
         name="project_thumbnail",
     ),
+    path(
+        "vendor/projects/<uuid:project_id>/brief/documents",
+        views.vendor_project_brief_documents,
+        name="vendor_project_brief_documents",
+    ),
+    path(
+        "vendor/projects/<uuid:project_id>/brief/documents/<uuid:document_id>/pdf",
+        views.vendor_project_brief_document_pdf,
+        name="vendor_project_brief_document_pdf",
+    ),
     # Briefs (legacy - vendor/system access)
     path("briefs", views.briefs_list, name="briefs_list"),
     path("briefs/<uuid:brief_id>", views.brief_detail, name="brief_detail"),

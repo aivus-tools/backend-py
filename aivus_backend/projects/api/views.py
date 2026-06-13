@@ -53,6 +53,7 @@ from aivus_backend.projects.ai_brief import analyze_comparison
 from aivus_backend.projects.ai_brief import process_chat_message
 from aivus_backend.projects.api.serializers import serialize_brief
 from aivus_backend.projects.api.serializers import serialize_brief_detail
+from aivus_backend.projects.api.serializers import serialize_brief_final_document
 from aivus_backend.projects.api.serializers import serialize_brief_offer
 from aivus_backend.projects.api.serializers import serialize_brief_with_offers
 from aivus_backend.projects.api.serializers import serialize_offer
@@ -64,6 +65,7 @@ from aivus_backend.projects.api.serializers import serialize_share
 from aivus_backend.projects.api.serializers import serialize_share_public
 from aivus_backend.projects.api.serializers import serialize_template
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
@@ -2888,3 +2890,63 @@ def share_export_data(request, token):
         return JsonResponse({"error": "Offer not found"}, status=404)
 
     return JsonResponse(_build_offer_export_data(offer, include_internal_costs=False))
+
+
+# ==================== Vendor brief read (Stage 2 S2-10) ====================
+
+
+def _vendor_project_for_read(project_id, request) -> Project | None:
+    """Return the project only when it belongs to the requesting vendor.
+
+    Authorization is by ownership: the project's vendor must match the vendor
+    resolved for the authenticated user. SYSTEM is allowed for tooling.
+    """
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id and request.user_data.get("group") != "SYSTEM":
+        return None
+    query = Project.objects.filter(id=project_id, deleted_at__isnull=True)
+    if vendor_id:
+        query = query.filter(vendor_id=vendor_id)
+    return query.select_related("brief").first()
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_project_brief_documents(request, project_id):
+    """List the final documents of a brief the vendor received as a project."""
+    project = _vendor_project_for_read(project_id, request)
+    brief = project.brief if project else None
+    if not project or not brief:
+        return JsonResponse({"error": "Project or brief not found"}, status=404)
+
+    documents = brief.final_documents.order_by("kind")
+    return JsonResponse(
+        {
+            "projectId": str(project.id),
+            "briefId": str(brief.id),
+            "conversationStatus": brief.conversation_status,
+            "documents": [serialize_brief_final_document(x) for x in documents],
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_project_brief_document_pdf(request, project_id, document_id):
+    """Download a brief document PDF for a project the vendor owns."""
+    from aivus_backend.projects.api.views_brief_v3 import (  # noqa: PLC0415
+        _pdf_response_for_document,
+    )
+
+    project = _vendor_project_for_read(project_id, request)
+    if not project or not project.brief_id:
+        return JsonResponse({"error": "Project or brief not found"}, status=404)
+
+    document = BriefFinalDocument.objects.filter(
+        id=document_id, brief_id=project.brief_id
+    ).first()
+    if not document:
+        return JsonResponse({"error": "Document not found"}, status=404)
+    return _pdf_response_for_document(document)
