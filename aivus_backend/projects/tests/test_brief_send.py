@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 from django.conf import settings as django_settings
+from django.db import IntegrityError
+from django.db import transaction
 from django.test import Client as DjangoTestClient
 from django.urls import reverse
 from django.utils import timezone
@@ -269,6 +271,59 @@ def test_mark_project_sent_creates_when_missing(vendor, client_user):
     project = Project.objects.get(brief=brief, vendor=vendor)
     assert project.status == ProjectStatus.RFP
     assert project.client_id == client_profile.id
+
+
+# --- double-Send race --------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_unique_constraint_blocks_duplicate_active_project(vendor, anon_brief):
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Project.objects.create(
+            vendor=vendor, brief=anon_brief, name="dup", status=ProjectStatus.RFP
+        )
+    assert Project.objects.filter(brief=anon_brief, vendor=vendor).count() == 1
+
+
+@pytest.mark.django_db
+def test_double_send_yields_single_project(api_client, vendor, anon_brief):
+    """A second Send after the first chain promoted the project to RFP must be
+    rejected, leaving exactly one RFP project. The locked re-read in
+    _dispatch_send sees the promotion regardless of the in-memory brief copy."""
+
+    def _send():
+        with (
+            patch(
+                "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+                side_effect=_run_on_commit,
+            ),
+            patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        ):
+            response = api_client.post(
+                reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+                data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+                content_type="application/json",
+                HTTP_X_BRIEF_TOKEN="send-token",
+            )
+        return response, chain_mock
+
+    first, first_chain = _send()
+    assert first.status_code == 200
+    first_chain.assert_called_once()
+
+    # The first chain runs: finalize + promote the lead project to RFP.
+    mark_project_sent_task.run(str(anon_brief.id), str(vendor.id))
+
+    second, second_chain = _send()
+    assert second.status_code == 409
+    second_chain.assert_not_called()
+
+    assert (
+        Project.objects.filter(
+            brief=anon_brief, vendor=vendor, status=ProjectStatus.RFP
+        ).count()
+        == 1
+    )
 
 
 @pytest.mark.django_db

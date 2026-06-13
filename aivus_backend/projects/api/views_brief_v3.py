@@ -1266,24 +1266,31 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
     """
     if brief.conversation_status not in SENDABLE_CONVERSATION_STATUSES:
         return JsonResponse({"error": "Brief is not ready to send"}, status=400)
-    if _brief_already_sent_to_vendor(brief, vendor):
-        return JsonResponse({"error": "Brief already sent to this vendor"}, status=409)
 
     brief_id_str = str(brief.id)
     vendor_id_str = str(vendor.id)
-    needs_finalize = brief.conversation_status != "finalized" or not (
-        brief.final_documents.exists()
-    )
-
     finalize_task_id = str(uuid.uuid4())
     mark_signature = mark_project_sent_task.si(brief_id_str, vendor_id_str)
     send_signature = send_emails_task.si(
         brief_id_str, vendor_id_str, recipient_email, language
     )
 
+    # Serialize concurrent Sends on the brief row so a double click or retry
+    # cannot enqueue two chains (which would create a duplicate project and a
+    # second set of emails). The locked re-read also catches a project that a
+    # previous in-flight Send already promoted to RFP.
     with transaction.atomic():
+        locked = Brief.objects.select_for_update().get(id=brief.id)
+        if _brief_already_sent_to_vendor(locked, vendor):
+            return JsonResponse(
+                {"error": "Brief already sent to this vendor"}, status=409
+            )
+
+        needs_finalize = locked.conversation_status != "finalized" or not (
+            locked.final_documents.exists()
+        )
         if needs_finalize:
-            Brief.objects.filter(id=brief.id).update(pending_task_id=finalize_task_id)
+            Brief.objects.filter(id=locked.id).update(pending_task_id=finalize_task_id)
             workflow = chain(
                 finalize_brief_task.si(brief_id_str).set(task_id=finalize_task_id),
                 mark_signature,

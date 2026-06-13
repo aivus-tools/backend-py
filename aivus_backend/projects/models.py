@@ -143,6 +143,13 @@ class Project(models.Model):
     class Meta:
         db_table = "project"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["vendor", "brief"],
+                condition=models.Q(deleted_at__isnull=True, brief__isnull=False),
+                name="uniq_active_project_per_vendor_brief",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.vendor.name})"
