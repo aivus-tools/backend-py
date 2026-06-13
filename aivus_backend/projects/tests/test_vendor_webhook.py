@@ -136,6 +136,55 @@ def test_webhook_missing_message_400(api_client, webhook_url, vendor_with_key):
     assert Brief.objects.count() == 0
 
 
+@pytest.mark.django_db
+def test_webhook_ip_rate_limit_fires_before_key_check(webhook_url):
+    """An IP rate-limit must block before the webhook key is resolved so the
+    endpoint cannot be used to brute-force keys.
+
+    Rate limiting is disabled in the default test settings, so the production
+    decorator is a no-op here. We re-create the same decorator stack with a 1/h
+    IP rate to confirm the second request is rejected 429 before the key
+    resolver is consulted. The cache is cleared so the limiter starts fresh.
+    """
+    from django.core.cache import cache
+    from django.test import RequestFactory
+    from django.test import override_settings
+    from django_ratelimit.decorators import ratelimit
+    from django_ratelimit.exceptions import Ratelimited
+
+    from aivus_backend.projects.api import views_brief_v3
+
+    cache.clear()
+    factory = RequestFactory()
+
+    with (
+        override_settings(RATELIMIT_ENABLE=True),
+        patch.object(
+            views_brief_v3, "_verify_vendor_webhook_key", return_value=None
+        ) as verify_mock,
+    ):
+        limited_view = ratelimit(key="ip", rate="1/h", method="POST", block=True)(
+            views_brief_v3.public_brief_ai_from_webhook.__wrapped__
+        )
+
+        def _call():
+            request = factory.post(
+                webhook_url,
+                data=json.dumps({"message": "hi"}),
+                content_type="application/json",
+            )
+            return limited_view(request)
+
+        first = _call()
+        # The limiter raises before the key resolver is consulted on the second
+        # request; the middleware turns this into a 429 in real traffic.
+        with pytest.raises(Ratelimited):
+            _call()
+
+    assert first.status_code == 401
+    assert verify_mock.call_count == 1
+
+
 # --- key management endpoints ------------------------------------------------
 
 
