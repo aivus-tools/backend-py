@@ -2029,6 +2029,23 @@ def client_brief_ai_claim(request, brief_id):
     if not token:
         return JsonResponse({"error": "X-Brief-Token is required"}, status=400)
 
+    user = _get_request_user(request)
+    if not user:
+        return JsonResponse({"error": "Client profile not found"}, status=403)
+
+    claimable = Brief.objects.filter(
+        id=brief_id,
+        anonymous_token=token,
+        client__isnull=True,
+        deleted_at__isnull=True,
+    ).first()
+    if not claimable:
+        return JsonResponse({"error": "Brief not found or already claimed"}, status=404)
+
+    contact_email = (claimable.contact_email or "").strip()
+    if contact_email and contact_email.casefold() != (user.email or "").casefold():
+        return JsonResponse({"error": "Brief belongs to a different email"}, status=403)
+
     client = _get_client_safe(request) or _ensure_client_for_claim(request)
     if not client:
         return JsonResponse({"error": "Client profile not found"}, status=403)

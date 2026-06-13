@@ -57,6 +57,67 @@ def test_claim_endpoint_creates_client_lazily_without_group_change(api_client):
 
 
 @pytest.mark.django_db
+def test_claim_rejects_email_mismatch_403(api_client):
+    user = User.objects.create_user(
+        email="attacker@example.com",
+        password="p@ssw0rd",
+        name="Attacker",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="mismatch-token",
+        contact_email="victim@example.com",
+        source="personal_link",
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="mismatch-token",
+        )
+
+    assert response.status_code == 403
+    brief.refresh_from_db()
+    assert brief.client_id is None
+    assert brief.anonymous_token == "mismatch-token"
+    assert not ClientModel.objects.filter(owner=user).exists()
+
+
+@pytest.mark.django_db
+def test_claim_allows_email_match_case_insensitive(api_client):
+    user = User.objects.create_user(
+        email="owner@example.com",
+        password="p@ssw0rd",
+        name="Owner",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="match-token",
+        contact_email="Owner@Example.com",
+        source="personal_link",
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="match-token",
+        )
+
+    assert response.status_code == 200
+    client = ClientModel.objects.get(owner=user)
+    brief.refresh_from_db()
+    assert brief.client_id == client.id
+
+
+@pytest.mark.django_db
 def test_try_claim_pending_brief_creates_client_without_group_change():
     user = User.objects.create_user(
         email="pending-claimer@example.com",

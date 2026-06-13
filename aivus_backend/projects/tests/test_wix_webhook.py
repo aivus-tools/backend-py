@@ -334,7 +334,7 @@ def test_claim_preserves_contact_email(api_client, wix_url, enable_webhook):
     token = response.json()["token"]
 
     user = User.objects.create_user(
-        email="claimer@example.com",
+        email="lead@example.com",
         password="p@ssw0rd",
         name="Claimer",
         group="CLIENT",
