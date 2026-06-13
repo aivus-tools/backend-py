@@ -426,7 +426,7 @@ def send_emails_task(
     with transaction.atomic():
         project = (
             Project.objects.select_for_update()
-            .filter(vendor_id=vendor_id, brief=brief)
+            .filter(vendor_id=vendor_id, brief=brief, deleted_at__isnull=True)
             .select_related("vendor", "vendor__owner")
             .first()
         )
