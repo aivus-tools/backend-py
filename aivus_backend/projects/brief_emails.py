@@ -84,6 +84,7 @@ def send_client_lead_email(
     recipient_email: str,
     share_token: str,
     language: str,
+    project=None,
 ) -> None:
     """Send the client their copy: register/login CTA, share link, PDF.
 
@@ -91,6 +92,8 @@ def send_client_lead_email(
     recipient always gets a downloadable copy; only the CTA text differs. We
     deliver through the bare-address task because the client template carries no
     {user} context, and that task is the only path that supports attachments.
+    The project is passed so the email names the actual vendor rather than the
+    generic "your agency".
     """
     from aivus_backend.users.tasks import send_to_recipient_email  # noqa: PLC0415
 
@@ -100,7 +103,7 @@ def send_client_lead_email(
     template = f"emails/brief_sent_client_{language}.html"
     subject = _subject(CLIENT_SUBJECTS, language)
     context = {
-        "vendor_name": brief_vendor_name(brief),
+        "vendor_name": brief_vendor_name(brief, project=project),
         "recipient_email": recipient_email,
         "register_url": _client_register_url(
             brief, recipient_email, brief.anonymous_token or ""

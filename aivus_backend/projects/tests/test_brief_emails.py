@@ -16,6 +16,7 @@ from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import Project
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
+from aivus_backend.users.models import VendorSettings
 from aivus_backend.users.tasks import send_to_recipient_email
 
 
@@ -126,6 +127,60 @@ def test_vendor_lead_email_links_to_dashboard_project():
     project_url = send_mock.call_args.kwargs["context"]["project_url"]
     assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}"
     assert "/app/projects/" not in project_url
+
+
+@pytest.mark.django_db
+def test_client_email_names_real_vendor_when_project_passed():
+    """The client lead email must name the actual vendor, not "your agency"."""
+    owner = User.objects.create_user(
+        email="named-vendor@example.com",
+        password="p@ssw0rd",
+        name="Owner",
+        group="VENDOR",
+    )
+    vendor = Vendor.objects.create(name="Fallback Name", owner=owner)
+    VendorSettings.objects.create(vendor=vendor, company_name="Acme Productions")
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-named", document_language="en"
+    )
+    project = Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with (
+        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
+        patch(
+            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
+            return_value=None,
+        ),
+    ):
+        brief_emails.send_client_lead_email(
+            brief, "fresh@example.com", "share-tok", "en", project=project
+        )
+
+    anon_mock.assert_called_once()
+    assert anon_mock.call_args.kwargs["context"]["vendor_name"] == "Acme Productions"
+
+
+@pytest.mark.django_db
+def test_client_email_falls_back_to_generic_without_project():
+    """Without a project the email keeps the generic copy (no vendor to name)."""
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-no-project", document_language="en"
+    )
+    with (
+        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
+        patch(
+            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
+            return_value=None,
+        ),
+    ):
+        brief_emails.send_client_lead_email(
+            brief, "fresh@example.com", "share-tok", "en"
+        )
+
+    anon_mock.assert_called_once()
+    assert anon_mock.call_args.kwargs["context"]["vendor_name"] == "your agency"
 
 
 @pytest.mark.django_db

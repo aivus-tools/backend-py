@@ -375,7 +375,7 @@ def send_emails_task(
     if recipient_email:
         try:
             brief_emails.send_client_lead_email(
-                brief, recipient_email, share.token, language
+                brief, recipient_email, share.token, language, project=project
             )
         except Exception:
             logger.exception("client lead email failed brief=%s", brief_id)
