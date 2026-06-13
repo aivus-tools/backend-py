@@ -9,10 +9,12 @@ Send response cannot be used to enumerate which emails already have accounts.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.core.cache import cache
 
 from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.users.i18n import resolve_language
@@ -28,6 +30,52 @@ VENDOR_SUBJECTS = {
     "en": "New brief via your personal link",
     "ru": "Новый бриф через вашу персональную ссылку",
 }
+
+# The anonymous Send flow lets a visitor put any recipient address on a branded
+# "Your brief is ready" email with a PDF attachment. The per-IP Send limit alone
+# does not stop a bot pool from bombing one victim address with branded mail, so
+# the dispatch is throttled per recipient regardless of which brief or IP it came
+# from: at most CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX branded emails per recipient
+# per window, and the same brief is never re-sent to the same address.
+CLIENT_LEAD_EMAIL_PER_RECIPIENT_WINDOW_SECONDS = 3600
+CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX = 5
+CLIENT_LEAD_EMAIL_DEDUP_WINDOW_SECONDS = 86400
+
+
+def _recipient_cache_key(recipient_email: str) -> str:
+    digest = hashlib.sha256(recipient_email.strip().lower().encode("utf-8")).hexdigest()
+    return f"client_lead_email:recipient:{digest}"
+
+
+def _dedup_cache_key(recipient_email: str, brief_id) -> str:
+    digest = hashlib.sha256(recipient_email.strip().lower().encode("utf-8")).hexdigest()
+    return f"client_lead_email:dedup:{brief_id}:{digest}"
+
+
+def _client_lead_email_allowed(recipient_email: str, brief_id) -> bool:
+    """Throttle and de-duplicate branded client lead emails per recipient.
+
+    Returns False when the recipient has already received this brief or has hit
+    the per-recipient send ceiling within the window, so an attacker cannot bomb
+    a victim address from a pool of IPs.
+    """
+    dedup_key = _dedup_cache_key(recipient_email, brief_id)
+    if not cache.add(dedup_key, 1, CLIENT_LEAD_EMAIL_DEDUP_WINDOW_SECONDS):
+        logger.info("client lead email deduplicated: brief=%s", brief_id)
+        return False
+
+    recipient_key = _recipient_cache_key(recipient_email)
+    cache.add(recipient_key, 0, CLIENT_LEAD_EMAIL_PER_RECIPIENT_WINDOW_SECONDS)
+    try:
+        sent_count = cache.incr(recipient_key)
+    except ValueError:
+        cache.set(recipient_key, 1, CLIENT_LEAD_EMAIL_PER_RECIPIENT_WINDOW_SECONDS)
+        sent_count = 1
+    if sent_count > CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX:
+        logger.warning("client lead email throttled for recipient: brief=%s", brief_id)
+        cache.delete(dedup_key)
+        return False
+    return True
 
 
 def _frontend_url() -> str:
@@ -111,6 +159,9 @@ def send_client_lead_email(
     generic "your agency".
     """
     from aivus_backend.users.tasks import send_to_recipient_email  # noqa: PLC0415
+
+    if not _client_lead_email_allowed(recipient_email, brief.id):
+        return
 
     existing = User.objects.filter(
         email__iexact=recipient_email, deleted_at__isnull=True

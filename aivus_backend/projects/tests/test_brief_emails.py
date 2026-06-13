@@ -255,3 +255,46 @@ def test_client_email_existing_account_uses_login_template_with_pdf():
     assert anon_mock.call_args.kwargs["context"]["is_existing_account"] is True
     assert anon_mock.call_args.kwargs["recipient_email"] == "known@example.com"
     assert anon_mock.call_args.kwargs["attachments"]
+
+
+@pytest.mark.django_db
+def test_client_email_not_resent_to_same_recipient_for_same_brief():
+    """H4: re-sending the same brief to the same address is deduplicated, so a
+    bot pool cannot bomb a victim by replaying the same Send."""
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-dedup", document_language="en"
+    )
+
+    with (
+        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
+        patch(
+            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
+            return_value=None,
+        ),
+    ):
+        brief_emails.send_client_lead_email(brief, "victim@example.com", "tok", "en")
+        brief_emails.send_client_lead_email(brief, "victim@example.com", "tok", "en")
+
+    anon_mock.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_client_email_throttled_per_recipient_across_briefs():
+    """H4: one recipient address cannot be bombed with branded mail from many
+    different briefs. After the per-recipient ceiling the dispatch is suppressed."""
+    with (
+        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
+        patch(
+            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
+            return_value=None,
+        ),
+    ):
+        for i in range(brief_emails.CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX + 3):
+            brief = Brief.objects.create(
+                client=None, anonymous_token=f"tok-bomb-{i}", document_language="en"
+            )
+            brief_emails.send_client_lead_email(
+                brief, "target@example.com", "tok", "en"
+            )
+
+    assert anon_mock.call_count == brief_emails.CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX
