@@ -23,8 +23,8 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django_ratelimit.decorators import ratelimit
 
+from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
@@ -99,15 +99,6 @@ ANON_VISIBLE_DOCUMENT_KINDS = CLIENT_FACING_DOCUMENT_KINDS
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def conditional_ratelimit(**ratelimit_kwargs):
-    def decorator(func):
-        if getattr(settings, "RATELIMIT_ENABLE", True):
-            return ratelimit(**ratelimit_kwargs)(func)
-        return func
-
-    return decorator
 
 
 def resolve_client_ip(request) -> str:

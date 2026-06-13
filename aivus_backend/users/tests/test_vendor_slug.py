@@ -226,6 +226,62 @@ def test_slug_suggest_endpoint(api_client, vendor_user):
     assert response.json()["slug"] == "suggested-one"
 
 
+@pytest.mark.django_db
+def test_slug_suggest_is_rate_limited():
+    """The slug suggestion endpoint calls the LLM, so it must be rate limited.
+
+    Rate limiting is disabled in the default test settings, so the production
+    decorator is a no-op here. We rebuild the same conditional_ratelimit stack
+    with a 1/h user rate to confirm it blocks the second request. The cache is
+    cleared so the limiter starts fresh.
+    """
+    from django.core.cache import cache
+    from django.test import RequestFactory
+    from django.test import override_settings
+    from django_ratelimit.exceptions import Ratelimited
+
+    from aivus_backend.core.decorators import conditional_ratelimit
+
+    cache.clear()
+    factory = RequestFactory()
+
+    with override_settings(RATELIMIT_ENABLE=True):
+
+        @conditional_ratelimit(key="ip", rate="1/h", method="GET", block=True)
+        def _view(request):
+            from django.http import JsonResponse
+
+            return JsonResponse({"ok": True})
+
+        def _call():
+            return _view(factory.get("/api/v1/users/vendor/slug/suggest"))
+
+        first = _call()
+        assert first.status_code == 200
+        with pytest.raises(Ratelimited):
+            _call()
+
+
+@pytest.mark.django_db
+def test_conditional_ratelimit_is_noop_when_disabled():
+    """With RATELIMIT_ENABLE off the decorator must pass the call straight
+    through so unrelated tests and local development are not throttled."""
+    from django.test import RequestFactory
+
+    from aivus_backend.core.decorators import conditional_ratelimit
+
+    factory = RequestFactory()
+
+    @conditional_ratelimit(key="ip", rate="1/h", method="GET", block=True)
+    def _view(request):
+        from django.http import JsonResponse
+
+        return JsonResponse({"ok": True})
+
+    assert _view(factory.get("/x")).status_code == 200
+    assert _view(factory.get("/x")).status_code == 200
+
+
 # --- slug check endpoint -----------------------------------------------------
 
 

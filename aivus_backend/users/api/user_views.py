@@ -12,6 +12,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
 from aivus_backend.core.slugs import normalize_slug
@@ -578,6 +579,7 @@ def vendor_settings_logo(request):
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("VENDOR", "SYSTEM")
+@conditional_ratelimit(key="user", rate="20/h", method="GET")
 def vendor_slug_suggest(request):
     user_data = request.user_data
     user_id = user_data.get("id")

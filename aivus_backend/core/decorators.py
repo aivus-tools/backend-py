@@ -2,7 +2,24 @@
 
 from functools import wraps
 
+from django.conf import settings
 from django.http import JsonResponse
+from django_ratelimit.decorators import ratelimit
+
+
+def conditional_ratelimit(**ratelimit_kwargs):
+    """Apply django-ratelimit only when RATELIMIT_ENABLE is on.
+
+    Tests and local development disable rate limiting, so the decorator becomes a
+    no-op there while production keeps the configured limits.
+    """
+
+    def decorator(func):
+        if getattr(settings, "RATELIMIT_ENABLE", True):
+            return ratelimit(**ratelimit_kwargs)(func)
+        return func
+
+    return decorator
 
 
 def public_endpoint(view_func):
