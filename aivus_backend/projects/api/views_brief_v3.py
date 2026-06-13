@@ -1772,19 +1772,34 @@ def _notify_vendor_of_lead(brief: Brief, vendor: Vendor, request) -> None:
     transaction.on_commit(_dispatch)
 
 
-def _webhook_vendor_ratelimited(request, vendor) -> bool:
+def _vendor_ratelimited(request, vendor, group: str, rate: str) -> bool:
     if not getattr(settings, "RATELIMIT_ENABLE", True):
         return False
     from django_ratelimit.core import is_ratelimited  # noqa: PLC0415
 
     return is_ratelimited(
         request=request,
-        group="vendor_webhook",
+        group=group,
         key=lambda *_args: str(vendor.id),
-        rate="50/h",
+        rate=rate,
         method="POST",
         increment=True,
     )
+
+
+def _webhook_vendor_ratelimited(request, vendor) -> bool:
+    return _vendor_ratelimited(request, vendor, "vendor_webhook", "50/h")
+
+
+def _slug_drafts_vendor_ratelimited(request, vendor) -> bool:
+    """SF-2: cap personal-link draft creation per vendor.
+
+    The IP rate-limit alone lets an IP-rotating botnet flood a vendor's dashboard
+    with empty DRAFT leads. A per-vendor.id cap bounds the damage regardless of
+    how many source IPs the attacker controls; it sits above the per-IP limit so a
+    single legitimate visitor is throttled by IP first.
+    """
+    return _vendor_ratelimited(request, vendor, "slug_drafts_vendor", "100/h")
 
 
 @csrf_exempt
@@ -1819,6 +1834,9 @@ def public_brief_ai_by_slug_drafts(request, slug):
     vendor = _resolve_vendor_by_slug(slug)
     if not vendor:
         return JsonResponse({"error": "Link not found"}, status=404)
+
+    if _slug_drafts_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
 
     token = secrets.token_urlsafe(48)
     with transaction.atomic():

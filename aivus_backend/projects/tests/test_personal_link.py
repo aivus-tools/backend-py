@@ -122,3 +122,81 @@ def test_by_slug_draft_soft_deleted_vendor_404(api_client, vendor_with_slug):
     )
     assert response.status_code == 404
     assert Brief.objects.count() == 0
+
+
+# --- SF-2: per-vendor draft rate limit ---------------------------------------
+
+
+@pytest.mark.django_db
+def test_slug_drafts_vendor_rate_limit_trips_and_is_per_vendor(vendor_with_slug):
+    """SF-2: the per-vendor 100/h cap bounds personal-link draft creation per
+    vendor.id, so an IP-rotating botnet cannot flood one vendor's dashboard. It is
+    keyed by vendor_id, so a different vendor is unaffected.
+
+    Rate limiting is disabled in the default test settings, so we enable it and
+    drive the helper directly against a cleared cache.
+    """
+    from django.core.cache import cache
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import (
+        _slug_drafts_vendor_ratelimited,
+    )
+
+    other_user = User.objects.create_user(
+        email="other-slug-vendor@example.com",
+        password="p@ssw0rd",
+        name="Other Vendor",
+        group="VENDOR",
+    )
+    other_vendor = Vendor.objects.create(name="Other Studio", owner=other_user)
+
+    cache.clear()
+    factory = RequestFactory()
+
+    def _request():
+        return factory.post("/service/public/briefs/ai/by-slug/acme-films/drafts")
+
+    with override_settings(RATELIMIT_ENABLE=True):
+        results = [
+            _slug_drafts_vendor_ratelimited(_request(), vendor_with_slug)
+            for _ in range(100)
+        ]
+        assert not any(results)
+        assert _slug_drafts_vendor_ratelimited(_request(), vendor_with_slug) is True
+        assert _slug_drafts_vendor_ratelimited(_request(), other_vendor) is False
+
+
+@pytest.mark.django_db
+def test_slug_drafts_returns_429_when_vendor_rate_limited(api_client, vendor_with_slug):
+    """SF-2: when the per-vendor cap trips, the endpoint answers 429 and creates
+    no brief or project."""
+    from unittest.mock import patch
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3._slug_drafts_vendor_ratelimited",
+        return_value=True,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_by_slug_drafts", args=["acme-films"])
+        )
+    assert response.status_code == 429
+    assert Brief.objects.count() == 0
+    assert Project.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_slug_drafts_vendor_rate_limit_disabled_in_tests_by_default(vendor_with_slug):
+    """Without RATELIMIT_ENABLE the helper is a no-op so unrelated tests are not
+    throttled by accumulated state."""
+    from django.test import RequestFactory
+
+    from aivus_backend.projects.api.views_brief_v3 import (
+        _slug_drafts_vendor_ratelimited,
+    )
+
+    request = RequestFactory().post(
+        "/service/public/briefs/ai/by-slug/acme-films/drafts"
+    )
+    assert _slug_drafts_vendor_ratelimited(request, vendor_with_slug) is False
