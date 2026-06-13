@@ -100,6 +100,27 @@ def conditional_ratelimit(**ratelimit_kwargs):
     return decorator
 
 
+def client_ip_ratelimit_key(group, request) -> str:
+    """Rate-limit key that survives the reverse proxy.
+
+    django-ratelimit's built-in ``key="ip"`` reads ``REMOTE_ADDR``, which behind
+    Traefik / the Next.js proxy is the proxy's own IP — every public visitor
+    collapses into one bucket and a single abuser throttles everyone. Use the
+    left-most address from ``X-Forwarded-For`` (the originating client) instead,
+    falling back to ``REMOTE_ADDR`` when the header is absent.
+
+    Note: ``X-Forwarded-For`` is client-supplied and therefore spoofable, so this
+    is an abuse-dampener, not a hard identity. Acceptable for the public funnel;
+    hard auth lives elsewhere.
+    """
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.META.get("REMOTE_ADDR", "") or "unknown"
+
+
 def _parse_json_body(request):
     try:
         return json.loads(request.body), None
@@ -1184,7 +1205,7 @@ def client_brief_ai_share(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="120/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="120/m", method="GET")
 def public_brief_share_get(request, token):
     share = (
         BriefShare.objects.filter(token=token, is_active=True)
@@ -1201,7 +1222,7 @@ def public_brief_share_get(request, token):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_share_document_pdf(request, token, document_id):
     share = (
         BriefShare.objects.filter(token=token, is_active=True)
@@ -1577,7 +1598,7 @@ def _create_inbound_brief(  # noqa: PLR0913
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
 def public_brief_ai_from_wix(request):
     """Create an anonymous brief from a Wix landing form submission, remember the
     contact email and start the first AI reply. Returns the public brief URL for
@@ -1621,7 +1642,7 @@ def public_brief_ai_from_wix(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
 def public_brief_ai_from_webhook(request):
     """Create a vendor lead via the per-vendor webhook key.
 
@@ -1704,7 +1725,7 @@ def _webhook_vendor_ratelimited(request, vendor) -> bool:
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/h", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/h", method="GET")
 def public_brief_ai_by_slug(request, slug):
     """Resolve a vendor brief-link slug to public branding for the start screen.
 
@@ -1720,7 +1741,7 @@ def public_brief_ai_by_slug(request, slug):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
 def public_brief_ai_by_slug_drafts(request, slug):
     """Start an anonymous brief on a vendor's personal link.
 
@@ -1758,7 +1779,7 @@ def public_brief_ai_by_slug_drafts(request, slug):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="10/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/h", method="POST")
 def public_brief_ai_send(request, brief_id):
     """Anonymous Send: finalize (if needed), attach the vendor project, email.
 
@@ -1807,7 +1828,7 @@ def public_brief_ai_send(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="6/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="6/h", method="POST")
 def public_brief_ai_drafts(request):
     """Create an empty anonymous draft brief."""
     token = secrets.token_urlsafe(48)
@@ -1821,7 +1842,7 @@ def public_brief_ai_drafts(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="3/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="3/h", method="POST")
 def public_brief_ai_start(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1886,7 +1907,7 @@ def public_brief_ai_start(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_ai_status(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1917,7 +1938,7 @@ def public_brief_ai_status(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="5/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST")
 def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1980,7 +2001,7 @@ def public_brief_ai_chat(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="10/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST")
 def public_brief_ai_attachments(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -2029,7 +2050,7 @@ def public_brief_ai_attachment_delete(request, brief_id, attachment_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="10/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST")
 def public_brief_ai_chat_transcribe(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -2090,7 +2111,7 @@ def public_brief_ai_chat_transcribe(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_ai_detail(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -2183,7 +2204,7 @@ def _dispatch_finalize_if_ready(brief: Brief) -> bool:
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_ai_final_documents(request, brief_id):
     """Token-scoped read of the anonymous brief's final documents (S2-7).
 
@@ -2212,7 +2233,7 @@ def public_brief_ai_final_documents(request, brief_id):
 @csrf_exempt
 @require_http_methods(["PATCH"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="PATCH")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="PATCH")
 def public_brief_ai_final_document_update(request, brief_id, document_id):
     """Token-scoped edit of an anonymous brief's final document (S2-7).
 

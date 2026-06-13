@@ -104,6 +104,35 @@ def _public_headers(token: str) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# Rate-limit key (SF-1)
+# ----------------------------------------------------------------------------
+
+
+def test_client_ip_ratelimit_key_prefers_forwarded_for():
+    """SF-1: the public rate-limit key must use the originating client IP from
+    X-Forwarded-For, not the proxy's REMOTE_ADDR (which collapses everyone)."""
+    from django.test import RequestFactory
+
+    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+
+    request = RequestFactory().get("/")
+    request.META["REMOTE_ADDR"] = "10.0.0.1"  # proxy
+    request.META["HTTP_X_FORWARDED_FOR"] = "203.0.113.7, 10.0.0.1"
+    assert client_ip_ratelimit_key("g", request) == "203.0.113.7"
+
+
+def test_client_ip_ratelimit_key_falls_back_to_remote_addr():
+    from django.test import RequestFactory
+
+    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+
+    request = RequestFactory().get("/")
+    request.META["REMOTE_ADDR"] = "198.51.100.4"
+    request.META.pop("HTTP_X_FORWARDED_FOR", None)
+    assert client_ip_ratelimit_key("g", request) == "198.51.100.4"
+
+
+# ----------------------------------------------------------------------------
 # Draft / start / chat
 # ----------------------------------------------------------------------------
 
