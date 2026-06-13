@@ -2393,6 +2393,13 @@ def client_brief_ai_claim(request, brief_id):
             anonymous_token=token,
         ).update(anonymous_token="")
 
+        # Backfill the client onto any lead projects created while the brief was
+        # anonymous (anonymous Send creates Project with client=None). Without this
+        # the vendor's lead has no link back to the now-registered client.
+        Project.objects.filter(brief_id=brief_id, client__isnull=True).update(
+            client=client
+        )
+
         brief = Brief.objects.filter(id=brief_id).first()
         if not brief:
             return JsonResponse({"error": "Brief not found"}, status=404)

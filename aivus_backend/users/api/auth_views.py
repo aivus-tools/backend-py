@@ -112,6 +112,7 @@ def _try_claim_pending_brief(user):
         return None
     from aivus_backend.projects.models import Brief  # noqa: PLC0415
     from aivus_backend.projects.models import ChatMessage  # noqa: PLC0415
+    from aivus_backend.projects.models import Project  # noqa: PLC0415
 
     pending = Brief.objects.filter(
         id=user.pending_brief_id,
@@ -149,6 +150,12 @@ def _try_claim_pending_brief(user):
                 brief_id=user.pending_brief_id,
                 anonymous_token=user.pending_brief_token,
             ).update(anonymous_token="")
+            # Backfill the client onto any lead projects created while the brief
+            # was anonymous (anonymous Send creates Project with client=None), so
+            # the vendor's lead links back to the now-registered client.
+            Project.objects.filter(
+                brief_id=user.pending_brief_id, client__isnull=True
+            ).update(client=client)
     brief_id = str(user.pending_brief_id)
     user.pending_brief_id = None
     user.pending_brief_token = None
