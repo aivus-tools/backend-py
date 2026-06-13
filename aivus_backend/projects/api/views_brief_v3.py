@@ -28,6 +28,7 @@ from django_ratelimit.decorators import ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import BriefSource
+from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.core.slugs import normalize_slug
@@ -84,6 +85,16 @@ MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
 MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
 MAX_ATTACHMENTS_PER_BRIEF_ANON = 3
 VALID_FEEDBACK_RATINGS = {"up", "down"}
+
+# The white-label anonymous flow shows the brief to an unauthenticated visitor on
+# the vendor's branded page. The vendor outreach email (kind=vendor_email) carries
+# the vendor's outreach strategy and contacts — vendor PII the client must not see
+# (PRD §5). Anonymous token reads/edits are restricted to these client-facing
+# kinds; vendor_email is exposed only to the authenticated owner of the brief.
+ANON_VISIBLE_DOCUMENT_KINDS = (
+    FinalDocumentKind.PRODUCTION_BRIEF,
+    FinalDocumentKind.DELIVERABLES_CHECKLIST,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2230,7 +2241,14 @@ def public_brief_ai_final_documents(request, brief_id):
 
     generating = _dispatch_finalize_if_ready(brief)
 
-    documents = list(brief.final_documents.order_by("kind"))
+    # Never expose the vendor outreach email to the anonymous client (PRD §5):
+    # the brief is shown on the vendor's branded page and vendor_email holds the
+    # vendor's outreach strategy and contacts.
+    documents = list(
+        brief.final_documents.filter(kind__in=ANON_VISIBLE_DOCUMENT_KINDS).order_by(
+            "kind"
+        )
+    )
     return JsonResponse(
         {
             "briefId": str(brief.id),
@@ -2263,7 +2281,15 @@ def public_brief_ai_final_document_update(request, brief_id, document_id):
             {"error": "Brief already sent and can no longer be edited"}, status=409
         )
 
-    document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
+    # vendor_email is vendor PII and invisible to the anonymous client (PRD §5):
+    # scope the lookup to the client-facing kinds so an anonymous edit can neither
+    # read nor mutate it. An out-of-scope kind looks like a missing document (404),
+    # which also avoids confirming the vendor_email exists.
+    document = (
+        BriefFinalDocument.objects.filter(id=document_id, brief=brief)
+        .filter(kind__in=ANON_VISIBLE_DOCUMENT_KINDS)
+        .first()
+    )
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)
 

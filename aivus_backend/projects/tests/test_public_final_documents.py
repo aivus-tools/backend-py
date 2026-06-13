@@ -219,3 +219,58 @@ def test_patch_final_document_blocked_after_send(api_client, anon_brief_with_doc
     assert response.status_code == 409
     document.refresh_from_db()
     assert "sneaky edit" not in document.html
+
+
+@pytest.mark.django_db
+def test_get_final_documents_excludes_vendor_email(
+    api_client, anon_brief_with_document
+):
+    """MF-3: the anonymous white-label GET must never expose the vendor outreach
+    email — it carries the vendor's outreach strategy and contacts (PRD §5)."""
+    brief, production_doc = anon_brief_with_document
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.VENDOR_EMAIL,
+        html="<p>Vendor outreach strategy and contacts</p>",
+        plain_text="Vendor outreach strategy and contacts",
+    )
+
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    returned_ids = {doc["id"] for doc in body["documents"]}
+    assert str(production_doc.id) in returned_ids
+    assert str(vendor_email.id) not in returned_ids
+    assert "outreach strategy" not in json.dumps(body)
+
+
+@pytest.mark.django_db
+def test_patch_vendor_email_rejected_for_anon(api_client, anon_brief_with_document):
+    """MF-3: the anonymous client must not be able to read or edit the vendor
+    outreach email. The out-of-scope kind looks like a missing document (404)."""
+    brief, _production_doc = anon_brief_with_document
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.VENDOR_EMAIL,
+        html="<p>Original vendor email</p>",
+        plain_text="Original vendor email",
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, vendor_email.id],
+        ),
+        data=json.dumps({"html": "<p>anon tampering</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+
+    assert response.status_code == 404
+    vendor_email.refresh_from_db()
+    assert "tampering" not in vendor_email.html
+    assert "Original vendor email" in vendor_email.html
