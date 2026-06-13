@@ -147,7 +147,7 @@ def projects_list(request):  # noqa: C901, PLR0912, PLR0915
             Project.objects.filter(
                 vendor_id=vendor_id,
             )
-            .select_related("client")
+            .select_related("client", "brief")
             .prefetch_related("collaborators", "client_managers")
         )
         return JsonResponse([serialize_project(p) for p in projects], safe=False)
