@@ -25,6 +25,7 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 
+from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.llm import FALLBACK_CHAIN
 from aivus_backend.core.llm import LLMResponse
 from aivus_backend.core.llm import call_llm
@@ -156,7 +157,29 @@ def _build_language_rule(doc_language: str) -> str:
     return rule
 
 
-def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
+_SEND_FLOW_SOURCES = {BriefSource.PERSONAL_LINK, BriefSource.WEBHOOK}
+
+
+def _build_auth_rule(
+    *, is_anonymous: bool, is_finalized: bool, source: str = BriefSource.DIRECT
+) -> str:
+    if is_anonymous and source in _SEND_FLOW_SOURCES:
+        # Branded personal-link / webhook flow: there is no sign-up before Send.
+        # The anonymous client reviews the document and presses "Send brief", so
+        # the AI must point at the document and that button, never at registration.
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user is browsing anonymously through a vendor's branded brief\n"
+            "link. There is NO account step before sending — never tell the user\n"
+            "to create an account, log in, or join. When the brief is ready,\n"
+            "briefly tell them the brief is ready and to review it: the document\n"
+            "is on the left on desktop, or in the Brief tab on mobile. Invite\n"
+            "them to tweak it here in chat if anything needs changing, then press\n"
+            "the 'Send brief' button to send it to the vendor. Do NOT reveal the\n"
+            "contents of the future brief in chat: no excerpts, no field values,\n"
+            "no preview of the production brief, vendor email, or deliverables\n"
+            "checklist.\n"
+        )
     if is_anonymous:
         return (
             "=== USER AUTH CONTEXT ===\n"
@@ -446,6 +469,7 @@ def process_brief_turn(
         auth_rule=_build_auth_rule(
             is_anonymous=brief.client_id is None,
             is_finalized=brief.conversation_status == "finalized",
+            source=brief.source,
         ),
         date_rule=_build_date_rule(),
     )
@@ -748,6 +772,7 @@ def process_finalized_turn(
         auth_rule=_build_auth_rule(
             is_anonymous=brief.client_id is None,
             is_finalized=True,
+            source=brief.source,
         ),
         date_rule=_build_date_rule(),
     )

@@ -1035,6 +1035,65 @@ def test_process_brief_turn_injects_anonymous_auth_rule(
 
 
 @pytest.mark.django_db
+def test_process_brief_turn_personal_link_anon_skips_signup_cta(
+    client_user, client_profile, seeded_prompts
+):
+    """Anonymous personal-link brief gets a 'Send brief' CTA, never sign-up:
+    there is no registration before Send in the branded vendor flow (MF-5)."""
+    from aivus_backend.core.llm import LLMResponse
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    anon_brief = Brief.objects.create(
+        client=None,
+        anonymous_token="tok-personal-link",
+        document_language="en",
+        source="personal_link",
+    )
+    user_msg = ChatMessage.objects.create(
+        brief=anon_brief,
+        user=None,
+        anonymous_token="tok-personal-link",
+        role="user",
+        content="hi",
+    )
+
+    captured = {}
+
+    def fake_call(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        return (
+            {"reply": "ok", "ready_to_finalize": False},
+            LLMResponse(
+                content="{}",
+                model_used=model,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=0.0,
+                latency_ms=1,
+                request_messages=[],
+                request_params={},
+            ),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_call
+    ):
+        process_brief_turn(
+            brief=anon_brief, user_message="hi", attachments=[], history=[user_msg]
+        )
+
+    system = captured["system"]
+    assert "USER AUTH CONTEXT" in system
+    assert "branded brief" in system
+    assert "Send brief" in system
+    assert "sign up" not in system.lower()
+    assert "sign-up" not in system.lower()
+    assert "register" not in system.lower()
+
+
+@pytest.mark.django_db
 def test_process_brief_turn_injects_authenticated_auth_rule(
     client_user, client_profile, seeded_prompts
 ):
