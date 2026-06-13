@@ -157,16 +157,13 @@ def _build_language_rule(doc_language: str) -> str:
     return rule
 
 
-_SEND_FLOW_SOURCES = {BriefSource.PERSONAL_LINK, BriefSource.WEBHOOK}
-
-
 def _build_auth_rule(
     *, is_anonymous: bool, is_finalized: bool, source: str = BriefSource.DIRECT
 ) -> str:
-    if is_anonymous and source in _SEND_FLOW_SOURCES:
-        # Branded personal-link / webhook flow: there is no sign-up before Send.
-        # The anonymous client reviews the document and presses "Send brief", so
-        # the AI must point at the document and that button, never at registration.
+    if is_anonymous and source == BriefSource.PERSONAL_LINK:
+        # Branded personal-link flow: there is no sign-up before Send. The
+        # anonymous client reviews the document and presses "Send brief", so the
+        # AI must point at the document and that button, never at registration.
         return (
             "=== USER AUTH CONTEXT ===\n"
             "The user is browsing anonymously through a vendor's branded brief\n"
@@ -179,6 +176,23 @@ def _build_auth_rule(
             "contents of the future brief in chat: no excerpts, no field values,\n"
             "no preview of the production brief, vendor email, or deliverables\n"
             "checklist.\n"
+        )
+    if is_anonymous and source == BriefSource.WEBHOOK:
+        # Inbound webhook lead: the form was already auto-submitted to the vendor,
+        # so there is no "Send brief" button and no sign-up step. The chat only
+        # lets the lead clarify or refine details, which reach the vendor through
+        # the same already-delivered brief.
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user submitted an inquiry through a vendor's website form and is\n"
+            "now chatting anonymously. Their request has ALREADY been sent to the\n"
+            "vendor — there is no button to press and no account step. Never tell\n"
+            "the user to create an account, finalize, or click any button. When\n"
+            "the brief is ready, briefly tell them their request has been received\n"
+            "by the vendor and invite them to add or clarify any details here in\n"
+            "chat. Do NOT reveal the contents of the future brief in chat: no\n"
+            "excerpts, no field values, no preview of the production brief, vendor\n"
+            "email, or deliverables checklist.\n"
         )
     if is_anonymous:
         return (
