@@ -1402,6 +1402,17 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # edit it before Send; re-running finalize here would discard those
         # manual edits. Documents already present are taken as-is.
         needs_finalize = not locked.final_documents.exists()
+        # A GET-triggered finalize (the branded flow polls final-documents, which
+        # dispatches finalize-on-ready) may already be in flight with no documents
+        # yet. Enqueuing a second finalize here would race the first and
+        # generate_final_documents would delete+recreate the document, discarding
+        # the in-flight result and any manual edits. Reject so the client keeps
+        # polling and re-sends once the documents land. We do not arm our own
+        # pending marker in this branch so the existing finalize is left intact.
+        if needs_finalize and locked.pending_task_id:
+            return JsonResponse(
+                {"error": "Brief is still generating, try again shortly"}, status=409
+            )
         # Arm the pending marker and clear any stale failure from a previous Send
         # so the status endpoint reports "pending" again, not the old "failed".
         Brief.objects.filter(id=locked.id).update(

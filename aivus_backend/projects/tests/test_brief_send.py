@@ -270,6 +270,41 @@ def test_public_send_finalized_skips_finalize(api_client, vendor):
     chain_mock.assert_called_once()
 
 
+@pytest.mark.django_db
+def test_public_send_rejects_when_finalize_in_flight(api_client, vendor):
+    """MF-2: Send pressed while a GET-triggered finalize is still running (no
+    documents yet, pending_task_id armed) must not enqueue a second finalize that
+    would race the first and discard the in-flight document. It returns 409 and
+    leaves the existing finalize marker untouched so the client keeps polling."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="finalize-in-flight",
+        conversation_status="ready_to_finalize",
+        pending_task_id="inflight-finalize-id",
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="finalize-in-flight",
+        )
+    assert response.status_code == 409
+    assert "generating" in response.json()["error"].lower()
+    chain_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "inflight-finalize-id"
+
+
 # --- authenticated Send ------------------------------------------------------
 
 
@@ -398,6 +433,37 @@ def test_mark_project_sent_creates_when_missing(vendor, client_user):
     project = Project.objects.get(brief=brief, vendor=vendor)
     assert project.status == ProjectStatus.RFP
     assert project.client_id == client_profile.id
+
+
+@pytest.mark.django_db
+def test_finalize_task_skips_when_already_finalized_with_documents():
+    """MF-2: a second finalize on an already-finalized brief must be a no-op.
+    generate_final_documents deletes and recreates documents, so without this
+    guard a racing or retried finalize would wipe the existing document and any
+    manual edits the client made before Send."""
+    from aivus_backend.projects.tasks import finalize_brief_task
+
+    brief = Brief.objects.create(
+        client=None,
+        conversation_status="finalized",
+        status="COMPLETED",
+        pending_task_id="stale-second-finalize",
+    )
+    document = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Manually edited</p>"
+    )
+
+    with patch(
+        "aivus_backend.projects.tasks.generate_final_documents"
+    ) as generate_mock:
+        finalize_brief_task.run(str(brief.id))
+
+    generate_mock.assert_not_called()
+    document.refresh_from_db()
+    assert "Manually edited" in document.html
+    assert BriefFinalDocument.objects.filter(brief=brief).count() == 1
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
 
 
 # --- double-Send race --------------------------------------------------------

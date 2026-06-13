@@ -21,6 +21,7 @@ from aivus_backend.projects.attachments import WIX_FILE_HOST_SUFFIXES
 from aivus_backend.projects.attachments import download_remote_file
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
+from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import LLMCallTrace
@@ -248,6 +249,24 @@ def finalize_brief_task(brief_id: str) -> dict:
         except Brief.DoesNotExist:
             logger.warning("Brief not found for finalization: brief_id=%s", brief_id)
             return {"error": "Brief not found"}
+
+        # Idempotency guard: a brief that is already finalized and has documents
+        # must never be re-finalized. generate_final_documents deletes and
+        # recreates the documents, which would discard the existing copy and any
+        # manual edits the client made before Send. This can happen when a Send is
+        # pressed while a GET-triggered finalize is still in flight (MF-2 race) or
+        # on a Celery retry. The select_for_update above serialises this check
+        # against a concurrent finalize on the same row.
+        if (
+            brief.status == "COMPLETED"
+            and brief.conversation_status == "finalized"
+            and BriefFinalDocument.objects.filter(brief=brief).exists()
+        ):
+            logger.info(
+                "Brief already finalized, skipping re-finalize: brief_id=%s", brief_id
+            )
+            Brief.objects.filter(id=brief.id).update(pending_task_id="")
+            return serialize_brief_v3_detail(brief)
 
     started_at = time.monotonic()
     try:
