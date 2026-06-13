@@ -58,6 +58,7 @@ from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
 from aivus_backend.projects.tasks import import_wix_attachments_task
+from aivus_backend.projects.tasks import mark_brief_send_failed_task
 from aivus_backend.projects.tasks import mark_project_sent_task
 from aivus_backend.projects.tasks import persist_message_traces
 from aivus_backend.projects.tasks import send_emails_task
@@ -637,6 +638,13 @@ def client_brief_ai_status(request, brief_id):
         return JsonResponse({"error": "Brief not found"}, status=404)
 
     brief.refresh_from_db()
+    if brief.pending_task_error:
+        # The Send chain failed: its link_error stamped pending_task_error and
+        # cleared the pending marker. Report "failed" (never "done") and clear
+        # the flag so a fresh Send can re-arm cleanly.
+        Brief.objects.filter(id=brief.id).update(pending_task_error="")
+        logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)
         if result.failed():
@@ -1331,7 +1339,11 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # edit it before Send; re-running finalize here would discard those
         # manual edits. Documents already present are taken as-is.
         needs_finalize = not locked.final_documents.exists()
-        Brief.objects.filter(id=locked.id).update(pending_task_id=send_chain_task_id)
+        # Arm the pending marker and clear any stale failure from a previous Send
+        # so the status endpoint reports "pending" again, not the old "failed".
+        Brief.objects.filter(id=locked.id).update(
+            pending_task_id=send_chain_task_id, pending_task_error=""
+        )
         if needs_finalize:
             # finalize_brief_task clears pending_task_id when it completes, so the
             # marker is re-asserted right after it to keep the brief "pending"
@@ -1346,9 +1358,13 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         else:
             workflow = chain(mark_signature, send_signature, clear_signature)
 
+    # On any step failure the chain's link_error stamps pending_task_error with
+    # this chain id and clears the pending marker, so the status endpoint reports
+    # "failed" instead of silently flipping to "done". Success runs
+    # clear_brief_pending_task (the tail) which leaves pending_task_error empty.
     transaction.on_commit(
         lambda: workflow.apply_async(
-            link_error=clear_brief_pending_task.si(brief_id_str)
+            link_error=mark_brief_send_failed_task.si(brief_id_str, send_chain_task_id)
         )
     )
 
@@ -1809,6 +1825,13 @@ def public_brief_ai_status(request, brief_id):
         return JsonResponse({"error": "Brief not found"}, status=404)
 
     brief.refresh_from_db()
+    if brief.pending_task_error:
+        # The Send chain failed: its link_error stamped pending_task_error and
+        # cleared the pending marker. Report "failed" (never "done") and clear
+        # the flag so a fresh Send can re-arm cleanly.
+        Brief.objects.filter(id=brief.id).update(pending_task_error="")
+        logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)
         if result.failed():

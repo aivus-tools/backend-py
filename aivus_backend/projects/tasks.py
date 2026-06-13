@@ -43,8 +43,27 @@ def set_brief_pending_task(brief_id: str, task_id: str) -> dict:
     "pending" until the project is promoted, so this step restores the marker
     after finalize and before the promotion/email steps.
     """
-    Brief.objects.filter(id=brief_id).update(pending_task_id=task_id)
+    Brief.objects.filter(id=brief_id).update(pending_task_id="")
+    Brief.objects.filter(id=brief_id).update(
+        pending_task_id=task_id, pending_task_error=""
+    )
     return {"ok": True}
+
+
+@shared_task
+def mark_brief_send_failed_task(brief_id: str, task_id: str) -> None:
+    """Record a failed Send chain so the status endpoint reports "failed".
+
+    Used as the chain's ``link_error``. The Send chain is not dispatched with a
+    single tracked id, so an ``AsyncResult`` on the pending marker can never see
+    the failure. Persisting the failing chain id here is the source of truth:
+    the status endpoint clears the pending marker and reports "failed" instead
+    of silently flipping to "done". Only the chain that still owns the pending
+    marker may stamp the error, so a stale retry cannot clobber a fresh Send.
+    """
+    Brief.objects.filter(id=brief_id, pending_task_id=task_id).update(
+        pending_task_id="", pending_task_error=task_id
+    )
 
 
 def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:

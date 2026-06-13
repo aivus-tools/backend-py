@@ -442,3 +442,82 @@ def test_send_emails_task_skips_client_email_when_no_recipient(vendor, anon_brie
     ):
         send_emails_task.run(str(anon_brief.id), str(vendor.id), "", "en")
     client_mock.assert_not_called()
+
+
+# --- Send failure surfacing (MF-2) -------------------------------------------
+
+
+@pytest.mark.django_db
+def test_send_wires_failure_link_error(api_client, vendor, anon_brief):
+    """The Send chain's link_error must point at mark_brief_send_failed_task so a
+    chain failure is recorded, not silently cleared into a "done" status."""
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.mark_brief_send_failed_task"
+        ) as failed_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 200
+    task_id = response.json()["finalizingTaskId"]
+    workflow = chain_mock.return_value
+    _, kwargs = workflow.apply_async.call_args
+    assert kwargs["link_error"] is failed_mock.si.return_value
+    failed_mock.si.assert_called_once_with(str(anon_brief.id), task_id)
+
+
+@pytest.mark.django_db
+def test_mark_brief_send_failed_task_records_error():
+    """The link_error task clears the pending marker and stamps the error so the
+    status endpoint can report "failed"."""
+    from aivus_backend.projects.tasks import mark_brief_send_failed_task
+
+    brief = Brief.objects.create(client=None, pending_task_id="chain-1")
+    mark_brief_send_failed_task.run(str(brief.id), "chain-1")
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+    assert brief.pending_task_error == "chain-1"
+
+
+@pytest.mark.django_db
+def test_mark_brief_send_failed_task_ignores_stale_chain():
+    """A stale chain id must not clobber a freshly re-armed Send."""
+    from aivus_backend.projects.tasks import mark_brief_send_failed_task
+
+    brief = Brief.objects.create(client=None, pending_task_id="chain-2")
+    mark_brief_send_failed_task.run(str(brief.id), "chain-1")
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "chain-2"
+    assert brief.pending_task_error == ""
+
+
+@pytest.mark.django_db
+def test_public_status_reports_failed_on_send_error(api_client, vendor):
+    """A brief whose Send chain failed must report status=failed, never done."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="failed-send",
+        conversation_status="ready_to_finalize",
+        source="personal_link",
+        pending_task_id="",
+        pending_task_error="chain-x",
+    )
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="failed-send",
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    # The flag is cleared after reporting so a fresh Send can re-arm.
+    brief.refresh_from_db()
+    assert brief.pending_task_error == ""
