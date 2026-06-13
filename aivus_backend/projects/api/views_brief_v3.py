@@ -1433,17 +1433,27 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # edit it before Send; re-running finalize here would discard those
         # manual edits. Documents already present are taken as-is.
         needs_finalize = not locked.final_documents.exists()
-        # A GET-triggered finalize (the branded flow polls final-documents, which
-        # dispatches finalize-on-ready) may already be in flight with no documents
-        # yet. Enqueuing a second finalize here would race the first and
-        # generate_final_documents would delete+recreate the document, discarding
-        # the in-flight result and any manual edits. Reject so the client keeps
-        # polling and re-sends once the documents land. We do not arm our own
-        # pending marker in this branch so the existing finalize is left intact.
-        if needs_finalize and locked.pending_task_id:
-            return JsonResponse(
-                {"error": "Brief is still generating, try again shortly"}, status=409
+        # Any non-empty pending marker means a task already owns this brief, so a
+        # second Send must not enqueue another chain. Two cases:
+        #   1) needs_finalize — a GET-triggered finalize (the branded flow polls
+        #      final-documents, which dispatches finalize-on-ready) is in flight
+        #      with no documents yet. A second finalize would race the first and
+        #      generate_final_documents would delete+recreate the document,
+        #      discarding the in-flight result and any manual edits.
+        #   2) not needs_finalize — a previous Send chain is already armed (its
+        #      project promotion to RFP runs async, after this lock is released).
+        #      A concurrent Send would see the project still at DRAFT, pass the
+        #      _brief_already_sent_to_vendor guard, and enqueue a second chain that
+        #      sends the client and vendor emails twice. The marker closes that gap.
+        # Either way we leave the existing marker intact and tell the client to
+        # retry, so the in-flight task is never disturbed.
+        if locked.pending_task_id:
+            message = (
+                "Brief is still generating, try again shortly"
+                if needs_finalize
+                else "Brief is already being sent, try again shortly"
             )
+            return JsonResponse({"error": message}, status=409)
         # Arm the pending marker and clear any stale failure from a previous Send
         # so the status endpoint reports "pending" again, not the old "failed".
         Brief.objects.filter(id=locked.id).update(

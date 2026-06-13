@@ -520,6 +520,78 @@ def test_double_send_yields_single_project(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_concurrent_send_enqueues_single_chain(api_client, vendor, anon_brief):
+    """MF-1: two Sends fired before any chain runs (the real race) must enqueue
+    exactly one chain. The project promotion to RFP happens async, after the lock
+    is released, so the second Send still sees the project at DRAFT and would pass
+    the already-sent guard — the pending_task_id marker armed by the first Send is
+    what rejects it. The masked variant (test_double_send_yields_single_project)
+    artificially promotes the project between the two Sends; this one does not."""
+    BriefFinalDocument.objects.create(
+        brief=anon_brief, kind="production_brief", html="<p>doc</p>"
+    )
+
+    def _send():
+        with (
+            patch(
+                "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+                side_effect=_run_on_commit,
+            ),
+            patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+        ):
+            response = api_client.post(
+                reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+                data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+                content_type="application/json",
+                HTTP_X_BRIEF_TOKEN="send-token",
+            )
+        return response, chain_mock
+
+    first, first_chain = _send()
+    assert first.status_code == 200
+    first_chain.assert_called_once()
+
+    # No mark_project_sent_task runs between the two Sends: the project is still at
+    # DRAFT. The pending marker from the first Send must reject the second.
+    assert (
+        Project.objects.get(brief=anon_brief, vendor=vendor).status
+        == ProjectStatus.DRAFT
+    )
+
+    second, second_chain = _send()
+    assert second.status_code == 409
+    assert "being sent" in second.json()["error"].lower()
+    second_chain.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_send_emails_task_is_idempotent_across_chains(vendor, anon_brief):
+    """MF-1 defence-in-depth: even if a duplicate chain slips past the view guard,
+    send_emails_task stamps emails_sent_at under a lock and the second run is a
+    no-op, so the client and vendor are emailed only once."""
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email"
+        ) as client_mock,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock,
+    ):
+        first = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+        second = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert first["ok"] is True
+    assert second.get("alreadySent") is True
+    client_mock.assert_called_once()
+    vendor_mock.assert_called_once()
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    assert project.emails_sent_at is not None
+
+
+@pytest.mark.django_db
 def test_send_emails_task_creates_share_and_emails(vendor, anon_brief):
     with (
         patch(

@@ -405,6 +405,8 @@ def send_emails_task(
     email was provided (anonymous Send); the vendor email always fires. The
     BriefShare get_or_create reuses the same public share clients use today.
     """
+    from django.utils import timezone  # noqa: PLC0415
+
     from aivus_backend.projects import brief_emails  # noqa: PLC0415
 
     brief = Brief.objects.filter(id=brief_id).first()
@@ -412,14 +414,25 @@ def send_emails_task(
         logger.warning("send_emails: brief not found %s", brief_id)
         return {"ok": False}
 
-    project = (
-        Project.objects.filter(vendor_id=vendor_id, brief=brief)
-        .select_related("vendor", "vendor__owner")
-        .first()
-    )
-    if not project:
-        logger.warning("send_emails: project not found brief=%s", brief_id)
-        return {"ok": False}
+    # Idempotency guard against a duplicate Send chain slipping past the view-level
+    # pending_task_id check (concurrency, Celery redelivery): stamp emails_sent_at
+    # under a row lock and bail out if another run already did so. Without it the
+    # client and vendor would each receive two emails.
+    with transaction.atomic():
+        project = (
+            Project.objects.select_for_update()
+            .filter(vendor_id=vendor_id, brief=brief)
+            .select_related("vendor", "vendor__owner")
+            .first()
+        )
+        if not project:
+            logger.warning("send_emails: project not found brief=%s", brief_id)
+            return {"ok": False}
+        if project.emails_sent_at is not None:
+            logger.info("send_emails: already sent brief=%s, skipping", brief_id)
+            return {"ok": True, "alreadySent": True}
+        project.emails_sent_at = timezone.now()
+        project.save(update_fields=["emails_sent_at", "updated_at"])
 
     share, _created = BriefShare.objects.get_or_create(brief=brief)
 
