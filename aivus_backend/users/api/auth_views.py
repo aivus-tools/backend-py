@@ -92,12 +92,25 @@ def _save_pending_brief(user, data):
         user.save(update_fields=["pending_brief_id", "pending_brief_token"])
 
 
+def _ensure_client_profile(user):
+    """Get or lazily create the user's Client profile without changing group.
+
+    A visitor who came through a personal vendor link registers to claim their
+    brief; their User.group may stay UNCONFIRMED/CONFIRMED while they still need
+    a Client profile to own the brief. The group toggle stays a separate,
+    explicit user action.
+    """
+    client, _created = Client.objects.get_or_create(
+        owner=user,
+        defaults={"name": f"{user.name}'s Company", "ein": ""},
+    )
+    return client
+
+
 def _try_claim_pending_brief(user):
     if not user.pending_brief_id or not user.pending_brief_token:
         return None
-    client = Client.objects.filter(owner=user).first()
-    if not client:
-        return None
+    client = _ensure_client_profile(user)
     from aivus_backend.projects.models import Brief  # noqa: PLC0415
     from aivus_backend.projects.models import ChatMessage  # noqa: PLC0415
 

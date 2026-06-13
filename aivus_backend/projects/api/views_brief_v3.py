@@ -171,6 +171,23 @@ def _get_client_safe(request) -> Client | None:
     return Client.objects.filter(id=client_id).first()
 
 
+def _ensure_client_for_claim(request) -> Client | None:
+    """Lazily create the Client profile for the authenticated user on claim.
+
+    A lead who registered through a personal-link email needs a Client profile
+    to own the brief, but we must not flip their User.group — the role toggle is
+    a separate explicit action (PRD S2-14, §12 p.3/15).
+    """
+    user = _get_request_user(request)
+    if not user:
+        return None
+    client, _created = Client.objects.get_or_create(
+        owner=user,
+        defaults={"name": f"{user.name}'s Company", "ein": ""},
+    )
+    return client
+
+
 def _get_request_user(request) -> User | None:
     user_id = (getattr(request, "user_data", None) or {}).get("id")
     if not user_id:
@@ -2012,7 +2029,7 @@ def client_brief_ai_claim(request, brief_id):
     if not token:
         return JsonResponse({"error": "X-Brief-Token is required"}, status=400)
 
-    client = _get_client_safe(request)
+    client = _get_client_safe(request) or _ensure_client_for_claim(request)
     if not client:
         return JsonResponse({"error": "Client profile not found"}, status=403)
 
