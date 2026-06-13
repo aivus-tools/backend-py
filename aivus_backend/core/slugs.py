@@ -68,9 +68,9 @@ def validate_slug(value: str) -> str | None:
     """Return an error message when the slug is invalid, otherwise None.
 
     Enforces lowercase ``[a-z0-9-]`` with no leading, trailing or doubled
-    hyphens, a 3-40 length window and the reserved-name registry. Uppercase
-    input is rejected rather than silently lowercased so the inline-validation
-    contract is explicit.
+    hyphens, a 3-40 length window and the reserved-name registry. Callers pass
+    the value through ``normalize_slug`` first, so input is already lowercased
+    and trimmed by the time it is validated.
     """
     slug = (value or "").strip()
     if not slug:
