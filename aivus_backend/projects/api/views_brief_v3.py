@@ -1390,7 +1390,7 @@ def _brief_already_sent(brief: Brief) -> bool:
     already looking at.
     """
     return (
-        Project.objects.filter(brief=brief)
+        Project.objects.filter(brief=brief, deleted_at__isnull=True)
         .filter(status__in=SENT_PROJECT_STATUSES)
         .exists()
     )

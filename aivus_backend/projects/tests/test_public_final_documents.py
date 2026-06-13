@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from django.test import Client as DjangoTestClient
 from django.urls import reverse
+from django.utils import timezone
 
 from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.core.enums import ProjectStatus
@@ -219,6 +220,40 @@ def test_patch_final_document_blocked_after_send(api_client, anon_brief_with_doc
     assert response.status_code == 409
     document.refresh_from_db()
     assert "sneaky edit" not in document.html
+
+
+@pytest.mark.django_db
+def test_patch_allowed_when_only_soft_deleted_rfp_project(
+    api_client, anon_brief_with_document
+):
+    """SF-5: _brief_already_sent must count only active projects. A soft-deleted
+    RFP project means the brief is not really sent, so the anonymous client may
+    still edit the document."""
+    brief, document = anon_brief_with_document
+    owner = User.objects.create_user(
+        email="sf5-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="SF5 Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor,
+        brief=brief,
+        name="lead",
+        status=ProjectStatus.RFP,
+        deleted_at=timezone.now(),
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>still editable</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 200
+    document.refresh_from_db()
+    assert "still editable" in document.html
 
 
 @pytest.mark.django_db
