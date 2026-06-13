@@ -9,10 +9,13 @@ from django.core import mail
 from django.test import override_settings
 
 from aivus_backend.core.enums import FinalDocumentKind
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects import brief_emails
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefFinalDocument
+from aivus_backend.projects.models import Project
 from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 from aivus_backend.users.tasks import send_to_recipient_email
 
 
@@ -97,6 +100,32 @@ def test_client_email_new_account_uses_recipient_task():
     anon_mock.assert_called_once()
     auth_mock.assert_not_called()
     assert anon_mock.call_args.kwargs["attachments"]
+
+
+@pytest.mark.django_db
+@override_settings(FRONTEND_URL="https://go.aivus.co")
+def test_vendor_lead_email_links_to_dashboard_project():
+    owner = User.objects.create_user(
+        email="vendor-owner@example.com",
+        password="p@ssw0rd",
+        name="Vendor Owner",
+        group="VENDOR",
+    )
+    vendor = Vendor.objects.create(name="Dash Studio", owner=owner)
+    brief = Brief.objects.create(
+        client=None, contact_email="lead@example.com", document_language="en"
+    )
+    project = Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as send_mock:
+        brief_emails.send_vendor_lead_email(project, brief, "en")
+
+    send_mock.assert_called_once()
+    project_url = send_mock.call_args.kwargs["context"]["project_url"]
+    assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}"
+    assert "/app/projects/" not in project_url
 
 
 @pytest.mark.django_db
