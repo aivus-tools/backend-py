@@ -43,6 +43,12 @@ CACHES = {
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-proxy-ssl-header
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# Number of trusted reverse-proxy hops in front of Django for rate-limit client
+# IP resolution: client -> Traefik -> Next.js -> Django. Only the right-most
+# entries of X-Forwarded-For added by these hops are trusted; everything to the
+# left is attacker-controlled and ignored. Override per deployment if the chain
+# changes.
+RATELIMIT_TRUSTED_PROXY_COUNT = env.int("RATELIMIT_TRUSTED_PROXY_COUNT", default=2)
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-ssl-redirect
 SECURE_SSL_REDIRECT = False  # Traefik handles SSL, internal requests are HTTP
 # https://docs.djangoproject.com/en/dev/ref/settings/#session-cookie-secure

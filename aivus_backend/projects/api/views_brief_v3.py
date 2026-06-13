@@ -111,25 +111,45 @@ def conditional_ratelimit(**ratelimit_kwargs):
     return decorator
 
 
-def client_ip_ratelimit_key(group, request) -> str:
-    """Rate-limit key that survives the reverse proxy.
+def resolve_client_ip(request) -> str:
+    """Single source of truth for the visitor's IP behind the reverse proxy.
 
     django-ratelimit's built-in ``key="ip"`` reads ``REMOTE_ADDR``, which behind
     Traefik / the Next.js proxy is the proxy's own IP — every public visitor
-    collapses into one bucket and a single abuser throttles everyone. Use the
-    left-most address from ``X-Forwarded-For`` (the originating client) instead,
-    falling back to ``REMOTE_ADDR`` when the header is absent.
+    collapses into one bucket and a single abuser throttles everyone. The naive
+    fix (left-most ``X-Forwarded-For``) is worse: that entry is fully
+    client-supplied, so an attacker rotates a fake header and sidesteps every
+    limit.
 
-    Note: ``X-Forwarded-For`` is client-supplied and therefore spoofable, so this
-    is an abuse-dampener, not a hard identity. Acceptable for the public funnel;
-    hard auth lives elsewhere.
+    Instead we trust exactly ``RATELIMIT_TRUSTED_PROXY_COUNT`` hops. Each trusted
+    proxy appends the address it received from to the right of the header, so with
+    ``N`` trusted proxies the real client is the ``N``-th entry counted from the
+    right (``xff[-(N+1)]``). Entries to the left of that are attacker-controlled
+    and ignored.
+
+    Defaults to ``0`` (trust no proxy) so the header is never honoured unless the
+    deployment opts in by declaring its hop count — a spoofed header then falls
+    back to ``REMOTE_ADDR``, which the attacker cannot forge. Production sets the
+    real count (client -> Traefik -> Next.js -> Django).
     """
+    remote_addr = request.META.get("REMOTE_ADDR", "") or "unknown"
+    trusted = int(getattr(settings, "RATELIMIT_TRUSTED_PROXY_COUNT", 0) or 0)
+    if trusted <= 0:
+        return remote_addr
+
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return request.META.get("REMOTE_ADDR", "") or "unknown"
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    # The header must carry at least one entry per trusted hop plus the client
+    # itself; a shorter chain means the expected proxies did not all append, so we
+    # refuse to read an attacker-shiftable position and fall back to REMOTE_ADDR.
+    if len(parts) <= trusted:
+        return remote_addr
+    return parts[-(trusted + 1)]
+
+
+def client_ip_ratelimit_key(group, request) -> str:
+    """Rate-limit key keyed on the trusted client IP (see resolve_client_ip)."""
+    return resolve_client_ip(request)
 
 
 def _parse_json_body(request):

@@ -108,28 +108,63 @@ def _public_headers(token: str) -> dict:
 # ----------------------------------------------------------------------------
 
 
-def test_client_ip_ratelimit_key_prefers_forwarded_for():
-    """SF-1: the public rate-limit key must use the originating client IP from
-    X-Forwarded-For, not the proxy's REMOTE_ADDR (which collapses everyone)."""
+def test_client_ip_ratelimit_key_default_ignores_forwarded_for():
+    """SF-1: with no trusted proxies declared (default 0) the spoofable
+    X-Forwarded-For is ignored and the unforgeable REMOTE_ADDR is used."""
     from django.test import RequestFactory
+    from django.test import override_settings
 
     from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
-    request.META["REMOTE_ADDR"] = "10.0.0.1"  # proxy
+    request.META["REMOTE_ADDR"] = "10.0.0.1"
     request.META["HTTP_X_FORWARDED_FOR"] = "203.0.113.7, 10.0.0.1"
-    assert client_ip_ratelimit_key("g", request) == "203.0.113.7"
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=0):
+        assert client_ip_ratelimit_key("g", request) == "10.0.0.1"
+
+
+def test_client_ip_ratelimit_key_uses_nth_from_right_with_trusted_proxies():
+    """With N trusted hops the client is the N-th X-Forwarded-For entry from the
+    right; entries the attacker prepends on the left are ignored."""
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+
+    request = RequestFactory().get("/")
+    request.META["REMOTE_ADDR"] = "172.16.0.1"
+    # Spoofed left entry, then the real client, then the two trusted proxies.
+    request.META["HTTP_X_FORWARDED_FOR"] = "1.2.3.4, 203.0.113.7, 10.0.0.2, 10.0.0.1"
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert client_ip_ratelimit_key("g", request) == "203.0.113.7"
+
+
+def test_client_ip_ratelimit_key_spoofed_short_chain_falls_back():
+    """A forged header shorter than the trusted hop count cannot shift the read
+    position; it falls back to REMOTE_ADDR, which the attacker cannot forge."""
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+
+    request = RequestFactory().get("/")
+    request.META["REMOTE_ADDR"] = "172.16.0.1"
+    request.META["HTTP_X_FORWARDED_FOR"] = "9.9.9.9"
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert client_ip_ratelimit_key("g", request) == "172.16.0.1"
 
 
 def test_client_ip_ratelimit_key_falls_back_to_remote_addr():
     from django.test import RequestFactory
+    from django.test import override_settings
 
     from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
     request.META["REMOTE_ADDR"] = "198.51.100.4"
     request.META.pop("HTTP_X_FORWARDED_FOR", None)
-    assert client_ip_ratelimit_key("g", request) == "198.51.100.4"
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert client_ip_ratelimit_key("g", request) == "198.51.100.4"
 
 
 # ----------------------------------------------------------------------------
