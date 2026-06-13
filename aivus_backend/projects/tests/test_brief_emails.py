@@ -129,7 +129,7 @@ def test_vendor_lead_email_links_to_dashboard_project():
 
 
 @pytest.mark.django_db
-def test_client_email_existing_account_uses_login_template():
+def test_client_email_existing_account_uses_login_template_with_pdf():
     User.objects.create_user(
         email="known@example.com",
         password="p@ssw0rd",
@@ -145,13 +145,15 @@ def test_client_email_existing_account_uses_login_template():
         patch("aivus_backend.users.tasks.send_templated_email.delay") as auth_mock,
         patch(
             "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
+            return_value=("Brief.pdf", "JVBERi0=", "application/pdf"),
         ),
     ):
         brief_emails.send_client_lead_email(
             brief, "known@example.com", "share-tok", "en"
         )
 
-    auth_mock.assert_called_once()
-    anon_mock.assert_not_called()
-    assert auth_mock.call_args.kwargs["context"]["is_existing_account"] is True
+    anon_mock.assert_called_once()
+    auth_mock.assert_not_called()
+    assert anon_mock.call_args.kwargs["context"]["is_existing_account"] is True
+    assert anon_mock.call_args.kwargs["recipient_email"] == "known@example.com"
+    assert anon_mock.call_args.kwargs["attachments"]

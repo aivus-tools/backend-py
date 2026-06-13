@@ -85,8 +85,13 @@ def send_client_lead_email(
     share_token: str,
     language: str,
 ) -> None:
-    """Send the client their copy: register/login CTA, share link, PDF."""
-    from aivus_backend.users.tasks import send_templated_email  # noqa: PLC0415
+    """Send the client their copy: register/login CTA, share link, PDF.
+
+    The PDF is attached in both branches (new lead and existing account) so the
+    recipient always gets a downloadable copy; only the CTA text differs. We
+    deliver through the bare-address task because the client template carries no
+    {user} context, and that task is the only path that supports attachments.
+    """
     from aivus_backend.users.tasks import send_to_recipient_email  # noqa: PLC0415
 
     existing = User.objects.filter(
@@ -106,21 +111,13 @@ def send_client_lead_email(
     }
     attachments = [a for a in [_brief_pdf_attachment(brief)] if a]
 
-    if existing:
-        send_templated_email.delay(
-            user_id=str(existing.id),
-            template=template,
-            subject=subject,
-            context=context,
-        )
-    else:
-        send_to_recipient_email.delay(
-            recipient_email=recipient_email,
-            template=template,
-            subject=subject,
-            context=context,
-            attachments=attachments,
-        )
+    send_to_recipient_email.delay(
+        recipient_email=existing.email if existing else recipient_email,
+        template=template,
+        subject=subject,
+        context=context,
+        attachments=attachments,
+    )
 
 
 def send_vendor_lead_email(project, brief, language: str) -> None:
