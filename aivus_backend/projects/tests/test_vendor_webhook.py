@@ -176,8 +176,10 @@ def test_webhook_ip_rate_limit_fires_before_key_check(webhook_url):
             return limited_view(request)
 
         first = _call()
-        # The limiter raises before the key resolver is consulted on the second
-        # request; the middleware turns this into a 429 in real traffic.
+        # The limiter raises Ratelimited before the key resolver is consulted on
+        # the second request. RatelimitMiddleware.process_exception routes that
+        # through RATELIMIT_VIEW into a 429 in real traffic; here we assert the
+        # raise directly since the bare view is invoked without the middleware.
         with pytest.raises(Ratelimited):
             _call()
 

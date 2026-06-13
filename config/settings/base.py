@@ -174,7 +174,14 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
     "aivus_backend.core.middleware.HMACAuthenticationMiddleware",
+    "django_ratelimit.middleware.RatelimitMiddleware",
 ]
+
+# django-ratelimit raises Ratelimited (a PermissionDenied subclass) when a limit
+# is hit, which Django renders as 403 by default. RatelimitMiddleware routes it
+# through RATELIMIT_VIEW so the public funnel returns 429 Too Many Requests as the
+# contract expects (PRD §8).
+RATELIMIT_VIEW = "aivus_backend.core.ratelimit.ratelimited_view"
 
 # Exempt API endpoints from CSRF validation (using HMAC instead)
 CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]
