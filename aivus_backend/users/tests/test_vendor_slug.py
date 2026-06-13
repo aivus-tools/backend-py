@@ -145,6 +145,37 @@ def test_patch_rejects_invalid_slug(api_client, vendor_user):
 
 
 @pytest.mark.django_db
+def test_patch_rejects_non_string_slug(api_client, vendor_user):
+    """SF-7: a non-string slug (number) must 400, not silently wipe the slug."""
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor, slug="keep-me")
+    response = api_client.patch(
+        reverse("vendor-settings"),
+        data=json.dumps({"slug": 123}),
+        content_type="application/json",
+        **_auth(user),
+    )
+    assert response.status_code == 400
+    assert VendorSettings.objects.get(vendor=vendor).slug == "keep-me"
+
+
+@pytest.mark.django_db
+def test_patch_null_slug_clears_it(api_client, vendor_user):
+    """Explicit null still clears the slug (intentional opt-out)."""
+    user, vendor = vendor_user
+    VendorSettings.objects.create(vendor=vendor, slug="drop-me")
+    response = api_client.patch(
+        reverse("vendor-settings"),
+        data=json.dumps({"slug": None}),
+        content_type="application/json",
+        **_auth(user),
+    )
+    assert response.status_code == 200
+    assert response.json()["slug"] is None
+    assert VendorSettings.objects.get(vendor=vendor).slug is None
+
+
+@pytest.mark.django_db
 def test_patch_collision_returns_409(api_client, vendor_user):
     user, vendor = vendor_user
     VendorSettings.objects.create(vendor=vendor)

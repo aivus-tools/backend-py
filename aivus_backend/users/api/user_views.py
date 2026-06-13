@@ -676,7 +676,13 @@ def _apply_lead_notification_email(settings, data):
 
 
 def _apply_slug(settings, data):
-    raw = normalize_slug(data.get("slug") if isinstance(data.get("slug"), str) else "")
+    value = data.get("slug")
+    # Explicit null clears the slug; a string is normalised; anything else
+    # (number, object, list) is a malformed payload and must 400 rather than
+    # silently coercing to "" and wiping the existing slug.
+    if value is not None and not isinstance(value, str):
+        return JsonResponse({"error": "slug must be a string"}, status=400)
+    raw = normalize_slug(value if isinstance(value, str) else "")
     if not raw:
         settings.slug = None
         return None
