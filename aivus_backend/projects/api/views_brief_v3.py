@@ -1985,15 +1985,53 @@ def client_brief_ai_send(request, brief_id):
     return _dispatch_send(brief, vendor, "", language)
 
 
+def _ensure_final_documents_for_ready(brief: Brief) -> None:
+    """Generate final documents once the brief is ready, before Send/finalize.
+
+    The branded anonymous flow shows and edits the document before Send, but the
+    documents only exist after finalize. When the brief reaches
+    ``ready_to_finalize`` and has no documents yet, finalize-on-ready renders them
+    via the shared generator while leaving ``conversation_status`` untouched, so
+    Send still runs its own finalize step idempotently. A locked re-check guards
+    against two concurrent reads each kicking off generation. LLM failure is
+    swallowed: the endpoint then returns an empty document set rather than 500.
+    """
+    if brief.conversation_status != "ready_to_finalize":
+        return
+    if brief.final_documents.exists():
+        return
+
+    from aivus_backend.projects.ai_brief_v3 import (  # noqa: PLC0415
+        generate_final_documents,
+    )
+
+    try:
+        with transaction.atomic():
+            locked = Brief.objects.select_for_update().get(id=brief.id)
+            if locked.conversation_status != "ready_to_finalize":
+                return
+            if BriefFinalDocument.objects.filter(brief=locked).exists():
+                return
+            generate_final_documents(brief=locked)
+    except Exception:
+        logger.exception("finalize-on-ready failed brief_id=%s", brief.id)
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
 @conditional_ratelimit(key="ip", rate="60/m", method="GET")
 def public_brief_ai_final_documents(request, brief_id):
-    """Token-scoped read of the anonymous brief's final documents (S2-7)."""
+    """Token-scoped read of the anonymous brief's final documents (S2-7).
+
+    Finalize-on-ready ensures the anonymous client can view the document before
+    Send even though no finalize ran yet.
+    """
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    _ensure_final_documents_for_ready(brief)
 
     documents = brief.final_documents.order_by("kind")
     return JsonResponse(
@@ -2018,6 +2056,8 @@ def public_brief_ai_final_document_update(request, brief_id, document_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    _ensure_final_documents_for_ready(brief)
 
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:

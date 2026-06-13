@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from django.test import Client as DjangoTestClient
@@ -46,6 +47,59 @@ def test_get_final_documents_with_token(api_client, anon_brief_with_document):
     assert body["briefId"] == str(brief.id)
     assert len(body["documents"]) == 1
     assert body["documents"][0]["id"] == str(document.id)
+
+
+@pytest.mark.django_db
+def test_get_final_documents_finalizes_on_ready_when_empty(api_client):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="ready-no-docs",
+        conversation_status="ready_to_finalize",
+    )
+
+    def _fake_generate(*, brief):
+        BriefFinalDocument.objects.create(
+            brief=brief,
+            kind=FinalDocumentKind.PRODUCTION_BRIEF,
+            html="<p>Generated on ready</p>",
+            plain_text="Generated on ready",
+        )
+        return {"documents": [], "input_tokens": 0, "output_tokens": 0, "cost_usd": 0}
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.generate_final_documents",
+        side_effect=_fake_generate,
+    ) as generate_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="ready-no-docs",
+        )
+
+    assert response.status_code == 200
+    generate_mock.assert_called_once()
+    body = response.json()
+    assert len(body["documents"]) == 1
+    assert "Generated on ready" in body["documents"][0]["html"]
+    assert body["conversationStatus"] == "ready_to_finalize"
+    brief.refresh_from_db()
+    assert brief.conversation_status == "ready_to_finalize"
+
+
+@pytest.mark.django_db
+def test_get_final_documents_does_not_regenerate_when_present(
+    api_client, anon_brief_with_document
+):
+    brief, _document = anon_brief_with_document
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.generate_final_documents"
+    ) as generate_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="final-doc-token",
+        )
+
+    assert response.status_code == 200
+    generate_mock.assert_not_called()
 
 
 @pytest.mark.django_db
