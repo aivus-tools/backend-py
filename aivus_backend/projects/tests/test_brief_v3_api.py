@@ -117,7 +117,7 @@ def test_client_ip_ratelimit_key_default_ignores_forwarded_for():
     from django.test import RequestFactory
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+    from aivus_backend.core.ratelimit import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
     request.META["REMOTE_ADDR"] = "10.0.0.1"
@@ -132,7 +132,7 @@ def test_client_ip_ratelimit_key_uses_nth_from_right_with_trusted_proxies():
     from django.test import RequestFactory
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+    from aivus_backend.core.ratelimit import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
     request.META["REMOTE_ADDR"] = "172.16.0.1"
@@ -148,7 +148,7 @@ def test_client_ip_ratelimit_key_spoofed_short_chain_falls_back():
     from django.test import RequestFactory
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+    from aivus_backend.core.ratelimit import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
     request.META["REMOTE_ADDR"] = "172.16.0.1"
@@ -161,7 +161,7 @@ def test_client_ip_ratelimit_key_falls_back_to_remote_addr():
     from django.test import RequestFactory
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import client_ip_ratelimit_key
+    from aivus_backend.core.ratelimit import client_ip_ratelimit_key
 
     request = RequestFactory().get("/")
     request.META["REMOTE_ADDR"] = "198.51.100.4"
@@ -196,7 +196,7 @@ def test_resolve_client_ip_production_chain_picks_client():
     """
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+    from aivus_backend.core.ratelimit import resolve_client_ip
 
     request = _ip_request("10.0.0.1", "198.51.100.9, 172.16.0.5, 10.0.0.1")
     with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
@@ -211,7 +211,7 @@ def test_resolve_client_ip_ignores_spoofed_prefix():
     """
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+    from aivus_backend.core.ratelimit import resolve_client_ip
 
     forwarded = "6.6.6.6, 7.7.7.7, 198.51.100.9, 172.16.0.5, 10.0.0.1"
     request = _ip_request("10.0.0.1", forwarded)
@@ -225,7 +225,7 @@ def test_resolve_client_ip_short_chain_falls_back_to_remote_addr():
     unforgeable REMOTE_ADDR instead."""
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+    from aivus_backend.core.ratelimit import resolve_client_ip
 
     request = _ip_request("172.16.0.1", "9.9.9.9")
     with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
@@ -237,7 +237,7 @@ def test_resolve_client_ip_zero_trusted_ignores_forwarded_for():
     X-Forwarded-For is fully ignored in favour of REMOTE_ADDR."""
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+    from aivus_backend.core.ratelimit import resolve_client_ip
 
     request = _ip_request("10.0.0.1", "203.0.113.7, 10.0.0.1")
     with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=0):
@@ -255,7 +255,7 @@ def test_user_ratelimit_key_distinguishes_users():
     The replacement key reads the real user id, so two users get distinct keys."""
     from django.test import RequestFactory
 
-    from aivus_backend.projects.api.views_brief_v3 import user_ratelimit_key
+    from aivus_backend.core.ratelimit import user_ratelimit_key
 
     request_a = RequestFactory().post("/")
     request_a.user_data = {"id": "user-a"}  # type: ignore[attr-defined]
@@ -274,7 +274,7 @@ def test_user_ratelimit_key_falls_back_to_ip_without_user():
     from django.test import RequestFactory
     from django.test import override_settings
 
-    from aivus_backend.projects.api.views_brief_v3 import user_ratelimit_key
+    from aivus_backend.core.ratelimit import user_ratelimit_key
 
     request = RequestFactory().post("/")
     request.META["REMOTE_ADDR"] = "203.0.113.50"
