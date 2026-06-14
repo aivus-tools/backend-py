@@ -610,6 +610,19 @@ FINALIZED_EDIT_MAX_TOKENS = 4000
 FINALIZED_EDIT_TEMPERATURE = 0.3
 
 _EDITABLE_DOCUMENTS = {"production_brief", "vendor_email"}
+# Document kinds an anonymous (not-yet-authenticated) brief may edit. The
+# vendor outreach email carries the client's outreach strategy and contacts —
+# owner-only PII (enums.py CLIENT_FACING_DOCUMENT_KINDS, PRD §5). For anonymous
+# briefs it is excluded entirely from the LLM context (prompt and reply), so a
+# prompt-injection jailbreak cannot exfiltrate it.
+_ANON_EDITABLE_DOCUMENTS = {"production_brief"}
+
+
+def _editable_kinds_for_brief(brief: Brief) -> set[str]:
+    if brief.client_id is None:
+        return set(_ANON_EDITABLE_DOCUMENTS)
+    return set(_EDITABLE_DOCUMENTS)
+
 
 _FINALIZED_EDIT_INSTRUCTIONS_EN = """
 === POST-FINALIZE EDIT MODE ===
@@ -671,9 +684,14 @@ def _build_finalized_edit_rule(doc_language: str) -> str:
     return _FINALIZED_EDIT_INSTRUCTIONS_EN
 
 
-def _current_documents_block(documents: dict[str, BriefFinalDocument]) -> str:
+def _current_documents_block(
+    documents: dict[str, BriefFinalDocument],
+    editable_kinds: set[str],
+) -> str:
     chunks = ["<CURRENT_DOCUMENTS>"]
     for kind in ("production_brief", "vendor_email"):
+        if kind not in editable_kinds:
+            continue
         doc = documents.get(kind)
         html = (doc.html if doc else "") or ""
         chunks.append(f'<DOC kind="{kind}">')
@@ -722,6 +740,7 @@ def _apply_rewrite_section(
 def _apply_edits(
     documents: dict[str, BriefFinalDocument],
     edits: list[dict[str, Any]],
+    editable_kinds: set[str],
 ) -> list[BriefFinalDocument]:
     """Apply edits to the in-memory document objects. Returns the list of
     documents whose html actually changed, in stable order."""
@@ -731,7 +750,7 @@ def _apply_edits(
             continue
         document_kind = str(edit.get("document") or "").strip()
         tool = str(edit.get("tool") or "").strip()
-        if document_kind not in _EDITABLE_DOCUMENTS:
+        if document_kind not in editable_kinds:
             continue
         document = documents.get(document_kind)
         if document is None:
@@ -794,8 +813,9 @@ def process_finalized_turn(
     edit_rule = _build_finalized_edit_rule(doc_language)
     system_prompt = f"{base_system_prompt}\n\n{edit_rule}"
 
+    editable_kinds = _editable_kinds_for_brief(brief)
     document_qs = BriefFinalDocument.objects.filter(
-        brief=brief, kind__in=list(_EDITABLE_DOCUMENTS)
+        brief=brief, kind__in=list(editable_kinds)
     )
     documents: dict[str, BriefFinalDocument] = {doc.kind: doc for doc in document_qs}
 
@@ -809,7 +829,9 @@ def process_finalized_turn(
             production.html = sanitize_html(current_document_html)
 
     user_parts = _build_user_parts(user_message, attachments)
-    user_parts.append({"type": "text", "text": _current_documents_block(documents)})
+    user_parts.append(
+        {"type": "text", "text": _current_documents_block(documents, editable_kinds)}
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -847,7 +869,7 @@ def process_finalized_turn(
     if not isinstance(raw_edits, list):
         raw_edits = []
 
-    updated_documents = _apply_edits(documents, raw_edits)
+    updated_documents = _apply_edits(documents, raw_edits, editable_kinds)
     for document in updated_documents:
         document.plain_text = _strip_html(document.html)
         document.save(update_fields=["html", "plain_text", "updated_at"])
