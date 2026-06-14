@@ -920,6 +920,61 @@ def test_send_emails_task_skips_client_email_when_no_recipient(vendor, anon_brie
     client_mock.assert_not_called()
 
 
+@pytest.mark.django_db
+def test_mark_project_sent_creates_share_atomically(vendor, anon_brief):
+    """BE-2: the public share is created in the same atomic block that promotes
+    the project, so the must-succeed part of Send (promotion + share) commits as
+    one unit. send_emails_task can then be pure best-effort email dispatch."""
+    from aivus_backend.projects.models import BriefShare
+
+    result = mark_project_sent_task.run(str(anon_brief.id), str(vendor.id))
+
+    assert result["ok"] is True
+    assert result["shareToken"]
+    share = BriefShare.objects.get(brief=anon_brief)
+    assert result["shareToken"] == share.token
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    assert project.status == ProjectStatus.RFP
+
+
+@pytest.mark.django_db
+def test_send_emails_task_does_not_raise_when_email_dispatch_fails(vendor, anon_brief):
+    """BE-2: once the project is promoted, an email-send failure must not bubble
+    up to the chain's link_error (which would report the whole Send as "failed"
+    and 409 the re-Send on the already-promoted lead). The task swallows the
+    failure, leaves the lead promoted, and lets a manual retry resend the email.
+    """
+    mark_project_sent_task.run(str(anon_brief.id), str(vendor.id))
+
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email",
+            side_effect=RuntimeError("smtp down"),
+        ),
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email",
+            side_effect=RuntimeError("smtp down"),
+        ),
+    ):
+        # Must not raise: a raise here would trigger the chain link_error.
+        result = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+
+    assert result["ok"] is True
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    assert project.status == ProjectStatus.RFP
+
+
+@pytest.mark.django_db
+def test_send_emails_task_has_no_autoretry(vendor, anon_brief):
+    """BE-2: send_emails_task must not autoretry into the chain's link_error.
+    A failed email is best-effort, not a Send failure. A plain shared_task carries
+    no autoretry_for, unlike the must-succeed mark_project_sent_task."""
+    assert not getattr(send_emails_task, "autoretry_for", None)
+    assert mark_project_sent_task.autoretry_for == (Exception,)
+
+
 # --- Send failure surfacing (MF-2) -------------------------------------------
 
 

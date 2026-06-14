@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
 
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.ai_brief_v3 import feedback_question_for
@@ -387,6 +388,13 @@ def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
     double Send (double click, retry, browser back) never produces a second
     project. For the logged-in "pick an existing brief" flow no DRAFT project
     exists yet, so one is created directly at RFP.
+
+    BE-2: the public share is created in the SAME atomic block that promotes the
+    project. The hard, must-succeed part of Send (promotion + share) therefore
+    commits or rolls back as one unit. The subsequent send_emails_task only
+    dispatches the emails best-effort and never raises, so an email failure can no
+    longer leave a promoted lead that the client is told "failed" yet cannot
+    re-send (the re-Send 409s on the already-promoted lead).
     """
     promoted_statuses = {
         ProjectStatus.RFP,
@@ -413,40 +421,49 @@ def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
                 "client_id": brief.client_id,
             },
         )
-        if created:
-            return {"ok": True, "projectId": str(project.id), "alreadySent": False}
-        if project.status in promoted_statuses:
-            return {"ok": True, "projectId": str(project.id), "alreadySent": True}
+        already_sent = not created and project.status in promoted_statuses
+        if not created and not already_sent:
+            project.status = ProjectStatus.RFP
+            if not (project.name or "").strip() or project.name == "New brief lead":
+                project.name = (brief.title or project.name or "New brief lead")[:255]
+            if brief.client_id and not project.client_id:
+                project.client_id = brief.client_id
+            project.save(update_fields=["status", "name", "client", "updated_at"])
 
-        project.status = ProjectStatus.RFP
-        if not (project.name or "").strip() or project.name == "New brief lead":
-            project.name = (brief.title or project.name or "New brief lead")[:255]
-        if brief.client_id and not project.client_id:
-            project.client_id = brief.client_id
-        project.save(update_fields=["status", "name", "client", "updated_at"])
+        # The share lives with the promotion so the must-succeed part of Send is
+        # one atomic unit (BE-2). Idempotent: an existing share is reused, so a
+        # retry never duplicates it. The emails_sent_at marker stays in
+        # send_emails_task where it guards against duplicate email dispatch.
+        share, _share_created = BriefShare.objects.get_or_create(brief=brief)
 
-    return {"ok": True, "projectId": str(project.id), "alreadySent": False}
+    return {
+        "ok": True,
+        "projectId": str(project.id),
+        "alreadySent": already_sent,
+        "shareToken": share.token,
+    }
 
 
-@shared_task(
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    max_retries=3,
-)
+@shared_task
 def send_emails_task(
     brief_id: str,
     vendor_id: str,
     recipient_email: str = "",
     language: str = "en",
 ) -> dict:
-    """Create the public share and dispatch client + vendor lead emails.
+    """Dispatch the client + vendor lead emails best-effort after promotion.
 
-    Runs after the project is at RFP. The client email is only sent when an
-    email was provided (anonymous Send); the vendor email always fires. The
-    BriefShare get_or_create reuses the same public share clients use today.
+    BE-2: the must-succeed part of Send (project promotion + BriefShare) now runs
+    atomically in mark_project_sent_task. This task only sends the emails and
+    never raises (no autoretry) — so an email failure cannot flip the client to
+    "failed" and strand a promoted lead that can no longer be re-sent (the
+    re-Send 409s on the already-promoted project). The client email is only sent
+    when an email was provided (anonymous Send); the vendor email always fires.
+
+    Duplicate dispatch is still guarded: emails_sent_at is checked and stamped
+    under a row lock, so a redelivered task (Celery at-least-once) sees the marker
+    and skips, and the client/vendor are never emailed twice.
     """
-    from django.utils import timezone  # noqa: PLC0415
-
     from aivus_backend.projects import brief_emails  # noqa: PLC0415
 
     brief = Brief.objects.filter(id=brief_id).first()
@@ -454,18 +471,9 @@ def send_emails_task(
         logger.warning("send_emails: brief not found %s", brief_id)
         return {"ok": False}
 
-    # Idempotency guard against a duplicate Send chain slipping past the view-level
-    # pending_task_id check (concurrency, Celery redelivery): stamp emails_sent_at
-    # under a row lock and bail out if another run already did so. Without it the
-    # client and vendor would each receive two emails.
-    #
-    # SF-9/SF-10: the BriefShare (whose token goes into the email) is created in
-    # the SAME transaction that stamps emails_sent_at. Previously it was created
-    # after the block, so a crash between committing the marker and creating the
-    # share left the brief flagged "emails sent" with no share — and the retry,
-    # seeing emails_sent_at set, bailed without ever creating the share or sending
-    # the email. Binding the share to the marker keeps them consistent: either both
-    # commit or neither does, and a retry that bails knows the share already exists.
+    # Claim the email dispatch under a row lock: stamp emails_sent_at once and bail
+    # if another run already did. The share is created with the promotion, so it
+    # always exists here; get_or_create is a defensive fallback for a direct call.
     with transaction.atomic():
         project = (
             Project.objects.select_for_update()
