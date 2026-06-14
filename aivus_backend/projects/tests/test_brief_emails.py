@@ -327,6 +327,33 @@ def test_client_email_not_resent_to_same_recipient_for_same_brief():
 
 
 @pytest.mark.django_db
+def test_client_email_dedup_released_when_enqueue_fails():
+    """BE-3: the dedup key is claimed before the enqueue. If .delay() fails the
+    email never goes out, so the key must be released — otherwise a resend is
+    blocked for the full 24h window. A second attempt must therefore re-enqueue."""
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-enqueue-fail", document_language="en"
+    )
+
+    with (
+        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
+        patch(
+            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
+            return_value=None,
+        ),
+    ):
+        anon_mock.side_effect = [RuntimeError("broker down"), None]
+        # First attempt: enqueue blows up after the dedup key is claimed. The
+        # failure must propagate (so the caller logs it) but release the key.
+        with pytest.raises(RuntimeError):
+            brief_emails.send_client_lead_email(brief, "retry@example.com", "tok", "en")
+        # Second attempt: the released key lets the email re-enqueue.
+        brief_emails.send_client_lead_email(brief, "retry@example.com", "tok", "en")
+
+    assert anon_mock.call_count == 2
+
+
+@pytest.mark.django_db
 def test_client_email_throttled_per_recipient_across_briefs():
     """H4: one recipient address cannot be bombed with branded mail from many
     different briefs. After the per-recipient ceiling the dispatch is suppressed."""

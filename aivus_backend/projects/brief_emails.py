@@ -186,13 +186,22 @@ def send_client_lead_email(
     }
     attachments = [a for a in [_brief_pdf_attachment(brief)] if a]
 
-    send_to_recipient_email.delay(
-        recipient_email=existing.email if existing else recipient_email,
-        template=template,
-        subject=subject,
-        context=context,
-        attachments=attachments,
-    )
+    # BE-3: the dedup key was claimed in _client_lead_email_allowed BEFORE this
+    # enqueue. If .delay() fails (broker hiccup), the email never goes out yet the
+    # key would block any resend for the full 24h dedup window. Release the key on
+    # enqueue failure (as the per-recipient ceiling path already does) so a manual
+    # retry can re-send, then re-raise for the caller to log.
+    try:
+        send_to_recipient_email.delay(
+            recipient_email=existing.email if existing else recipient_email,
+            template=template,
+            subject=subject,
+            context=context,
+            attachments=attachments,
+        )
+    except Exception:
+        cache.delete(_dedup_cache_key(recipient_email, brief.id))
+        raise
 
 
 def send_vendor_lead_email(project, brief) -> None:
