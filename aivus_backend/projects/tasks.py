@@ -530,7 +530,12 @@ def send_emails_task(
                 brief, recipient_email, share.token, language, project=project
             )
         except Exception:
+            # The client enqueue failed: release the marker so a redelivered task
+            # (or a fresh Send) re-sends the client email. The vendor marker stays
+            # under its own guard, so the vendor is never emailed twice by the
+            # retry. Mirrors the vendor rollback below.
             logger.exception("client lead email failed brief=%s", brief_id)
+            Project.objects.filter(id=project.id).update(emails_sent_at=None)
 
     if send_vendor:
         try:

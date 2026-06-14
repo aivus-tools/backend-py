@@ -872,6 +872,56 @@ def test_send_emails_task_retries_vendor_email_after_enqueue_failure(
 
 
 @pytest.mark.django_db
+def test_send_emails_task_retries_client_email_after_enqueue_failure(
+    vendor, anon_brief
+):
+    """S2-COMPLETE-2: the client email marker (emails_sent_at) is stamped before
+    sending, mirroring the vendor marker. A failed client enqueue must roll the
+    marker back so a redelivered task re-sends it; otherwise the client is marked
+    notified but never emailed. The vendor marker stays stamped, so the retry
+    re-sends only the client email."""
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email",
+            side_effect=RuntimeError("broker down"),
+        ) as client_mock,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock,
+    ):
+        first = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert first["ok"] is True
+    client_mock.assert_called_once()
+    vendor_mock.assert_called_once()
+
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    # Client marker rolled back for retry; vendor email succeeded and is guarded.
+    assert project.emails_sent_at is None
+    assert project.vendor_notified_at is not None
+
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email"
+        ) as client_mock2,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock2,
+    ):
+        second = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert second["ok"] is True
+    # Retry re-sends the client email only; the vendor is never emailed twice.
+    client_mock2.assert_called_once()
+    vendor_mock2.assert_not_called()
+
+    project.refresh_from_db()
+    assert project.emails_sent_at is not None
+
+
+@pytest.mark.django_db
 def test_send_emails_task_vendor_marker_independent_of_client(vendor, anon_brief):
     """R11-2: vendor_notified_at is stamped only after a successful vendor
     enqueue and is independent of emails_sent_at, so a successful run marks both
