@@ -444,6 +444,41 @@ def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
     }
 
 
+def _claim_lead_email_dispatch(brief, vendor_id: str, recipient_email: str):
+    """Claim the per-recipient email markers under a row lock.
+
+    Stamps a marker only for the email this run is about to attempt, so a
+    redelivered task skips what was already sent and still picks up what a
+    previous run failed to enqueue. The share is created with the promotion, so
+    it always exists here; get_or_create is a defensive fallback for a direct
+    call. Returns ``(project, share, send_client, send_vendor)`` or None when the
+    project is missing.
+    """
+    with transaction.atomic():
+        project = (
+            Project.objects.select_for_update()
+            .filter(vendor_id=vendor_id, brief=brief, deleted_at__isnull=True)
+            .select_related("vendor", "vendor__owner")
+            .first()
+        )
+        if not project:
+            return None
+        share, _created = BriefShare.objects.get_or_create(brief=brief)
+        send_client = bool(recipient_email) and project.emails_sent_at is None
+        send_vendor = project.vendor_notified_at is None
+        now = timezone.now()
+        update_fields = ["updated_at"]
+        if send_client:
+            project.emails_sent_at = now
+            update_fields.append("emails_sent_at")
+        if send_vendor:
+            project.vendor_notified_at = now
+            update_fields.append("vendor_notified_at")
+        if len(update_fields) > 1:
+            project.save(update_fields=update_fields)
+    return project, share, send_client, send_vendor
+
+
 @shared_task
 def send_emails_task(
     brief_id: str,
@@ -460,9 +495,17 @@ def send_emails_task(
     re-Send 409s on the already-promoted project). The client email is only sent
     when an email was provided (anonymous Send); the vendor email always fires.
 
-    Duplicate dispatch is still guarded: emails_sent_at is checked and stamped
-    under a row lock, so a redelivered task (Celery at-least-once) sees the marker
-    and skips, and the client/vendor are never emailed twice.
+    Duplicate dispatch is guarded per recipient: emails_sent_at claims the client
+    email and vendor_notified_at claims the vendor email, each stamped under a row
+    lock, so a redelivered task (Celery at-least-once) sees the marker and skips.
+
+    R11-2: the two markers are independent because the vendor email enqueue can
+    fail on its own (broker hiccup). A single shared marker stamped before sending
+    meant a failed vendor enqueue still flipped the marker, so a redelivered task
+    skipped both and the vendor was never told about the lead. Now the vendor
+    marker is stamped only after a successful enqueue and rolled back on failure,
+    so a retry re-sends the vendor email without ever re-sending the client email
+    (which its own marker still guards).
     """
     from aivus_backend.projects import brief_emails  # noqa: PLC0415
 
@@ -471,27 +514,17 @@ def send_emails_task(
         logger.warning("send_emails: brief not found %s", brief_id)
         return {"ok": False}
 
-    # Claim the email dispatch under a row lock: stamp emails_sent_at once and bail
-    # if another run already did. The share is created with the promotion, so it
-    # always exists here; get_or_create is a defensive fallback for a direct call.
-    with transaction.atomic():
-        project = (
-            Project.objects.select_for_update()
-            .filter(vendor_id=vendor_id, brief=brief, deleted_at__isnull=True)
-            .select_related("vendor", "vendor__owner")
-            .first()
-        )
-        if not project:
-            logger.warning("send_emails: project not found brief=%s", brief_id)
-            return {"ok": False}
-        if project.emails_sent_at is not None:
-            logger.info("send_emails: already sent brief=%s, skipping", brief_id)
-            return {"ok": True, "alreadySent": True}
-        share, _created = BriefShare.objects.get_or_create(brief=brief)
-        project.emails_sent_at = timezone.now()
-        project.save(update_fields=["emails_sent_at", "updated_at"])
+    claimed = _claim_lead_email_dispatch(brief, vendor_id, recipient_email)
+    if claimed is None:
+        logger.warning("send_emails: project not found brief=%s", brief_id)
+        return {"ok": False}
+    project, share, send_client, send_vendor = claimed
 
-    if recipient_email:
+    if not send_client and not send_vendor:
+        logger.info("send_emails: already sent brief=%s, skipping", brief_id)
+        return {"ok": True, "alreadySent": True}
+
+    if send_client:
         try:
             brief_emails.send_client_lead_email(
                 brief, recipient_email, share.token, language, project=project
@@ -499,9 +532,14 @@ def send_emails_task(
         except Exception:
             logger.exception("client lead email failed brief=%s", brief_id)
 
-    try:
-        brief_emails.send_vendor_lead_email(project, brief)
-    except Exception:
-        logger.exception("vendor lead email failed brief=%s", brief_id)
+    if send_vendor:
+        try:
+            brief_emails.send_vendor_lead_email(project, brief)
+        except Exception:
+            # The vendor enqueue failed: release the marker so a redelivered task
+            # (or a fresh Send) re-sends the vendor email. The client marker stays
+            # stamped, so the client is never emailed twice by the retry.
+            logger.exception("vendor lead email failed brief=%s", brief_id)
+            Project.objects.filter(id=project.id).update(vendor_notified_at=None)
 
     return {"ok": True, "shareToken": share.token}

@@ -821,6 +821,84 @@ def test_send_emails_task_is_idempotent_across_chains(vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_send_emails_task_retries_vendor_email_after_enqueue_failure(
+    vendor, anon_brief
+):
+    """R11-2: the vendor email enqueue can fail on its own (broker hiccup). A
+    shared marker stamped before sending would flip on the failure, so a
+    redelivered task skipped both emails and the vendor never heard about the
+    lead. With a dedicated vendor_notified_at marker, a failed vendor enqueue
+    leaves it null while the client marker stays stamped, so the retry re-sends
+    only the vendor email."""
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email"
+        ) as client_mock,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email",
+            side_effect=RuntimeError("broker down"),
+        ) as vendor_mock,
+    ):
+        first = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert first["ok"] is True
+    client_mock.assert_called_once()
+    vendor_mock.assert_called_once()
+
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    # Client email succeeded and is guarded; vendor marker rolled back for retry.
+    assert project.emails_sent_at is not None
+    assert project.vendor_notified_at is None
+
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email"
+        ) as client_mock2,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock2,
+    ):
+        second = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert second["ok"] is True
+    # Retry re-sends the vendor email only; the client is never emailed twice.
+    client_mock2.assert_not_called()
+    vendor_mock2.assert_called_once()
+
+    project.refresh_from_db()
+    assert project.vendor_notified_at is not None
+
+
+@pytest.mark.django_db
+def test_send_emails_task_vendor_marker_independent_of_client(vendor, anon_brief):
+    """R11-2: vendor_notified_at is stamped only after a successful vendor
+    enqueue and is independent of emails_sent_at, so a successful run marks both
+    and a redelivered run is a clean no-op."""
+    with (
+        patch(
+            "aivus_backend.projects.brief_emails.send_client_lead_email"
+        ) as client_mock,
+        patch(
+            "aivus_backend.projects.brief_emails.send_vendor_lead_email"
+        ) as vendor_mock,
+    ):
+        send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+        second = send_emails_task.run(
+            str(anon_brief.id), str(vendor.id), "client@example.com", "en"
+        )
+    assert second.get("alreadySent") is True
+    client_mock.assert_called_once()
+    vendor_mock.assert_called_once()
+    project = Project.objects.get(brief=anon_brief, vendor=vendor)
+    assert project.emails_sent_at is not None
+    assert project.vendor_notified_at is not None
+
+
+@pytest.mark.django_db
 def test_mark_project_sent_ignores_soft_deleted_project(vendor, anon_brief):
     """SF-12: a soft-deleted lead project must not be resurrected. mark_project_sent
     filters deleted_at to match the conditional unique constraint and creates a
