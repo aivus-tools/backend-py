@@ -220,8 +220,15 @@ def _build_chat_response(
     brief: Brief,
     assistant_message: ChatMessage,
     result: dict,
+    visible_kinds: tuple[str, ...] | None = None,
 ) -> dict:
     updated = result.get("updated_documents") or []
+    if visible_kinds is not None:
+        # Anonymous branded flow: never leak vendor_email (vendor outreach
+        # strategy + contacts, owner-only per PRD §5) in the HTTP body. After
+        # finalize the anon visitor keeps chatting and process_finalized_turn may
+        # emit an edit to vendor_email; drop any out-of-scope kind from the reply.
+        updated = [x for x in updated if x.kind in visible_kinds]
     return {
         "reply": result["reply"],
         "messageId": str(assistant_message.id),
@@ -2052,7 +2059,14 @@ def public_brief_ai_chat(request, brief_id):
         )
 
     brief.refresh_from_db()
-    return JsonResponse(_build_chat_response(brief, assistant_message, result))
+    return JsonResponse(
+        _build_chat_response(
+            brief,
+            assistant_message,
+            result,
+            visible_kinds=ANON_VISIBLE_DOCUMENT_KINDS,
+        )
+    )
 
 
 @csrf_exempt

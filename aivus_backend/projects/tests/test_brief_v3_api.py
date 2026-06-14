@@ -1271,6 +1271,99 @@ def test_public_finalized_chat_forwards_document_html(api_client, seeded_prompts
 
 
 @pytest.mark.django_db
+def test_public_finalized_chat_does_not_leak_vendor_email(api_client, seeded_prompts):
+    """S2-LEAK: after finalize the anonymous visitor keeps chatting and may make
+    the LLM edit the vendor outreach email. That document is owner-only PII (PRD
+    §5) and must never appear in the public chat's updatedDocuments."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="leak-token",
+        conversation_status="finalized",
+        document_language="en",
+        source="personal_link",
+    )
+    production = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>brief</p>"
+    )
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>secret outreach</p>"
+    )
+
+    fake_result = {
+        "reply": "updated the outreach email",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+        "updated_documents": [production, vendor_email],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:public_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "rewrite the outreach email"}),
+            content_type="application/json",
+            **_public_headers("leak-token"),
+        )
+    assert resp.status_code == 200
+    kinds = {doc["kind"] for doc in resp.json()["updatedDocuments"]}
+    assert "vendor_email" not in kinds
+    assert kinds == {"production_brief"}
+
+
+@pytest.mark.django_db
+def test_authenticated_finalized_chat_returns_vendor_email(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """The authenticated owner of the brief is allowed to see vendor_email edits
+    in the chat response — the anon filter must not apply to the auth path."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="hi")
+    production = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>brief</p>"
+    )
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>outreach</p>"
+    )
+
+    fake_result = {
+        "reply": "updated",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+        "updated_documents": [production, vendor_email],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "rewrite the outreach email"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    kinds = {doc["kind"] for doc in resp.json()["updatedDocuments"]}
+    assert "vendor_email" in kinds
+
+
+@pytest.mark.django_db
 def test_process_finalized_turn_uses_supplied_document_html(
     client_user, client_profile, seeded_prompts
 ):
