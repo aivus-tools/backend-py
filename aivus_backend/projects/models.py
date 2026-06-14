@@ -59,6 +59,7 @@ class Brief(models.Model):
     contact_name = models.CharField(max_length=255, blank=True, default="")
     pending_task_id = models.CharField(max_length=64, blank=True, default="")
     pending_task_error = models.CharField(max_length=64, blank=True, default="")
+    finalize_failed = models.BooleanField(default=False)
     document_language = models.CharField(max_length=10, blank=True, default="")
     conversation_status = models.CharField(
         max_length=20,

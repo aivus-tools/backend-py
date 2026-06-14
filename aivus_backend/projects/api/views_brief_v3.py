@@ -63,6 +63,7 @@ from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
 from aivus_backend.projects.tasks import import_wix_attachments_task
+from aivus_backend.projects.tasks import mark_brief_finalize_failed_task
 from aivus_backend.projects.tasks import mark_brief_send_failed_task
 from aivus_backend.projects.tasks import mark_project_sent_task
 from aivus_backend.projects.tasks import persist_message_traces
@@ -1427,8 +1428,12 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
             return JsonResponse({"error": message, "code": code}, status=409)
         # Arm the pending marker and clear any stale failure from a previous Send
         # so the status endpoint reports "pending" again, not the old "failed".
+        # finalize_failed is cleared too: a deliberate re-Send is an explicit
+        # retry, so the finalize-on-ready loop-breaker (BE-1) must release.
         Brief.objects.filter(id=locked.id).update(
-            pending_task_id=send_chain_task_id, pending_task_error=""
+            pending_task_id=send_chain_task_id,
+            pending_task_error="",
+            finalize_failed=False,
         )
         if needs_finalize:
             # SF-1: finalize runs with keep_pending=True so it never clears the
@@ -2247,10 +2252,16 @@ def _dispatch_finalize_if_ready(brief: Brief) -> bool:
     SF-5: a finalize that fails persistently must not be re-dispatched on every
     GET. Previously the link_error cleared the pending marker unconditionally, so
     the next poll saw a ready brief with no documents and no marker and fired
-    finalize again — an unbounded retry loop that keeps hitting the paid LLM. Now
-    a failure stamps ``pending_task_error`` (clearing the marker only if it still
-    owns it), and this function refuses to dispatch while that error is set. The
-    GET surfaces the error so the client stops polling instead of driving a loop.
+    finalize again — an unbounded retry loop that keeps hitting the paid LLM.
+
+    BE-1: the loop-breaker must not key off ``pending_task_error``, because both
+    status endpoints clear that field on read to let a fresh Send re-arm. In the
+    branded flow the 1.5s status poller runs faster than the 3s final-documents
+    poller, so it would wipe the error between a failed finalize and the next GET,
+    re-opening the loop. Instead the failure sets a dedicated ``finalize_failed``
+    flag (only if the dispatch still owns the marker) that status reads never
+    touch and only a fresh Send resets; this function refuses to dispatch while
+    it is set, and the GET surfaces it so the client stops polling.
 
     Returns True when generation is in progress (either freshly dispatched or
     already pending), False otherwise (including when a previous finalize failed).
@@ -2259,9 +2270,9 @@ def _dispatch_finalize_if_ready(brief: Brief) -> bool:
         return False
     if brief.final_documents.exists():
         return False
-    if brief.pending_task_error:
+    if brief.finalize_failed:
         # A previous finalize failed. Do not re-dispatch; the GET reports the
-        # error and the client stops polling rather than looping the LLM.
+        # failure and the client stops polling rather than looping the LLM.
         return False
 
     finalize_task_id = str(uuid.uuid4())
@@ -2272,7 +2283,7 @@ def _dispatch_finalize_if_ready(brief: Brief) -> bool:
             return False
         if BriefFinalDocument.objects.filter(brief=locked).exists():
             return False
-        if locked.pending_task_error:
+        if locked.finalize_failed:
             return False
         if locked.pending_task_id:
             # A finalize is already running; the poller waits for it.
@@ -2286,10 +2297,11 @@ def _dispatch_finalize_if_ready(brief: Brief) -> bool:
             lambda: finalize_brief_task.apply_async(
                 args=[brief_id_str],
                 task_id=finalize_task_id,
-                # On failure stamp the error and surrender the marker (only if it
-                # still owns it) instead of a bare clear, so the next GET reports
-                # "failed" and _dispatch_finalize_if_ready refuses to re-dispatch.
-                link_error=mark_brief_send_failed_task.si(
+                # On failure set finalize_failed and surrender the marker (only if
+                # it still owns it), so the next GET reports the failure and
+                # _dispatch_finalize_if_ready refuses to re-dispatch. A separate
+                # flag from pending_task_error survives a concurrent status poll.
+                link_error=mark_brief_finalize_failed_task.si(
                     brief_id_str, finalize_task_id
                 ),
             )
@@ -2323,11 +2335,13 @@ def public_brief_ai_final_documents(request, brief_id):
             "kind"
         )
     )
-    # SF-5: when a previous finalize failed, the marker is gone and no new one is
-    # dispatched (the loop is broken). Surface the failure so the client stops
-    # polling and shows an error instead of spinning forever.
-    brief.refresh_from_db(fields=["pending_task_error"])
-    finalize_failed = bool(brief.pending_task_error) and not documents
+    # SF-5/BE-1: when a previous finalize failed, the marker is gone and no new
+    # one is dispatched (the loop is broken). Surface the failure so the client
+    # stops polling and shows an error instead of spinning forever. The signal is
+    # finalize_failed, not pending_task_error, so a concurrent status poll that
+    # clears pending_task_error cannot hide it (and reopen the dispatch loop).
+    brief.refresh_from_db(fields=["finalize_failed"])
+    finalize_failed = brief.finalize_failed and not documents
     return JsonResponse(
         {
             "briefId": str(brief.id),

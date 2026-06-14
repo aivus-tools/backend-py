@@ -118,10 +118,10 @@ def test_get_final_documents_does_not_redispatch_when_pending(api_client):
 
 @pytest.mark.django_db
 def test_get_final_documents_does_not_redispatch_after_finalize_failed(api_client):
-    """SF-5: a finalize that failed must not be re-dispatched on every GET.
+    """SF-5/BE-1: a finalize that failed must not be re-dispatched on every GET.
 
-    The failed finalize stamps pending_task_error and surrenders the marker. The
-    next poll must NOT fire finalize again (the old unconditional clear caused an
+    The failed finalize sets finalize_failed and surrenders the marker. The next
+    poll must NOT fire finalize again (the old unconditional clear caused an
     unbounded LLM retry loop); it reports finalizeFailed so the client stops
     polling instead of driving the loop.
     """
@@ -130,7 +130,7 @@ def test_get_final_documents_does_not_redispatch_after_finalize_failed(api_clien
         anonymous_token="finalize-failed",
         conversation_status="ready_to_finalize",
         pending_task_id="",
-        pending_task_error="failed-finalize-id",
+        finalize_failed=True,
     )
 
     with patch(
@@ -152,9 +152,10 @@ def test_get_final_documents_does_not_redispatch_after_finalize_failed(api_clien
 
 @pytest.mark.django_db
 def test_get_final_documents_finalize_link_error_marks_failed(api_client):
-    """SF-5: finalize-on-ready must use mark_brief_send_failed_task as link_error
-    (which stamps pending_task_error) rather than a bare clear, so a failure is
-    recorded and the retry loop is broken."""
+    """SF-5/BE-1: finalize-on-ready must use mark_brief_finalize_failed_task as
+    link_error (which sets the dedicated finalize_failed flag) rather than a bare
+    clear, so a failure is recorded and the retry loop is broken even when a
+    concurrent status poll clears pending_task_error."""
     brief = Brief.objects.create(
         client=None,
         anonymous_token="link-error-check",
@@ -170,7 +171,7 @@ def test_get_final_documents_finalize_link_error_marks_failed(api_client):
             "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
         ) as finalize_mock,
         patch(
-            "aivus_backend.projects.api.views_brief_v3.mark_brief_send_failed_task"
+            "aivus_backend.projects.api.views_brief_v3.mark_brief_finalize_failed_task"
         ) as fail_mock,
         patch(
             "aivus_backend.projects.api.views_brief_v3.clear_brief_pending_task"
@@ -183,10 +184,67 @@ def test_get_final_documents_finalize_link_error_marks_failed(api_client):
 
     finalize_mock.apply_async.assert_called_once()
     link_error = finalize_mock.apply_async.call_args.kwargs["link_error"]
-    # The link_error must come from mark_brief_send_failed_task, not the bare clear.
+    # link_error must come from mark_brief_finalize_failed_task, not the bare clear.
     fail_mock.si.assert_called_once()
     clear_mock.si.assert_not_called()
     assert link_error is fail_mock.si.return_value
+
+
+@pytest.mark.django_db
+def test_status_poll_does_not_reopen_finalize_loop(api_client):
+    """BE-1: the interleaving regression. A failed finalize-on-ready sets
+    finalize_failed AND pending_task_error (the latter via the real link_error
+    task semantics). The 1.5s status poller runs before the 3s final-documents
+    poller and clears pending_task_error on read. The next final-documents GET
+    must STILL refuse to re-dispatch the paid finalize, because the loop-breaker
+    keys off finalize_failed, which the status read never touches.
+    """
+    from aivus_backend.projects.tasks import mark_brief_finalize_failed_task
+
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="interleave-token",
+        conversation_status="ready_to_finalize",
+        pending_task_id="failed-finalize-id",
+    )
+
+    # 1) The finalize-on-ready link_error fires: it surrenders the marker and sets
+    #    the dedicated finalize_failed flag (only because it still owns the marker).
+    mark_brief_finalize_failed_task(str(brief.id), "failed-finalize-id")
+    # Model the worst case where a Send-chain error also left pending_task_error
+    # set, so the status read below actually has something to clear.
+    Brief.objects.filter(id=brief.id).update(pending_task_error="stale-send-error")
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+    assert brief.pending_task_id == ""
+
+    # 2) The faster status poller reads and clears pending_task_error (legitimate:
+    #    it lets a fresh Send re-arm). It must not touch finalize_failed.
+    status_response = api_client.get(
+        reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="interleave-token",
+    )
+    assert status_response.status_code == 200
+    brief.refresh_from_db()
+    assert brief.pending_task_error == ""
+    assert brief.finalize_failed is True
+
+    # 3) The next final-documents poll must NOT re-dispatch the paid finalize.
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        docs_response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="interleave-token",
+        )
+
+    assert docs_response.status_code == 200
+    finalize_mock.apply_async.assert_not_called()
+    body = docs_response.json()
+    assert body["generating"] is False
+    assert body["finalizeFailed"] is True
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
 
 
 @pytest.mark.django_db

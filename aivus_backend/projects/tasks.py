@@ -68,6 +68,25 @@ def mark_brief_send_failed_task(brief_id: str, task_id: str) -> None:
     )
 
 
+@shared_task
+def mark_brief_finalize_failed_task(brief_id: str, task_id: str) -> None:
+    """Record a failed finalize-on-ready so the GET-driven dispatch stops looping.
+
+    Used as the ``link_error`` of the asynchronous finalize-on-ready dispatch in
+    the branded anonymous flow. The loop-breaker (BE-1) must survive a concurrent
+    status poll: the status endpoints clear ``pending_task_error`` on read to let
+    a fresh Send re-arm, which would also wipe a marker shared with this signal.
+    A dedicated ``finalize_failed`` flag, which status reads never touch and only
+    a fresh Send resets, keeps the loop broken: the next final-documents GET sees
+    the flag, refuses to re-dispatch the paid finalize, and surfaces the failure.
+    Only the dispatch that still owns the pending marker may set it, so a stale
+    retry cannot clobber a fresh attempt.
+    """
+    Brief.objects.filter(id=brief_id, pending_task_id=task_id).update(
+        pending_task_id="", finalize_failed=True
+    )
+
+
 def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
     if not traces:
         return
