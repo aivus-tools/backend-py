@@ -243,3 +243,45 @@ def test_pending_brief_claim_backfills_client_on_lead_projects(lead_vendor):
     client = ClientModel.objects.get(owner=user)
     project.refresh_from_db()
     assert project.client_id == client.id
+
+
+@pytest.mark.django_db
+def test_claim_does_not_dispatch_second_finalize_when_already_pending(api_client):
+    """BE-R15-1: claiming a brief while an anonymous finalize-on-ready is already
+    in flight (pending_task_id set) must not dispatch a second finalize. A double
+    dispatch would race the first chain through generate_final_documents (which
+    delete+recreates the documents) and burn a duplicate paid LLM call."""
+    user = User.objects.create_user(
+        email="race-claimer@example.com",
+        password="p@ssw0rd",
+        name="Race Claimer",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="race-token",
+        contact_email="race-claimer@example.com",
+        source="personal_link",
+        conversation_status="ready_to_finalize",
+        pending_task_id="inflight-anon-finalize",
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_task:
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="race-token",
+        )
+
+    assert response.status_code == 200
+    finalize_task.apply_async.assert_not_called()
+    payload = response.json()
+    assert "finalizingTaskId" not in payload
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "inflight-anon-finalize"
+    client = ClientModel.objects.get(owner=user)
+    assert brief.client_id == client.id

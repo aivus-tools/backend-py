@@ -2542,13 +2542,22 @@ def client_brief_ai_claim(request, brief_id):
             client=client
         )
 
-        brief = Brief.objects.filter(id=brief_id).first()
+        # Re-read under the row lock (mirrors _dispatch_finalize_if_ready): an
+        # anonymous finalize-on-ready dispatched by the white-label poller may
+        # already own the brief (pending_task_id set, documents still generating,
+        # status not yet COMPLETED). A plain read here would miss that marker and
+        # dispatch a second finalize, racing the first — both reach
+        # generate_final_documents which delete+recreates the documents, burning a
+        # duplicate paid LLM call. The pending_task_id guard refuses to dispatch
+        # while a finalize is already in flight.
+        brief = Brief.objects.select_for_update().filter(id=brief_id).first()
         if not brief:
             return JsonResponse({"error": "Brief not found"}, status=404)
 
         should_finalize = (
             brief.conversation_status == "ready_to_finalize"
             and brief.status != "COMPLETED"
+            and not brief.pending_task_id
             and not brief.final_documents.exists()
         )
         if should_finalize:
