@@ -117,6 +117,79 @@ def test_get_final_documents_does_not_redispatch_when_pending(api_client):
 
 
 @pytest.mark.django_db
+def test_get_final_documents_does_not_redispatch_after_finalize_failed(api_client):
+    """SF-5: a finalize that failed must not be re-dispatched on every GET.
+
+    The failed finalize stamps pending_task_error and surrenders the marker. The
+    next poll must NOT fire finalize again (the old unconditional clear caused an
+    unbounded LLM retry loop); it reports finalizeFailed so the client stops
+    polling instead of driving the loop.
+    """
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="finalize-failed",
+        conversation_status="ready_to_finalize",
+        pending_task_id="",
+        pending_task_error="failed-finalize-id",
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="finalize-failed",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    finalize_mock.apply_async.assert_not_called()
+    assert body["generating"] is False
+    assert body["finalizeFailed"] is True
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+
+
+@pytest.mark.django_db
+def test_get_final_documents_finalize_link_error_marks_failed(api_client):
+    """SF-5: finalize-on-ready must use mark_brief_send_failed_task as link_error
+    (which stamps pending_task_error) rather than a bare clear, so a failure is
+    recorded and the retry loop is broken."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="link-error-check",
+        conversation_status="ready_to_finalize",
+    )
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+        ) as finalize_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.mark_brief_send_failed_task"
+        ) as fail_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.clear_brief_pending_task"
+        ) as clear_mock,
+    ):
+        api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="link-error-check",
+        )
+
+    finalize_mock.apply_async.assert_called_once()
+    link_error = finalize_mock.apply_async.call_args.kwargs["link_error"]
+    # The link_error must come from mark_brief_send_failed_task, not the bare clear.
+    fail_mock.si.assert_called_once()
+    clear_mock.si.assert_not_called()
+    assert link_error is fail_mock.si.return_value
+
+
+@pytest.mark.django_db
 def test_get_final_documents_not_generating_when_present(
     api_client, anon_brief_with_document
 ):
