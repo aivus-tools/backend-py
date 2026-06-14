@@ -334,6 +334,53 @@ def test_public_send_rejects_when_finalize_in_flight(api_client, vendor):
     assert brief.pending_task_id == "inflight-finalize-id"
 
 
+@pytest.mark.django_db
+def test_public_send_rejects_when_send_chain_already_armed(api_client, vendor):
+    """SF-2: close the race between arming the Send chain and the async DRAFT->RFP
+    promotion.
+
+    A first Send sets pending_task_id and dispatches a chain whose
+    mark_project_sent_task runs after the row lock is released, so the project is
+    momentarily still DRAFT. A second Send in that window would pass the
+    already-sent guard (project not yet RFP). The in-lock pending_task_id check
+    blocks it instead, returning 409 already_being_sent without enqueuing a second
+    chain (which would otherwise send duplicate emails). Documents already exist
+    here so this is the not-needs-finalize branch, distinct from the finalize race.
+    """
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="send-armed",
+        conversation_status="finalized",
+        pending_task_id="armed-send-chain-id",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-armed",
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "already_being_sent"
+    chain_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "armed-send-chain-id"
+
+
 # --- authenticated Send ------------------------------------------------------
 
 
