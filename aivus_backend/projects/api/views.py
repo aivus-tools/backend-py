@@ -1,5 +1,6 @@
 """API views for projects app."""
 
+import contextlib
 import json
 import logging
 import uuid as uuid_module
@@ -12,36 +13,14 @@ import openpyxl
 from django.db import IntegrityError
 from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone as tz
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-
-try:
-    from django_ratelimit.decorators import ratelimit
-except ImportError:
-    from django.conf import settings as django_settings
-
-    if not django_settings.DEBUG:
-        msg = (
-            "django-ratelimit is required in production but not installed. "
-            "Run: pip install django-ratelimit"
-        )
-        raise ImportError(msg) from None
-
-    # Fallback: no-op decorator only in DEBUG mode
-    def ratelimit(**kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-
-import contextlib
-
-from django.utils import timezone as tz
 
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.catalog.models import Unit
+from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
@@ -49,6 +28,7 @@ from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
 from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.core.ratelimit import user_ratelimit_key
 from aivus_backend.projects.ai_brief import analyze_brief
 from aivus_backend.projects.ai_brief import analyze_comparison
 from aivus_backend.projects.ai_brief import process_chat_message
@@ -2254,7 +2234,7 @@ def client_brief_offers(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="20/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_chat(request):
     """AI-powered chat for brief creation."""
     try:
@@ -2321,7 +2301,7 @@ def client_brief_chat(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_chat_analyze(request):
     """Analyze a brief and provide suggestions.
 
@@ -2513,7 +2493,7 @@ def client_brief_comparison(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_comparison_analyze(request, brief_id):
     """AI analysis of comparison data for a brief's offers.
 

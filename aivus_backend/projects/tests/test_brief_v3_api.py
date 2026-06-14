@@ -282,6 +282,50 @@ def test_user_ratelimit_key_falls_back_to_ip_without_user():
         assert user_ratelimit_key("g", request) == "ip:203.0.113.50"
 
 
+def test_legacy_client_chat_endpoints_use_per_user_ratelimit_key():
+    """SEC-2: client_brief_chat, _chat_analyze and _comparison_analyze ran on the
+    broken key="user_or_ip" — under HMAC request.user is always Anonymous, so
+    every authenticated caller shared one bucket on these paid LLM endpoints. They
+    must now bind user_ratelimit_key (per-user) like the v3 endpoints. The rate
+    limiter is only attached when RATELIMIT_ENABLE is on, so re-import the module
+    under that flag and inspect the decorated view's closure."""
+    import importlib
+
+    from django.test import override_settings
+
+    from aivus_backend.core.ratelimit import user_ratelimit_key
+
+    def _all_closure_contents(view):
+        contents = []
+        seen = set()
+        layer = view
+        while layer is not None and id(layer) not in seen:
+            seen.add(id(layer))
+            for cell in getattr(layer, "__closure__", None) or []:
+                try:
+                    contents.append(cell.cell_contents)
+                except ValueError:
+                    continue
+            layer = getattr(layer, "__wrapped__", None)
+        return contents
+
+    with override_settings(RATELIMIT_ENABLE=True):
+        views_module = importlib.import_module("aivus_backend.projects.api.views")
+        views_module = importlib.reload(views_module)
+        try:
+            view_names = (
+                "client_brief_chat",
+                "client_brief_chat_analyze",
+                "client_brief_comparison_analyze",
+            )
+            for name in view_names:
+                contents = _all_closure_contents(getattr(views_module, name))
+                assert user_ratelimit_key in contents, name
+                assert "user_or_ip" not in contents, name
+        finally:
+            importlib.reload(views_module)
+
+
 # ----------------------------------------------------------------------------
 # Draft / start / chat
 # ----------------------------------------------------------------------------
