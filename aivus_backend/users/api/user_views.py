@@ -737,6 +737,11 @@ def _build_vendor_settings_response(settings):
         "logoUrl": settings.logo.url if settings.logo else None,
         "companyName": settings.company_name,
         "agencyName": settings.agency_name,
+        # SF-7: GET returns the stored slug as-is and null when unset — it never
+        # generates one. Slug generation hits the LLM, which must not run on a
+        # plain settings GET (that sync-LLM-on-GET was removed in round 1). The
+        # vendor opts into a suggestion through the explicit "Suggest" button
+        # (vendor_slug_suggest); this is deliberate, not a missing default.
         "slug": settings.slug or None,
         "leadNotificationEmail": settings.lead_notification_email,
         "fringesPercent": str(settings.fringes_percent),
