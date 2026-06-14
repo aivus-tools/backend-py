@@ -92,6 +92,19 @@ MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
 MAX_ATTACHMENTS_PER_BRIEF_ANON = 3
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 
+# Upper bound on how long the Send chain may legitimately hold the pending marker.
+# The chain runs finalize (a multi-document LLM call), the project promotion to RFP
+# and two emails; even a slow LLM finishes well inside a few minutes. The Send chain
+# is enqueued without a tracked task id (the marker is a standalone uuid), so an
+# AsyncResult on the marker always reports an unknown PENDING task and never failed.
+# If a worker is SIGKILLed/OOM-killed mid-chain without raising, neither the tail
+# clear step nor the link_error fires and the marker would stay set forever, wedging
+# the brief at "pending" and making every re-Send return 409 already_being_sent.
+# A pending marker older than this ceiling is treated as a dead chain: the status
+# endpoint reports "failed" and releases the marker so the client can re-Send. The
+# bound is generous over the worst-case chain duration to never trip a live Send.
+SEND_PENDING_MAX_AGE_SECONDS = 600
+
 # The white-label anonymous flow shows the brief to an unauthenticated visitor on
 # the vendor's branded page. Anonymous token reads/edits are restricted to the
 # client-facing kinds; vendor_email is exposed only to the authenticated owner of
@@ -717,6 +730,30 @@ def client_brief_ai_start(request, brief_id):
     )
 
 
+def _send_pending_expired(brief: Brief) -> bool:
+    """Release a Send-chain pending marker that has outlived its TTL.
+
+    The Send chain is enqueued without a tracked task id, so its pending marker
+    cannot be probed with AsyncResult — a worker killed mid-chain (SIGKILL/OOM)
+    leaves the marker set forever. The marker is stamped with
+    ``pending_task_started_at`` only by the Send chain; single-task flows leave it
+    null and keep their AsyncResult-based reporting untouched. When a stamped
+    marker is older than ``SEND_PENDING_MAX_AGE_SECONDS`` the chain is presumed
+    dead: clear the marker (and the stamp) so the status reads "failed" and a
+    fresh Send is no longer blocked by the 409 guard. Returns True when expired.
+    """
+    if not brief.pending_task_id or brief.pending_task_started_at is None:
+        return False
+    age = (timezone.now() - brief.pending_task_started_at).total_seconds()
+    if age < SEND_PENDING_MAX_AGE_SECONDS:
+        return False
+    Brief.objects.filter(id=brief.id, pending_task_id=brief.pending_task_id).update(
+        pending_task_id="", pending_task_started_at=None
+    )
+    logger.error("Send chain marker expired after %ss: brief_id=%s", int(age), brief.id)
+    return True
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("CLIENT")
@@ -732,6 +769,8 @@ def client_brief_ai_status(request, brief_id):
         # the flag so a fresh Send can re-arm cleanly.
         Brief.objects.filter(id=brief.id).update(pending_task_error="")
         logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
+    if _send_pending_expired(brief):
         return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)
@@ -1499,6 +1538,7 @@ def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language:
         # retry, so the finalize-on-ready loop-breaker (BE-1) must release.
         Brief.objects.filter(id=locked.id).update(
             pending_task_id=send_chain_task_id,
+            pending_task_started_at=timezone.now(),
             pending_task_error="",
             finalize_failed=False,
         )
@@ -2056,6 +2096,8 @@ def public_brief_ai_status(request, brief_id):
         # the flag so a fresh Send can re-arm cleanly.
         Brief.objects.filter(id=brief.id).update(pending_task_error="")
         logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
+    if _send_pending_expired(brief):
         return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)

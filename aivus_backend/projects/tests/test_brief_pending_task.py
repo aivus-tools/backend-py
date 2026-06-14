@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.conf import settings
 from django.test import Client as DjangoTestClient
 from django.urls import reverse
+from django.utils import timezone
 
 from aivus_backend.projects import tasks
 from aivus_backend.projects.api.serializers import serialize_brief_v3
+from aivus_backend.projects.api.views_brief_v3 import SEND_PENDING_MAX_AGE_SECONDS
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefPrompt
 from aivus_backend.projects.models import ChatMessage
@@ -175,6 +178,110 @@ def test_public_status_done_when_no_pending_task(api_client, seeded_prompts):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# BE-R15-2: Send-chain pending marker has a TTL. The chain is enqueued without a
+# tracked task id, so AsyncResult on the marker never sees a SIGKILL/OOM that kills
+# the worker without raising; the tail clear and link_error then never fire and the
+# marker would wedge "pending" forever. A marker stamped with pending_task_started_at
+# older than SEND_PENDING_MAX_AGE_SECONDS is treated as a dead chain.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_client_status_pending_when_send_marker_fresh(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """Happy-path: a Send marker stamped within the TTL still reports pending."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        pending_task_id="send-fresh",
+        pending_task_started_at=timezone.now(),
+    )
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.AsyncResult",
+        return_value=_AsyncResultStub(failed=False),
+    ):
+        resp = api_client.get(
+            reverse("projects_api:client_brief_ai_status", args=[brief.id]),
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "pending"}
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "send-fresh"
+
+
+@pytest.mark.django_db
+def test_client_status_failed_when_send_marker_expired(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """An expired Send marker reports failed and is released so re-Send is unblocked.
+    AsyncResult must not even be consulted: the standalone chain id is unknowable."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        pending_task_id="send-dead",
+        pending_task_started_at=timezone.now()
+        - timedelta(seconds=SEND_PENDING_MAX_AGE_SECONDS + 60),
+    )
+    with patch("aivus_backend.projects.api.views_brief_v3.AsyncResult") as async_result:
+        resp = api_client.get(
+            reverse("projects_api:client_brief_ai_status", args=[brief.id]),
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+    async_result.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+    assert brief.pending_task_started_at is None
+
+
+@pytest.mark.django_db
+def test_public_status_failed_when_send_marker_expired(api_client, seeded_prompts):
+    """Anonymous white-label flow: an expired Send marker reports failed too."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="pub-dead",
+        pending_task_id="send-dead-pub",
+        pending_task_started_at=timezone.now()
+        - timedelta(seconds=SEND_PENDING_MAX_AGE_SECONDS + 60),
+    )
+    with patch("aivus_backend.projects.api.views_brief_v3.AsyncResult") as async_result:
+        resp = api_client.get(
+            reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="pub-dead",
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+    async_result.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+
+
+@pytest.mark.django_db
+def test_status_single_task_marker_without_stamp_uses_asyncresult(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """Single-task flows (first reply, finalize-on-ready) leave the stamp null even
+    when old; their AsyncResult reporting must stay untouched by the TTL path."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        pending_task_id="single-task",
+        pending_task_started_at=None,
+    )
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.AsyncResult",
+        return_value=_AsyncResultStub(failed=False),
+    ) as async_result:
+        resp = api_client.get(
+            reverse("projects_api:client_brief_ai_status", args=[brief.id]),
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "pending"}
+    async_result.assert_called_once_with("single-task")
 
 
 # ---------------------------------------------------------------------------

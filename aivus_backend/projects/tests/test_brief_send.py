@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.projects.api.views_brief_v3 import SEND_PENDING_MAX_AGE_SECONDS
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import Project
@@ -379,6 +381,60 @@ def test_public_send_rejects_when_send_chain_already_armed(api_client, vendor):
     chain_mock.assert_not_called()
     brief.refresh_from_db()
     assert brief.pending_task_id == "armed-send-chain-id"
+
+
+@pytest.mark.django_db
+def test_public_resend_unblocked_after_send_marker_expires(api_client, vendor):
+    """BE-R15-2: a Send chain killed mid-flight (SIGKILL/OOM) leaves the pending
+    marker set forever, so re-Send is stuck at 409 already_being_sent. With a TTL on
+    the marker the status poll releases an expired marker and the next Send succeeds.
+    """
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="send-expired",
+        conversation_status="finalized",
+        pending_task_id="dead-send-chain-id",
+        pending_task_started_at=timezone.now()
+        - timedelta(seconds=SEND_PENDING_MAX_AGE_SECONDS + 60),
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+    )
+
+    status_response = api_client.get(
+        reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="send-expired",
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "failed"
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+    assert brief.pending_task_started_at is None
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        send_response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "c@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-expired",
+        )
+
+    assert send_response.status_code == 200
+    assert send_response.json()["ok"] is True
+    chain_mock.assert_called_once()
+    brief.refresh_from_db()
+    assert brief.pending_task_id
+    assert brief.pending_task_id != "dead-send-chain-id"
+    assert brief.pending_task_started_at is not None
 
 
 # --- authenticated Send ------------------------------------------------------
