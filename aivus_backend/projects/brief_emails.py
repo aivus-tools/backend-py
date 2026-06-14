@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.core.cache import cache
 
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.users.i18n import resolve_language
 from aivus_backend.users.models import User
@@ -124,9 +125,14 @@ def _project_url(project) -> str:
 def _brief_pdf_attachment(brief) -> tuple[str, str, str] | None:
     from aivus_backend.projects import brief_pdf  # noqa: PLC0415
 
+    # The client-facing email must never attach the vendor outreach email
+    # (kind=vendor_email) — it carries the vendor's PII and is owner-only (PRD §5).
+    # Prefer the production brief, and fall back only within the client-facing
+    # kinds; a bare .first() would surface vendor_email for a brief that somehow
+    # has only that document, because the kind ordering sorts it last.
     document = (
         brief.final_documents.filter(kind=FinalDocumentKind.PRODUCTION_BRIEF).first()
-        or brief.final_documents.first()
+        or brief.final_documents.filter(kind__in=CLIENT_FACING_DOCUMENT_KINDS).first()
     )
     if not document:
         return None

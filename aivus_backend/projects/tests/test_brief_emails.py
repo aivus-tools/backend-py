@@ -78,6 +78,54 @@ def test_resolve_email_language_default_en():
 
 
 @pytest.mark.django_db
+def test_brief_pdf_attachment_never_attaches_vendor_email():
+    """MF-3: a brief whose only document is vendor_email must yield no attachment.
+
+    vendor_email is vendor PII (owner-only, PRD §5). The fallback used to be a
+    bare .first(), which — given the kind ordering sorts vendor_email last —
+    would surface it for a brief that only has that document, leaking vendor PII
+    into the client's email. The fallback is now scoped to client-facing kinds,
+    so this returns None rather than the vendor_email PDF.
+    """
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-vendor-only", document_language="en"
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind=FinalDocumentKind.VENDOR_EMAIL, html="<p>secret outreach</p>"
+    )
+
+    assert brief_emails._brief_pdf_attachment(brief) is None  # noqa: SLF001
+
+
+@pytest.mark.django_db
+def test_brief_pdf_attachment_falls_back_to_client_facing_kind():
+    """MF-3: with no production_brief the fallback still serves a client-facing
+    document (deliverables_checklist), not vendor_email."""
+    brief = Brief.objects.create(
+        client=None, anonymous_token="tok-checklist", document_language="en"
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.DELIVERABLES_CHECKLIST,
+        html="<p>checklist</p>",
+    )
+    # A vendor_email present alongside must not be chosen.
+    BriefFinalDocument.objects.create(
+        brief=brief, kind=FinalDocumentKind.VENDOR_EMAIL, html="<p>secret</p>"
+    )
+
+    with patch(
+        "aivus_backend.projects.brief_pdf.render_final_document_pdf",
+        return_value=b"%PDF-fake",
+    ):
+        attachment = brief_emails._brief_pdf_attachment(brief)  # noqa: SLF001
+
+    assert attachment is not None
+    filename = attachment[0]
+    assert "Checklist" in filename
+
+
+@pytest.mark.django_db
 def test_client_email_new_account_uses_recipient_task():
     brief = Brief.objects.create(
         client=None, anonymous_token="tok-new", document_language="en"
