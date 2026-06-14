@@ -44,6 +44,7 @@ from aivus_backend.catalog.models import Entry
 from aivus_backend.catalog.models import Unit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
@@ -2932,7 +2933,9 @@ def vendor_project_brief_documents(request, project_id):
     if not project or not brief:
         return JsonResponse({"error": "Project or brief not found"}, status=404)
 
-    documents = brief.final_documents.order_by("kind")
+    documents = brief.final_documents.filter(
+        kind__in=CLIENT_FACING_DOCUMENT_KINDS
+    ).order_by("kind")
     return JsonResponse(
         {
             "projectId": str(project.id),
@@ -2957,7 +2960,9 @@ def vendor_project_brief_document_pdf(request, project_id, document_id):
         return JsonResponse({"error": "Project or brief not found"}, status=404)
 
     document = BriefFinalDocument.objects.filter(
-        id=document_id, brief_id=project.brief_id
+        id=document_id,
+        brief_id=project.brief_id,
+        kind__in=CLIENT_FACING_DOCUMENT_KINDS,
     ).first()
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)

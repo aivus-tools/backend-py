@@ -120,3 +120,40 @@ def test_vendor_pdf_unknown_document_404(api_client, vendor_project_brief):
         **_auth(user),
     )
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_vendor_email_hidden_from_documents(api_client, vendor_project_brief):
+    user, _vendor, project, brief, _document = vendor_project_brief
+    BriefFinalDocument.objects.create(
+        brief=brief,
+        kind="vendor_email",
+        html="<p>SECRET outreach to client contacts</p>",
+    )
+    response = api_client.get(
+        reverse("projects_api:vendor_project_brief_documents", args=[project.id]),
+        **_auth(user),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    kinds = {x["kind"] for x in body["documents"]}
+    assert "vendor_email" not in kinds
+    assert "SECRET" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_vendor_email_pdf_by_id_404(api_client, vendor_project_brief):
+    user, _vendor, project, brief, _document = vendor_project_brief
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind="vendor_email",
+        html="<p>SECRET outreach to client contacts</p>",
+    )
+    response = api_client.get(
+        reverse(
+            "projects_api:vendor_project_brief_document_pdf",
+            args=[project.id, vendor_email.id],
+        ),
+        **_auth(user),
+    )
+    assert response.status_code == 404
