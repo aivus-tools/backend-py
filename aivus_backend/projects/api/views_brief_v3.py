@@ -30,6 +30,8 @@ from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.core.ratelimit import client_ip_ratelimit_key
+from aivus_backend.core.ratelimit import user_ratelimit_key
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.projects import stt
@@ -99,74 +101,6 @@ ANON_VISIBLE_DOCUMENT_KINDS = CLIENT_FACING_DOCUMENT_KINDS
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def resolve_client_ip(request) -> str:
-    """Single source of truth for the visitor's IP behind the reverse proxy.
-
-    django-ratelimit's built-in ``key="ip"`` reads ``REMOTE_ADDR``, which behind
-    Traefik / the Next.js proxy is the proxy's own IP — every public visitor
-    collapses into one bucket and a single abuser throttles everyone. The naive
-    fix (left-most ``X-Forwarded-For``) is worse: that entry is fully
-    client-supplied, so an attacker rotates a fake header and sidesteps every
-    limit.
-
-    Instead we trust exactly ``RATELIMIT_TRUSTED_PROXY_COUNT`` hops. Each trusted
-    proxy appends the address it received from to the right of the header, so with
-    ``N`` trusted proxies the real client is the ``N``-th entry counted from the
-    right (``xff[-(N+1)]``). Entries to the left of that are attacker-controlled
-    and ignored.
-
-    Defaults to ``0`` (trust no proxy) so the header is never honoured unless the
-    deployment opts in by declaring its hop count — a spoofed header then falls
-    back to ``REMOTE_ADDR``, which the attacker cannot forge.
-
-    Production invariant (``RATELIMIT_TRUSTED_PROXY_COUNT=2``): the request
-    crosses ``client -> Traefik -> Next.js -> Django`` and each trusted hop
-    appends the address it received from, so the header Django sees is
-    ``XFF = [client, traefik_in, next_in]``. The Next.js rewrite does not invent
-    the client entry on its own, so the front-end is responsible for prepending
-    the real client IP as the left-most entry; with that in place the client sits
-    exactly two hops from the right (``xff[-3]``) and is read correctly. If the
-    chain ever changes, update both this count and the front-end XFF handling
-    together — they are two halves of one invariant.
-    """
-    remote_addr = request.META.get("REMOTE_ADDR", "") or "unknown"
-    trusted = int(getattr(settings, "RATELIMIT_TRUSTED_PROXY_COUNT", 0) or 0)
-    if trusted <= 0:
-        return remote_addr
-
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-    # The header must carry at least one entry per trusted hop plus the client
-    # itself; a shorter chain means the expected proxies did not all append, so we
-    # refuse to read an attacker-shiftable position and fall back to REMOTE_ADDR.
-    if len(parts) <= trusted:
-        return remote_addr
-    return parts[-(trusted + 1)]
-
-
-def client_ip_ratelimit_key(group, request) -> str:
-    """Rate-limit key keyed on the trusted client IP (see resolve_client_ip)."""
-    return resolve_client_ip(request)
-
-
-def user_ratelimit_key(group, request) -> str:
-    """Rate-limit key keyed on the authenticated user.
-
-    django-ratelimit's built-in ``key="user"`` reads ``request.user.pk``, but the
-    HMAC middleware authenticates API requests by setting only ``request.user_data``
-    and never ``request.user`` (it stays AnonymousUser with ``pk=None``). Built-in
-    ``key="user"`` therefore collapses every authenticated caller into one shared
-    bucket — a single user exhausts the limit for everyone, including endpoints
-    that hit a paid LLM. This callable keys on the real user id from
-    ``request.user_data`` instead, falling back to the trusted client IP when the
-    request somehow lacks user context so the limit never silently disappears.
-    """
-    user_id = (getattr(request, "user_data", None) or {}).get("id")
-    if user_id:
-        return f"user:{user_id}"
-    return f"ip:{resolve_client_ip(request)}"
 
 
 def _parse_json_body(request):
@@ -634,7 +568,7 @@ def client_brief_ai_sent_to_vendor(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_drafts(request):
     """Create an empty draft brief so the user can upload attachments before
     sending the first message."""
@@ -653,7 +587,7 @@ def client_brief_ai_drafts(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_start(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -755,7 +689,7 @@ def client_brief_ai_status(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -870,7 +804,7 @@ def client_brief_ai_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="30/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="30/m", method="POST")
 def client_brief_ai_attachments(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -921,7 +855,7 @@ def client_brief_ai_attachment_delete(request, brief_id, attachment_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="10/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_ai_chat_transcribe(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -1074,7 +1008,7 @@ def client_brief_ai_message_trace(request, brief_id, message_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="5/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="5/m", method="POST")
 def client_brief_ai_finalize(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -1220,7 +1154,7 @@ def _pdf_response_for_document(document: BriefFinalDocument) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET", "POST", "PATCH"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="30/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="30/m", method="POST")
 def client_brief_ai_share(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
