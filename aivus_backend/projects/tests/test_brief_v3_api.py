@@ -15,13 +15,16 @@ from django.conf import settings
 from django.test import Client as DjangoTestClient
 from django.urls import reverse
 
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefPrompt
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import Project
 from aivus_backend.users.models import Client as ClientModel
 from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
 
 # ----------------------------------------------------------------------------
 # Fixtures
@@ -463,6 +466,45 @@ def test_finalize_and_update_final_document(
     # Script tags are sanitized away.
     assert "<script>" not in doc.html
     assert "Updated" in doc.html
+
+
+@pytest.mark.django_db
+def test_auth_client_cannot_edit_final_document_after_send(
+    api_client, client_user, client_profile
+):
+    """SF-1: an authenticated client must not edit the brief after Send.
+
+    The vendor reads the very same brief (no copy), so a post-Send edit would
+    silently tamper with the delivered document. The anonymous path already
+    blocks this; the authenticated PATCH must return 409 too once any vendor
+    project reaches RFP.
+    """
+    brief = Brief.objects.create(client=client_profile, conversation_status="finalized")
+    doc = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Original</p>"
+    )
+    owner = User.objects.create_user(
+        email="sf1-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="SF1 Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    resp = api_client.patch(
+        reverse(
+            "projects_api:client_brief_ai_final_document_update",
+            args=[brief.id, doc.id],
+        ),
+        data=json.dumps({"html": "<p>sneaky post-send edit</p>"}),
+        content_type="application/json",
+        **_auth_headers(client_user),
+    )
+
+    assert resp.status_code == 409
+    doc.refresh_from_db()
+    assert "sneaky" not in doc.html
+    assert "Original" in doc.html
 
 
 @pytest.mark.django_db

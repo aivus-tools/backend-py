@@ -1143,6 +1143,15 @@ def client_brief_ai_final_document_update(request, brief_id, document_id):
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
+    # SF-1: once the brief is sent the vendor reads this very document (no copy),
+    # so an edit after Send would silently rewrite what the vendor already sees.
+    # The anonymous PATCH path is gated the same way; without this an authenticated
+    # client could keep editing post-Send and tamper with the delivered brief.
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
+
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)
