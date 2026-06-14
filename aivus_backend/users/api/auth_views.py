@@ -18,6 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import public_endpoint
+from aivus_backend.core.ratelimit import client_ip_ratelimit_key
 from aivus_backend.users.emails import send_confirmation_email
 from aivus_backend.users.emails import send_password_reset_email
 from aivus_backend.users.i18n import resolve_language
@@ -166,7 +167,7 @@ def _try_claim_pending_brief(user):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="5/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST", block=True)
 def register(request):  # noqa: C901, PLR0912, PLR0915
     """
     Register a new user.
@@ -287,7 +288,7 @@ def register(request):  # noqa: C901, PLR0912, PLR0915
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="5/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST", block=True)
 def login(request):  # noqa: C901, PLR0912
     """
     Login user.
@@ -389,7 +390,7 @@ def login(request):  # noqa: C901, PLR0912
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@ratelimit(key="ip", rate="10/m", method="GET", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="GET", block=True)
 def confirm_email(request):
     """
     Confirm email.
@@ -464,7 +465,7 @@ def confirm_email(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="10/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST", block=True)
 def check_email(request):
     """
     Check if email exists.
@@ -511,7 +512,7 @@ def check_email(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="5/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST", block=True)
 def forgot_password(request):
     """
     Request password reset.
@@ -560,7 +561,7 @@ def forgot_password(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="3/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="3/m", method="POST", block=True)
 def resend_confirmation(request):
     """
     Resend email confirmation link.
@@ -617,7 +618,7 @@ def resend_confirmation(request):
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@ratelimit(key="ip", rate="10/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST", block=True)
 def set_pending_brief(request):
     """
     Store pending brief for claiming after role assignment.
@@ -673,7 +674,7 @@ def set_pending_brief(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@ratelimit(key="ip", rate="5/m", method="POST", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST", block=True)
 def reset_password(request):
     """
     Reset password.
@@ -732,7 +733,7 @@ def reset_password(request):
 
 @require_http_methods(["GET"])
 @public_endpoint
-@ratelimit(key="ip", rate="120/m", method="GET", block=True)
+@ratelimit(key=client_ip_ratelimit_key, rate="120/m", method="GET", block=True)
 def e2e_confirmation_token(request):
     """
     Return the latest e-mail confirmation token for an address (test only).
