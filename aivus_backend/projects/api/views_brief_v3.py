@@ -764,7 +764,6 @@ def client_brief_ai_chat(request, brief_id):
     gate = _guard_chat_turn(brief)
     if gate is not None:
         return gate
-    _maybe_reset_finalize_retry(brief)
 
     if MESSAGE_LIMIT_AUTH and brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
@@ -793,6 +792,11 @@ def client_brief_ai_chat(request, brief_id):
 
     attachment_ids = _parse_attachment_ids(body)
     document_html = _parse_document_html(body)
+
+    # Reset a stale finalize-failed flag only once we know this is a real turn
+    # (valid message, within limits) about to be persisted — otherwise a malformed
+    # or empty POST would clear finalize_failed without any actual retry.
+    _maybe_reset_finalize_retry(brief)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
@@ -2079,7 +2083,6 @@ def public_brief_ai_chat(request, brief_id):
     gate = _guard_chat_turn(brief)
     if gate is not None:
         return gate
-    _maybe_reset_finalize_retry(brief)
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)
@@ -2105,6 +2108,11 @@ def public_brief_ai_chat(request, brief_id):
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
     document_html = _parse_document_html(body)
+
+    # Reset a stale finalize-failed flag only once we know this is a real turn
+    # (valid message, within limits) about to be persisted — otherwise a malformed
+    # or empty POST would clear finalize_failed without any actual retry.
+    _maybe_reset_finalize_retry(brief)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(

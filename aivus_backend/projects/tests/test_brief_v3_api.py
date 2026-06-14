@@ -794,6 +794,74 @@ def test_chat_does_not_reset_finalize_failed_when_documents_exist(
 
 
 @pytest.mark.django_db
+def test_invalid_chat_post_does_not_reset_finalize_failed(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """BE-FINALIZE-RESET-ORDERING: the reset must run only for a real turn. An
+    empty message or broken JSON is rejected (400) and must NOT clear
+    finalize_failed — otherwise a malformed POST silently burns the retry without
+    ever re-running finalize."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="ready_to_finalize",
+        finalize_failed=True,
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_brief_turn"
+    ) as runner_mock:
+        empty = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "   "}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+        broken = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data="{not json",
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert empty.status_code == 400
+    assert broken.status_code == 400
+    runner_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+
+
+@pytest.mark.django_db
+def test_invalid_anon_chat_post_does_not_reset_finalize_failed(
+    api_client, seeded_prompts
+):
+    """BE-FINALIZE-RESET-ORDERING (anon branch): same guard on the public endpoint
+    — a malformed anon POST is rejected without clearing finalize_failed."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="reset-ordering-anon",
+        conversation_status="ready_to_finalize",
+        document_language="en",
+        source="personal_link",
+        finalize_failed=True,
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_brief_turn"
+    ) as runner_mock:
+        empty = api_client.post(
+            reverse("projects_api:public_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": ""}),
+            content_type="application/json",
+            **_public_headers("reset-ordering-anon"),
+        )
+
+    assert empty.status_code == 400
+    runner_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+
+
+@pytest.mark.django_db
 def test_show_cost_flag(
     api_client, client_user, client_profile, settings, seeded_prompts
 ):
