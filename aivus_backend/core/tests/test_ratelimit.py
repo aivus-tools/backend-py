@@ -49,3 +49,52 @@ def test_hit_rate_limit_returns_429_via_middleware():
     second = client.get("/probe/")
     assert second.status_code == 429
     assert json.loads(second.content)["error"] == "Too many requests"
+
+
+# A Redis URL that points at a closed port so any cache access fails fast.
+_DEAD_REDIS = "redis://127.0.0.1:6399/15"
+
+
+def _ratelimit_cache_settings(ignore_exceptions: bool) -> dict:
+    return {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": _DEAD_REDIS,
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "IGNORE_EXCEPTIONS": ignore_exceptions,
+            },
+        },
+    }
+
+
+@pytest.mark.django_db
+def test_ratelimit_fails_closed_with_dedicated_cache_alias():
+    """SF-4: the dedicated rate-limit cache keeps IGNORE_EXCEPTIONS off, so a Redis
+    outage raises instead of being silently swallowed. With RATELIMIT_FAIL_OPEN
+    off that surfaces as an error rather than quietly disabling every limit — rate
+    limiting fails CLOSED. The default cache (IGNORE_EXCEPTIONS=True) is the wrong
+    place to count for exactly this reason, which is why production points
+    RATELIMIT_USE_CACHE at this separate alias."""
+    from django.test import RequestFactory
+    from django.test import override_settings
+    from django_ratelimit.core import is_ratelimited
+
+    factory = RequestFactory()
+    with (
+        override_settings(
+            RATELIMIT_ENABLE=True,
+            RATELIMIT_USE_CACHE="default",
+            RATELIMIT_FAIL_OPEN=False,
+            CACHES=_ratelimit_cache_settings(ignore_exceptions=False),
+        ),
+        pytest.raises(Exception),
+    ):
+        is_ratelimited(
+            request=factory.get("/"),
+            group="sf4-closed",
+            key="ip",
+            rate="1/s",
+            method="GET",
+            increment=True,
+        )
