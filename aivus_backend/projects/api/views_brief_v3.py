@@ -119,8 +119,17 @@ def resolve_client_ip(request) -> str:
 
     Defaults to ``0`` (trust no proxy) so the header is never honoured unless the
     deployment opts in by declaring its hop count — a spoofed header then falls
-    back to ``REMOTE_ADDR``, which the attacker cannot forge. Production sets the
-    real count (client -> Traefik -> Next.js -> Django).
+    back to ``REMOTE_ADDR``, which the attacker cannot forge.
+
+    Production invariant (``RATELIMIT_TRUSTED_PROXY_COUNT=2``): the request
+    crosses ``client -> Traefik -> Next.js -> Django`` and each trusted hop
+    appends the address it received from, so the header Django sees is
+    ``XFF = [client, traefik_in, next_in]``. The Next.js rewrite does not invent
+    the client entry on its own, so the front-end is responsible for prepending
+    the real client IP as the left-most entry; with that in place the client sits
+    exactly two hops from the right (``xff[-3]``) and is read correctly. If the
+    chain ever changes, update both this count and the front-end XFF handling
+    together — they are two halves of one invariant.
     """
     remote_addr = request.META.get("REMOTE_ADDR", "") or "unknown"
     trusted = int(getattr(settings, "RATELIMIT_TRUSTED_PROXY_COUNT", 0) or 0)

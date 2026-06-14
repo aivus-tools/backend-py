@@ -168,6 +168,80 @@ def test_client_ip_ratelimit_key_falls_back_to_remote_addr():
 
 
 # ----------------------------------------------------------------------------
+# resolve_client_ip (MF-2): proxy hop counting and spoof resistance
+# ----------------------------------------------------------------------------
+
+
+def _ip_request(remote_addr: str, forwarded: str | None):
+    from django.test import RequestFactory
+
+    request = RequestFactory().get("/")
+    request.META["REMOTE_ADDR"] = remote_addr
+    if forwarded is None:
+        request.META.pop("HTTP_X_FORWARDED_FOR", None)
+    else:
+        request.META["HTTP_X_FORWARDED_FOR"] = forwarded
+    return request
+
+
+def test_resolve_client_ip_production_chain_picks_client():
+    """MF-2: production invariant XFF=[client, traefik, next] with N=2.
+
+    Each trusted proxy appends the address it received from, so the chain Django
+    sees is the real client followed by the two trusted hops. The client is the
+    N-th entry from the right, i.e. the left-most here, and that is what we bill.
+    """
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+
+    request = _ip_request("10.0.0.1", "198.51.100.9, 172.16.0.5, 10.0.0.1")
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert resolve_client_ip(request) == "198.51.100.9"
+
+
+def test_resolve_client_ip_ignores_spoofed_prefix():
+    """MF-2: an attacker prepending fake hops cannot shift the read position.
+
+    With N=2 the client is fixed two hops from the right; extra left-hand entries
+    the attacker injects are ignored, so the genuine client is still billed.
+    """
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+
+    forwarded = "6.6.6.6, 7.7.7.7, 198.51.100.9, 172.16.0.5, 10.0.0.1"
+    request = _ip_request("10.0.0.1", forwarded)
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert resolve_client_ip(request) == "198.51.100.9"
+
+
+def test_resolve_client_ip_short_chain_falls_back_to_remote_addr():
+    """MF-2: a chain shorter than the trusted hop count means a proxy did not
+    append as expected, so we refuse the attacker-shiftable header and use the
+    unforgeable REMOTE_ADDR instead."""
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+
+    request = _ip_request("172.16.0.1", "9.9.9.9")
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=2):
+        assert resolve_client_ip(request) == "172.16.0.1"
+
+
+def test_resolve_client_ip_zero_trusted_ignores_forwarded_for():
+    """MF-2: with N=0 (trust no proxy) the header is never honoured, so a forged
+    X-Forwarded-For is fully ignored in favour of REMOTE_ADDR."""
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import resolve_client_ip
+
+    request = _ip_request("10.0.0.1", "203.0.113.7, 10.0.0.1")
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=0):
+        assert resolve_client_ip(request) == "10.0.0.1"
+
+
+# ----------------------------------------------------------------------------
 # user_ratelimit_key (MF-1): per-user buckets under the HMAC middleware
 # ----------------------------------------------------------------------------
 
