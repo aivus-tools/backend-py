@@ -244,6 +244,64 @@ def _build_chat_response(
     }
 
 
+def _guard_chat_turn(brief: Brief) -> JsonResponse | None:
+    """Pre-`_process_chat` gate shared by the auth and anon chat endpoints.
+
+    BE-CHAT-AFTER-SEND-EDIT: a finalized brief routes the chat turn into
+    ``process_finalized_turn``, which unconditionally rewrites the editable
+    documents (production_brief, vendor_email). After Send the vendor reads the
+    very same brief — there is no copy — and the anonymous token survives Send
+    (it is only cleared on claim), so a post-Send chat turn would silently
+    tamper with the document the vendor already sees. The PATCH endpoints are
+    already gated by ``_brief_already_sent``; this closes the chat hole the same
+    way. Returns a 409 once any vendor project reaches RFP.
+
+    R11-1: the same gate establishes ordering with the finalize retry-reset
+    below — once sent, the chat is locked and ``finalize_failed`` is never reset,
+    so the retry path can only run before Send.
+
+    The gate keys off ``_brief_already_sent`` alone (project at RFP+), matching
+    the PATCH endpoints, rather than narrowing to ``finalized``: a sent brief is
+    always finalized (the Send chain finalizes first), and gating on the sent
+    state alone leaves no chat turn able to mutate a delivered brief.
+    """
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
+    return None
+
+
+def _maybe_reset_finalize_retry(brief: Brief) -> None:
+    """R11-1: make an explicit chat message a real finalize retry before Send.
+
+    round-10 (8879c14) set ``finalize_failed`` on a failed finalize-on-ready and
+    only ``_dispatch_send`` ever cleared it, so the GET-driven dispatch refused to
+    re-run finalize forever. The BRIEF_V3_FINALIZE_FAILED_HINT tells the user to
+    "send a message in the chat to retry generation", which was a lie: the chat
+    turn never touched the flag, and Send requires a SENDABLE status and would
+    immediately email the vendor (skipping review). This resets the flag on an
+    explicit user message — never automatically on a poll, so the round-9
+    dead-loop is not recreated — when the brief still has no documents and has
+    not been sent yet (project < RFP). The next final-documents GET then
+    legitimately re-dispatches finalize without emailing the vendor, which makes
+    the existing hint true.
+
+    Must run after ``_guard_chat_turn`` so a sent brief is never reset here.
+    """
+    if not brief.finalize_failed:
+        return
+    if brief.final_documents.exists():
+        return
+    if _brief_already_sent(brief):
+        return
+    updated = Brief.objects.filter(id=brief.id, finalize_failed=True).update(
+        finalize_failed=False
+    )
+    if updated:
+        brief.finalize_failed = False
+
+
 def _handle_post_finalize_feedback(
     brief: Brief,
     user_message_obj: ChatMessage,
@@ -702,6 +760,11 @@ def client_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    gate = _guard_chat_turn(brief)
+    if gate is not None:
+        return gate
+    _maybe_reset_finalize_retry(brief)
 
     if MESSAGE_LIMIT_AUTH and brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
@@ -2012,6 +2075,11 @@ def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    gate = _guard_chat_turn(brief)
+    if gate is not None:
+        return gate
+    _maybe_reset_finalize_retry(brief)
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)

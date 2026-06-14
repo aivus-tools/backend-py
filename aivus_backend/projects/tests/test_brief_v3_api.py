@@ -508,6 +508,248 @@ def test_auth_client_cannot_edit_final_document_after_send(
 
 
 @pytest.mark.django_db
+def test_auth_client_cannot_chat_after_send(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """BE-CHAT-AFTER-SEND-EDIT: a finalized brief routes the chat turn into
+    process_finalized_turn, which rewrites the editable documents. After Send the
+    vendor reads the very same brief, so a chat turn must be blocked too — the
+    PATCH gate alone left this hole open. Returns 409 once a vendor project is at
+    RFP, and the turn runner is never invoked."""
+    brief = Brief.objects.create(client=client_profile, conversation_status="finalized")
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Original</p>"
+    )
+    owner = User.objects.create_user(
+        email="chat-after-send-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="Chat After Send Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn"
+    ) as runner_mock:
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "rewrite the brief after send"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert resp.status_code == 409
+    runner_mock.assert_not_called()
+    # No user message was persisted for the rejected turn.
+    assert not ChatMessage.objects.filter(brief=brief, role="user").exists()
+
+
+@pytest.mark.django_db
+def test_anon_client_cannot_chat_after_send(api_client, seeded_prompts):
+    """BE-CHAT-AFTER-SEND-EDIT (anon): the anonymous token survives Send (cleared
+    only on claim), so an anonymous chat turn after Send would silently tamper
+    with the document the vendor already reads. Must 409 once a vendor project is
+    at RFP, without running the turn."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="chat-after-send-token",
+        conversation_status="finalized",
+        document_language="en",
+        source="personal_link",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>Original</p>"
+    )
+    owner = User.objects.create_user(
+        email="anon-chat-after-send-vendor@example.com",
+        password="p@ssw0rd",
+        group="VENDOR",
+    )
+    vendor = Vendor.objects.create(name="Anon Chat After Send Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn"
+    ) as runner_mock:
+        resp = api_client.post(
+            reverse("projects_api:public_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "rewrite the brief after send"}),
+            content_type="application/json",
+            **_public_headers("chat-after-send-token"),
+        )
+
+    assert resp.status_code == 409
+    runner_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_chat_resets_finalize_failed_before_send(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """R11-1: a failed finalize-on-ready set finalize_failed, and only Send ever
+    cleared it, so the GET-driven dispatch refused to retry forever — the
+    "send a message to retry" hint was a lie. An explicit chat message on a
+    not-yet-sent brief with no documents now resets the flag so the next
+    final-documents GET re-dispatches finalize without emailing the vendor."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="ready_to_finalize",
+        finalize_failed=True,
+    )
+
+    fake_result = {
+        "reply": "retrying",
+        "ready_to_finalize": True,
+        "conversation_status": "ready_to_finalize",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_brief_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "please try again"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.finalize_failed is False
+
+
+@pytest.mark.django_db
+def test_chat_does_not_reset_finalize_failed_after_send(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """R11-1 ordering: the post-Send gate has priority. Once the brief is sent the
+    chat is locked (409) and finalize_failed is never reset, so the retry path
+    can only run before Send."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        finalize_failed=True,
+    )
+    owner = User.objects.create_user(
+        email="r11-1-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="R11-1 Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn"
+    ) as runner_mock:
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "retry please"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert resp.status_code == 409
+    runner_mock.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+
+
+@pytest.mark.django_db
+def test_anon_chat_resets_finalize_failed_before_send(api_client, seeded_prompts):
+    """R11-1 (anon branded flow): the anonymous client polls final-documents,
+    which dispatches finalize-on-ready. A failed finalize stranded the flow; an
+    explicit anon chat message before Send resets finalize_failed so the next GET
+    re-dispatches."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="r11-1-anon-token",
+        conversation_status="ready_to_finalize",
+        document_language="en",
+        source="personal_link",
+        finalize_failed=True,
+    )
+
+    fake_result = {
+        "reply": "retrying",
+        "ready_to_finalize": True,
+        "conversation_status": "ready_to_finalize",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_brief_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:public_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "please try again"}),
+            content_type="application/json",
+            **_public_headers("r11-1-anon-token"),
+        )
+
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.finalize_failed is False
+
+
+@pytest.mark.django_db
+def test_chat_does_not_reset_finalize_failed_when_documents_exist(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """R11-1 guard: the retry-reset only applies when the brief has no documents.
+    If documents already exist the finalize succeeded, so the flag must stay as-is
+    and a normal finalized chat turn runs."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+        finalize_failed=True,
+    )
+    production = BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>brief</p>"
+    )
+
+    fake_result = {
+        "reply": "edited",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": "en",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+        "updated_documents": [production],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "tweak it"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+
+    assert resp.status_code == 200
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+
+
+@pytest.mark.django_db
 def test_show_cost_flag(
     api_client, client_user, client_profile, settings, seeded_prompts
 ):
