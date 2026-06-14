@@ -439,6 +439,14 @@ def send_emails_task(
     # pending_task_id check (concurrency, Celery redelivery): stamp emails_sent_at
     # under a row lock and bail out if another run already did so. Without it the
     # client and vendor would each receive two emails.
+    #
+    # SF-9/SF-10: the BriefShare (whose token goes into the email) is created in
+    # the SAME transaction that stamps emails_sent_at. Previously it was created
+    # after the block, so a crash between committing the marker and creating the
+    # share left the brief flagged "emails sent" with no share — and the retry,
+    # seeing emails_sent_at set, bailed without ever creating the share or sending
+    # the email. Binding the share to the marker keeps them consistent: either both
+    # commit or neither does, and a retry that bails knows the share already exists.
     with transaction.atomic():
         project = (
             Project.objects.select_for_update()
@@ -452,10 +460,9 @@ def send_emails_task(
         if project.emails_sent_at is not None:
             logger.info("send_emails: already sent brief=%s, skipping", brief_id)
             return {"ok": True, "alreadySent": True}
+        share, _created = BriefShare.objects.get_or_create(brief=brief)
         project.emails_sent_at = timezone.now()
         project.save(update_fields=["emails_sent_at", "updated_at"])
-
-    share, _created = BriefShare.objects.get_or_create(brief=brief)
 
     if recipient_email:
         try:
