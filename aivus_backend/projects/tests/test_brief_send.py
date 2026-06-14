@@ -979,6 +979,59 @@ def test_send_emails_task_has_no_autoretry(vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_response_uniform_regardless_of_account(api_client, vendor):
+    """S2-R10/PRD §10: the Send response must not leak whether the recipient email
+    already has an account. The same vendor receives two Sends on two briefs, one
+    to an email that has a CLIENT account and one to an email that has none; the
+    status code and the response body shape must be identical (anti-enumeration).
+    """
+    User.objects.create_user(
+        email="has-account@example.com",
+        password="p@ssw0rd",
+        name="Existing",
+        group="CLIENT",
+    )
+
+    def _make_brief(token: str) -> Brief:
+        brief = Brief.objects.create(
+            client=None,
+            anonymous_token=token,
+            conversation_status="ready_to_finalize",
+            source="personal_link",
+        )
+        Project.objects.create(
+            vendor=vendor, brief=brief, name="lead", status=ProjectStatus.DRAFT
+        )
+        return brief
+
+    def _send(brief: Brief, email: str):
+        with (
+            patch(
+                "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+                side_effect=_run_on_commit,
+            ),
+            patch("aivus_backend.projects.api.views_brief_v3.chain"),
+        ):
+            return api_client.post(
+                reverse("projects_api:public_brief_ai_send", args=[brief.id]),
+                data=json.dumps({"slug": "send-studio", "email": email}),
+                content_type="application/json",
+                HTTP_X_BRIEF_TOKEN=brief.anonymous_token,
+            )
+
+    with_account = _send(_make_brief("enum-tok-1"), "has-account@example.com")
+    without_account = _send(_make_brief("enum-tok-2"), "no-account@example.com")
+
+    assert with_account.status_code == without_account.status_code == 200
+    body_with = with_account.json()
+    body_without = without_account.json()
+    # Identical key set and identical ok flag; the only differing value is the
+    # random finalizingTaskId, which carries no account information.
+    assert set(body_with) == set(body_without) == {"ok", "finalizingTaskId"}
+    assert body_with["ok"] is body_without["ok"] is True
+
+
+@pytest.mark.django_db
 def test_send_wires_failure_link_error(api_client, vendor, anon_brief):
     """The Send chain's link_error must point at mark_brief_send_failed_task so a
     chain failure is recorded, not silently cleared into a "done" status."""
