@@ -322,7 +322,7 @@ def projects_archived(request):
             vendor_id=vendor_id,
             deleted_at__isnull=False,
         )
-        .select_related("client")
+        .select_related("client", "brief")
         .prefetch_related("collaborators", "client_managers")
     )
     return JsonResponse([serialize_project(p) for p in projects], safe=False)
