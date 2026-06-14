@@ -227,39 +227,69 @@ def test_slug_suggest_endpoint(api_client, vendor_user):
 
 
 @pytest.mark.django_db
-def test_slug_suggest_is_rate_limited():
-    """The slug suggestion endpoint calls the LLM, so it must be rate limited.
+def test_slug_suggest_is_rate_limited_per_vendor(api_client, vendor_user):
+    """MF-1: the LLM-backed slug-suggest endpoint must throttle per vendor.
 
-    Rate limiting is disabled in the default test settings, so the production
-    decorator is a no-op here. We rebuild the same conditional_ratelimit stack
-    with a 1/h user rate to confirm it blocks the second request. The cache is
-    cleared so the limiter starts fresh.
+    The HMAC middleware never sets request.user, so django-ratelimit's key="user"
+    collapsed every vendor into one AnonymousUser bucket. The fix keys on the
+    resolved vendor.id. With the real 20/h limit the 21st call from the same
+    vendor must return 429.
     """
     from django.core.cache import cache
-    from django.test import RequestFactory
     from django.test import override_settings
-    from django_ratelimit.exceptions import Ratelimited
 
-    from aivus_backend.core.decorators import conditional_ratelimit
+    user, _vendor = vendor_user
+    cache.clear()
+
+    with (
+        override_settings(RATELIMIT_ENABLE=True),
+        patch(
+            "aivus_backend.users.slug_suggest._llm_candidate",
+            return_value="suggested-one",
+        ),
+    ):
+        for _ in range(20):
+            ok = api_client.get(reverse("vendor-slug-suggest"), **_auth(user))
+            assert ok.status_code == 200
+        blocked = api_client.get(reverse("vendor-slug-suggest"), **_auth(user))
+
+    assert blocked.status_code == 429
+
+
+@pytest.mark.django_db
+def test_slug_suggest_rate_limit_isolated_between_vendors(api_client, vendor_user):
+    """MF-1: one vendor hitting the slug-suggest limit must not silence another.
+
+    Before the fix a single AnonymousUser bucket was shared, so the first vendor
+    to exhaust it locked out everyone. Keying on vendor.id gives each vendor its
+    own bucket: vendor A maxed out still leaves vendor B at 200.
+    """
+    from django.core.cache import cache
+    from django.test import override_settings
+
+    user_a, _vendor_a = vendor_user
+    other_user = User.objects.create_user(
+        email="vendor-slug-b@example.com",
+        password="p@ssw0rd",
+        name="Vendor B Owner",
+        group="VENDOR",
+    )
+    Vendor.objects.create(name="Second Studio", owner=other_user)
 
     cache.clear()
-    factory = RequestFactory()
+    with (
+        override_settings(RATELIMIT_ENABLE=True),
+        patch(
+            "aivus_backend.users.slug_suggest._llm_candidate",
+            return_value="suggested-one",
+        ),
+    ):
+        for _ in range(21):
+            api_client.get(reverse("vendor-slug-suggest"), **_auth(user_a))
+        # Vendor A is now throttled; vendor B's first request must still pass.
+        b_first = api_client.get(reverse("vendor-slug-suggest"), **_auth(other_user))
 
-    with override_settings(RATELIMIT_ENABLE=True):
-
-        @conditional_ratelimit(key="ip", rate="1/h", method="GET", block=True)
-        def _view(request):
-            from django.http import JsonResponse
-
-            return JsonResponse({"ok": True})
-
-        def _call():
-            return _view(factory.get("/api/v1/users/vendor/slug/suggest"))
-
-        first = _call()
-        assert first.status_code == 200
-        with pytest.raises(Ratelimited):
-            _call()
+    assert b_first.status_code == 200
 
 
 @pytest.mark.django_db

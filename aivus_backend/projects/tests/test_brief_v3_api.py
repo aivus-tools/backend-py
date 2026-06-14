@@ -168,6 +168,44 @@ def test_client_ip_ratelimit_key_falls_back_to_remote_addr():
 
 
 # ----------------------------------------------------------------------------
+# user_ratelimit_key (MF-1): per-user buckets under the HMAC middleware
+# ----------------------------------------------------------------------------
+
+
+def test_user_ratelimit_key_distinguishes_users():
+    """MF-1: the HMAC middleware sets only request.user_data, never request.user,
+    so the built-in key="user" lumped everyone into one AnonymousUser bucket.
+    The replacement key reads the real user id, so two users get distinct keys."""
+    from django.test import RequestFactory
+
+    from aivus_backend.projects.api.views_brief_v3 import user_ratelimit_key
+
+    request_a = RequestFactory().post("/")
+    request_a.user_data = {"id": "user-a"}  # type: ignore[attr-defined]
+    request_b = RequestFactory().post("/")
+    request_b.user_data = {"id": "user-b"}  # type: ignore[attr-defined]
+
+    key_a = user_ratelimit_key("g", request_a)
+    key_b = user_ratelimit_key("g", request_b)
+    assert key_a != key_b
+    assert key_a == "user:user-a"
+
+
+def test_user_ratelimit_key_falls_back_to_ip_without_user():
+    """MF-1: with no user context the key must not collapse to one shared bucket;
+    it falls back to the trusted client IP so the limit never disappears."""
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import user_ratelimit_key
+
+    request = RequestFactory().post("/")
+    request.META["REMOTE_ADDR"] = "203.0.113.50"
+    with override_settings(RATELIMIT_TRUSTED_PROXY_COUNT=0):
+        assert user_ratelimit_key("g", request) == "ip:203.0.113.50"
+
+
+# ----------------------------------------------------------------------------
 # Draft / start / chat
 # ----------------------------------------------------------------------------
 

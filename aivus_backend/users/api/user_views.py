@@ -12,7 +12,6 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
 from aivus_backend.core.slugs import normalize_slug
@@ -579,7 +578,6 @@ def vendor_settings_logo(request):
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("VENDOR", "SYSTEM")
-@conditional_ratelimit(key="user", rate="20/h", method="GET")
 def vendor_slug_suggest(request):
     user_data = request.user_data
     user_id = user_data.get("id")
@@ -592,6 +590,13 @@ def vendor_slug_suggest(request):
     vendor = Vendor.objects.filter(owner=user).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    # This endpoint hits a paid LLM, so it must be rate-limited per vendor. The
+    # built-in key="user" is broken under the HMAC middleware (it never sets
+    # request.user, so every caller shares one AnonymousUser bucket). Key on the
+    # resolved vendor.id instead — the limit is the vendor's, not a global one.
+    if _vendor_ratelimited(request, vendor, "vendor_slug_suggest", "20/h", "GET"):
+        return JsonResponse({"error": "Too many requests"}, status=429)
 
     settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
     slug = suggest_slug(settings, use_llm=True)
@@ -654,6 +659,30 @@ def _vendor_for_request(request):
     if not user:
         return None
     return Vendor.objects.filter(owner=user).first()
+
+
+def _vendor_ratelimited(request, vendor, group: str, rate: str, method: str) -> bool:
+    """Per-vendor.id rate-limit check used after the vendor is resolved.
+
+    Mirrors projects.api.views_brief_v3._vendor_ratelimited: the HMAC middleware
+    never sets request.user, so django-ratelimit's key="user" is broken; key on
+    the resolved vendor.id instead. Disabled together with RATELIMIT_ENABLE so
+    tests and local dev stay a no-op.
+    """
+    from django.conf import settings as django_settings  # noqa: PLC0415
+
+    if not getattr(django_settings, "RATELIMIT_ENABLE", True):
+        return False
+    from django_ratelimit.core import is_ratelimited  # noqa: PLC0415
+
+    return is_ratelimited(
+        request=request,
+        group=group,
+        key=lambda *_args: str(vendor.id),
+        rate=rate,
+        method=method,
+        increment=True,
+    )
 
 
 def _build_webhook_key_response(key_row):

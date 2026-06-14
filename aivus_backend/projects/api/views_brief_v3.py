@@ -142,6 +142,24 @@ def client_ip_ratelimit_key(group, request) -> str:
     return resolve_client_ip(request)
 
 
+def user_ratelimit_key(group, request) -> str:
+    """Rate-limit key keyed on the authenticated user.
+
+    django-ratelimit's built-in ``key="user"`` reads ``request.user.pk``, but the
+    HMAC middleware authenticates API requests by setting only ``request.user_data``
+    and never ``request.user`` (it stays AnonymousUser with ``pk=None``). Built-in
+    ``key="user"`` therefore collapses every authenticated caller into one shared
+    bucket — a single user exhausts the limit for everyone, including endpoints
+    that hit a paid LLM. This callable keys on the real user id from
+    ``request.user_data`` instead, falling back to the trusted client IP when the
+    request somehow lacks user context so the limit never silently disappears.
+    """
+    user_id = (getattr(request, "user_data", None) or {}).get("id")
+    if user_id:
+        return f"user:{user_id}"
+    return f"ip:{resolve_client_ip(request)}"
+
+
 def _parse_json_body(request):
     try:
         return json.loads(request.body), None
@@ -1110,7 +1128,7 @@ def client_brief_ai_final_documents(request, brief_id):
 @csrf_exempt
 @require_http_methods(["PATCH"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="60/m", method="PATCH")
+@conditional_ratelimit(key=user_ratelimit_key, rate="60/m", method="PATCH")
 def client_brief_ai_final_document_update(request, brief_id, document_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -2213,7 +2231,7 @@ def public_brief_ai_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/h", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/h", method="POST")
 def client_brief_ai_send(request, brief_id):
     """Authenticated Send: attach the brief to the chosen vendor as a project.
 
