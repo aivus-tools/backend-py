@@ -45,7 +45,7 @@ services:
       - "8025:8025"
 
   redis:
-    image: docker.io/redis:7.2
+    image: docker.io/redis:8.6
     container_name: aivus_backend_local_redis
     volumes:
       - aivus_backend_local_redis_data:/data
