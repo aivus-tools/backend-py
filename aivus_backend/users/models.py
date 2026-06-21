@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from typing import ClassVar
 
@@ -63,6 +64,8 @@ class User(AbstractUser):
     pending_brief_token = models.CharField(  # noqa: DJ001
         max_length=64, null=True, blank=True
     )
+
+    email_confirmed_at = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
@@ -292,6 +295,14 @@ class VendorSettings(models.Model):
     logo = models.ImageField(upload_to="vendor_logos/", null=True, blank=True)
     company_name = models.CharField(max_length=255, blank=True, default="")
     agency_name = models.CharField(max_length=255, blank=True, default="")
+    slug = models.SlugField(
+        max_length=40,
+        unique=True,
+        db_index=True,
+        null=True,
+        blank=True,
+    )
+    lead_notification_email = models.EmailField(blank=True, default="")
     fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
@@ -316,6 +327,49 @@ class VendorSettings(models.Model):
         return f"Settings for {self.vendor.name}"
 
 
+def generate_webhook_key() -> str:
+    return secrets.token_urlsafe(32)
+
+
+class VendorWebhookKey(models.Model):
+    """Per-vendor secret for the inbound webhook lead endpoint.
+
+    Distinct from the global Wix secret. One active key per vendor; rotation
+    replaces the key immediately so the old value stops working at once.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.OneToOneField(
+        Vendor,
+        on_delete=models.CASCADE,
+        related_name="webhook_key",
+    )
+    key = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        default=generate_webhook_key,
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    rotated_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "vendor_webhook_key"
+
+    def __str__(self):
+        state = "active" if self.is_active else "inactive"
+        return f"Webhook key for {self.vendor_id} ({state})"
+
+    def rotate(self):
+        self.key = generate_webhook_key()
+        self.is_active = True
+        self.rotated_at = timezone.now()
+        self.revoked_at = None
+        self.save(update_fields=["key", "is_active", "rotated_at", "revoked_at"])
+
+
 # Import AuthToken to make it visible to Django migrations
 from .tokens import AuthToken  # noqa: E402
 from .tokens import TokenType  # noqa: E402
@@ -330,4 +384,5 @@ __all__ = [
     "UserTeam",
     "Vendor",
     "VendorSettings",
+    "VendorWebhookKey",
 ]

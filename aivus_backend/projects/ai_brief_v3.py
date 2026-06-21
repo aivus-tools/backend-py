@@ -25,6 +25,7 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 
+from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.llm import FALLBACK_CHAIN
 from aivus_backend.core.llm import LLMResponse
 from aivus_backend.core.llm import call_llm
@@ -156,7 +157,43 @@ def _build_language_rule(doc_language: str) -> str:
     return rule
 
 
-def _build_auth_rule(*, is_anonymous: bool, is_finalized: bool) -> str:
+def _build_auth_rule(
+    *, is_anonymous: bool, is_finalized: bool, source: str = BriefSource.DIRECT
+) -> str:
+    if is_anonymous and source == BriefSource.PERSONAL_LINK:
+        # Branded personal-link flow: there is no sign-up before Send. The
+        # anonymous client reviews the document and presses "Send brief", so the
+        # AI must point at the document and that button, never at registration.
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user is browsing anonymously through a vendor's branded brief\n"
+            "link. There is NO account step before sending — never tell the user\n"
+            "to create an account, log in, or join. When the brief is ready,\n"
+            "briefly tell them the brief is ready and to review it: the document\n"
+            "is on the left on desktop, or in the Brief tab on mobile. Invite\n"
+            "them to tweak it here in chat if anything needs changing, then press\n"
+            "the 'Send brief' button to send it to the vendor. Do NOT reveal the\n"
+            "contents of the future brief in chat: no excerpts, no field values,\n"
+            "no preview of the production brief, vendor email, or deliverables\n"
+            "checklist.\n"
+        )
+    if is_anonymous and source == BriefSource.WEBHOOK:
+        # Inbound webhook lead: the form was already auto-submitted to the vendor,
+        # so there is no "Send brief" button and no sign-up step. The chat only
+        # lets the lead clarify or refine details, which reach the vendor through
+        # the same already-delivered brief.
+        return (
+            "=== USER AUTH CONTEXT ===\n"
+            "The user submitted an inquiry through a vendor's website form and is\n"
+            "now chatting anonymously. Their request has ALREADY been sent to the\n"
+            "vendor — there is no button to press and no account step. Never tell\n"
+            "the user to create an account, finalize, or click any button. When\n"
+            "the brief is ready, briefly tell them their request has been received\n"
+            "by the vendor and invite them to add or clarify any details here in\n"
+            "chat. Do NOT reveal the contents of the future brief in chat: no\n"
+            "excerpts, no field values, no preview of the production brief, vendor\n"
+            "email, or deliverables checklist.\n"
+        )
     if is_anonymous:
         return (
             "=== USER AUTH CONTEXT ===\n"
@@ -446,6 +483,7 @@ def process_brief_turn(
         auth_rule=_build_auth_rule(
             is_anonymous=brief.client_id is None,
             is_finalized=brief.conversation_status == "finalized",
+            source=brief.source,
         ),
         date_rule=_build_date_rule(),
     )
@@ -572,6 +610,19 @@ FINALIZED_EDIT_MAX_TOKENS = 4000
 FINALIZED_EDIT_TEMPERATURE = 0.3
 
 _EDITABLE_DOCUMENTS = {"production_brief", "vendor_email"}
+# Document kinds an anonymous (not-yet-authenticated) brief may edit. The
+# vendor outreach email carries the client's outreach strategy and contacts —
+# owner-only PII (enums.py CLIENT_FACING_DOCUMENT_KINDS, PRD §5). For anonymous
+# briefs it is excluded entirely from the LLM context (prompt and reply), so a
+# prompt-injection jailbreak cannot exfiltrate it.
+_ANON_EDITABLE_DOCUMENTS = {"production_brief"}
+
+
+def _editable_kinds_for_brief(brief: Brief) -> set[str]:
+    if brief.client_id is None:
+        return set(_ANON_EDITABLE_DOCUMENTS)
+    return set(_EDITABLE_DOCUMENTS)
+
 
 _FINALIZED_EDIT_INSTRUCTIONS_EN = """
 === POST-FINALIZE EDIT MODE ===
@@ -633,9 +684,14 @@ def _build_finalized_edit_rule(doc_language: str) -> str:
     return _FINALIZED_EDIT_INSTRUCTIONS_EN
 
 
-def _current_documents_block(documents: dict[str, BriefFinalDocument]) -> str:
+def _current_documents_block(
+    documents: dict[str, BriefFinalDocument],
+    editable_kinds: set[str],
+) -> str:
     chunks = ["<CURRENT_DOCUMENTS>"]
     for kind in ("production_brief", "vendor_email"):
+        if kind not in editable_kinds:
+            continue
         doc = documents.get(kind)
         html = (doc.html if doc else "") or ""
         chunks.append(f'<DOC kind="{kind}">')
@@ -684,6 +740,7 @@ def _apply_rewrite_section(
 def _apply_edits(
     documents: dict[str, BriefFinalDocument],
     edits: list[dict[str, Any]],
+    editable_kinds: set[str],
 ) -> list[BriefFinalDocument]:
     """Apply edits to the in-memory document objects. Returns the list of
     documents whose html actually changed, in stable order."""
@@ -693,7 +750,7 @@ def _apply_edits(
             continue
         document_kind = str(edit.get("document") or "").strip()
         tool = str(edit.get("tool") or "").strip()
-        if document_kind not in _EDITABLE_DOCUMENTS:
+        if document_kind not in editable_kinds:
             continue
         document = documents.get(document_kind)
         if document is None:
@@ -728,6 +785,7 @@ def process_finalized_turn(
     user_message: str,
     attachments: list[BriefAttachment] | None = None,
     history: list[ChatMessage] | None = None,
+    current_document_html: str | None = None,
 ) -> dict[str, Any]:
     attachments = attachments or []
     history = history or []
@@ -748,19 +806,32 @@ def process_finalized_turn(
         auth_rule=_build_auth_rule(
             is_anonymous=brief.client_id is None,
             is_finalized=True,
+            source=brief.source,
         ),
         date_rule=_build_date_rule(),
     )
     edit_rule = _build_finalized_edit_rule(doc_language)
     system_prompt = f"{base_system_prompt}\n\n{edit_rule}"
 
+    editable_kinds = _editable_kinds_for_brief(brief)
     document_qs = BriefFinalDocument.objects.filter(
-        brief=brief, kind__in=list(_EDITABLE_DOCUMENTS)
+        brief=brief, kind__in=list(editable_kinds)
     )
     documents: dict[str, BriefFinalDocument] = {doc.kind: doc for doc in document_qs}
 
+    # Honour the client's in-flight manual edits to the production brief: the
+    # editor sends the live document HTML with the chat message, which may be
+    # ahead of the persisted version. Seed it onto the in-memory document so the
+    # AI reads (and edits on top of) exactly what the client sees.
+    if current_document_html is not None:
+        production = documents.get("production_brief")
+        if production is not None:
+            production.html = sanitize_html(current_document_html)
+
     user_parts = _build_user_parts(user_message, attachments)
-    user_parts.append({"type": "text", "text": _current_documents_block(documents)})
+    user_parts.append(
+        {"type": "text", "text": _current_documents_block(documents, editable_kinds)}
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -798,7 +869,7 @@ def process_finalized_turn(
     if not isinstance(raw_edits, list):
         raw_edits = []
 
-    updated_documents = _apply_edits(documents, raw_edits)
+    updated_documents = _apply_edits(documents, raw_edits, editable_kinds)
     for document in updated_documents:
         document.plain_text = _strip_html(document.html)
         document.save(update_fields=["html", "plain_text", "updated_at"])

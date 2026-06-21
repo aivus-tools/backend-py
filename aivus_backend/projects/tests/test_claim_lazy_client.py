@@ -1,0 +1,287 @@
+"""Tests for lazy Client creation on brief claim (Stage 2 S2-14)."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+from django.conf import settings as django_settings
+from django.test import Client as DjangoTestClient
+from django.urls import reverse
+
+from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import Project
+from aivus_backend.users.api.auth_views import _try_claim_pending_brief
+from aivus_backend.users.models import Client as ClientModel
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
+
+
+@pytest.fixture
+def lead_vendor(db):
+    owner = User.objects.create_user(
+        email="lead-vendor@example.com",
+        password="p@ssw0rd",
+        name="Lead Vendor",
+        group="VENDOR",
+    )
+    return Vendor.objects.create(name="Lead Studio", owner=owner)
+
+
+@pytest.fixture
+def api_client() -> DjangoTestClient:
+    return DjangoTestClient()
+
+
+@pytest.mark.django_db
+def test_claim_endpoint_creates_client_lazily_without_group_change(api_client):
+    user = User.objects.create_user(
+        email="lead-claimer@example.com",
+        password="p@ssw0rd",
+        name="Lead Claimer",
+        group="CLIENT",
+    )
+    assert not ClientModel.objects.filter(owner=user).exists()
+
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="claim-lazy-token",
+        contact_email="lead-claimer@example.com",
+        source="personal_link",
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="claim-lazy-token",
+        )
+
+    assert response.status_code == 200
+    client = ClientModel.objects.get(owner=user)
+    brief.refresh_from_db()
+    assert brief.client_id == client.id
+    assert brief.contact_email == "lead-claimer@example.com"
+    user.refresh_from_db()
+    assert user.group == "CLIENT"
+
+
+@pytest.mark.django_db
+def test_claim_rejects_email_mismatch_403(api_client):
+    user = User.objects.create_user(
+        email="attacker@example.com",
+        password="p@ssw0rd",
+        name="Attacker",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="mismatch-token",
+        contact_email="victim@example.com",
+        source="personal_link",
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="mismatch-token",
+        )
+
+    assert response.status_code == 403
+    brief.refresh_from_db()
+    assert brief.client_id is None
+    assert brief.anonymous_token == "mismatch-token"
+    assert not ClientModel.objects.filter(owner=user).exists()
+
+
+@pytest.mark.django_db
+def test_claim_allows_email_match_case_insensitive(api_client):
+    user = User.objects.create_user(
+        email="owner@example.com",
+        password="p@ssw0rd",
+        name="Owner",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="match-token",
+        contact_email="Owner@Example.com",
+        source="personal_link",
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="match-token",
+        )
+
+    assert response.status_code == 200
+    client = ClientModel.objects.get(owner=user)
+    brief.refresh_from_db()
+    assert brief.client_id == client.id
+
+
+@pytest.mark.django_db
+def test_try_claim_pending_brief_creates_client_without_group_change():
+    user = User.objects.create_user(
+        email="pending-claimer@example.com",
+        password="p@ssw0rd",
+        name="Pending Claimer",
+        group="CONFIRMED",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="pending-token",
+        source="personal_link",
+    )
+    ChatMessage.objects.create(
+        brief=brief,
+        user=None,
+        anonymous_token="pending-token",
+        role="user",
+        content="hi",
+    )
+    user.pending_brief_id = brief.id
+    user.pending_brief_token = "pending-token"
+    user.save(update_fields=["pending_brief_id", "pending_brief_token"])
+
+    claimed = _try_claim_pending_brief(user)
+
+    assert claimed == str(brief.id)
+    client = ClientModel.objects.get(owner=user)
+    brief.refresh_from_db()
+    assert brief.client_id == client.id
+    user.refresh_from_db()
+    assert user.group == "CONFIRMED"
+
+
+@pytest.mark.django_db
+def test_claim_endpoint_backfills_client_on_lead_projects(api_client, lead_vendor):
+    """MF-3: claiming a brief via the endpoint must also link the now-registered
+    client onto the anonymous lead projects created on Send (client=None)."""
+    user = User.objects.create_user(
+        email="lead-claimer@example.com",
+        password="p@ssw0rd",
+        name="Lead Claimer",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="backfill-token",
+        contact_email="lead-claimer@example.com",
+        source="personal_link",
+    )
+    project = Project.objects.create(
+        vendor=lead_vendor,
+        brief=brief,
+        client=None,
+        name="anon lead",
+        status=ProjectStatus.RFP,
+    )
+
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="backfill-token",
+        )
+
+    assert response.status_code == 200
+    client = ClientModel.objects.get(owner=user)
+    project.refresh_from_db()
+    assert project.client_id == client.id
+
+
+@pytest.mark.django_db
+def test_pending_brief_claim_backfills_client_on_lead_projects(lead_vendor):
+    """MF-3: the registration/login pending-brief claim must also backfill the
+    client onto anonymous lead projects."""
+    user = User.objects.create_user(
+        email="pending-backfill@example.com",
+        password="p@ssw0rd",
+        name="Pending Backfill",
+        group="CONFIRMED",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="pending-backfill-token",
+        source="personal_link",
+    )
+    ChatMessage.objects.create(
+        brief=brief,
+        user=None,
+        anonymous_token="pending-backfill-token",
+        role="user",
+        content="hi",
+    )
+    project = Project.objects.create(
+        vendor=lead_vendor,
+        brief=brief,
+        client=None,
+        name="anon lead",
+        status=ProjectStatus.RFP,
+    )
+    user.pending_brief_id = brief.id
+    user.pending_brief_token = "pending-backfill-token"
+    user.save(update_fields=["pending_brief_id", "pending_brief_token"])
+
+    claimed = _try_claim_pending_brief(user)
+
+    assert claimed == str(brief.id)
+    client = ClientModel.objects.get(owner=user)
+    project.refresh_from_db()
+    assert project.client_id == client.id
+
+
+@pytest.mark.django_db
+def test_claim_does_not_dispatch_second_finalize_when_already_pending(api_client):
+    """BE-R15-1: claiming a brief while an anonymous finalize-on-ready is already
+    in flight (pending_task_id set) must not dispatch a second finalize. A double
+    dispatch would race the first chain through generate_final_documents (which
+    delete+recreates the documents) and burn a duplicate paid LLM call."""
+    user = User.objects.create_user(
+        email="race-claimer@example.com",
+        password="p@ssw0rd",
+        name="Race Claimer",
+        group="CLIENT",
+    )
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="race-token",
+        contact_email="race-claimer@example.com",
+        source="personal_link",
+        conversation_status="ready_to_finalize",
+        pending_task_id="inflight-anon-finalize",
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_task:
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_claim", args=[brief.id]),
+            HTTP_X_API_KEY=django_settings.API_KEY,
+            HTTP_X_USER_ID=str(user.id),
+            HTTP_X_USER_GROUP=user.group,
+            HTTP_X_BRIEF_TOKEN="race-token",
+        )
+
+    assert response.status_code == 200
+    finalize_task.apply_async.assert_not_called()
+    payload = response.json()
+    assert "finalizingTaskId" not in payload
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "inflight-anon-finalize"
+    client = ClientModel.objects.get(owner=user)
+    assert brief.client_id == client.id

@@ -209,6 +209,34 @@ class TestProjectsAPI:
         assert len(data) >= 1
         assert data[0]["name"] == "Existing Project"
 
+    def test_projects_list_no_n_plus_one_on_brief(
+        self, api_client, vendor_user, vendor, django_assert_max_num_queries
+    ):
+        """Listing brief-bearing projects must not run a query per project.brief.
+
+        serialize_project reads project.brief; without select_related("brief")
+        the query count grows with the number of projects. The list query stays
+        constant whether there are two briefs or five.
+        """
+        for i in range(5):
+            brief = Brief.objects.create(
+                status="DRAFT",
+                conversation_status="ready_to_finalize",
+                contact_email=f"lead{i}@example.com",
+            )
+            Project.objects.create(
+                name=f"Lead {i}", vendor=vendor, brief=brief, status="DRAFT"
+            )
+        headers = _vendor_headers(vendor_user, vendor.id)
+
+        with django_assert_max_num_queries(8):
+            response = api_client.get("/api/v1/projects", **headers)
+
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert len(data) == 5
+        assert all(row["hasContactEmail"] for row in data)
+
     def test_create_project(self, api_client, vendor_user, vendor):
         """POST /projects should create a new project."""
         headers = _auth_headers(vendor_user, "VENDOR")
@@ -441,6 +469,44 @@ class TestProjectsAPI:
             **headers,
         )
         assert response.status_code == 403
+
+    def test_create_project_duplicate_active_brief_link_returns_409(
+        self, api_client, vendor_user, vendor
+    ):
+        """MF-7: a second active project for the same vendor+brief hits
+        uniq_active_project_per_vendor_brief and must return 409, not 500."""
+        anon_brief = Brief.objects.create(
+            status="DRAFT",
+            details={},
+            client=None,
+            anonymous_token="dup-link-tok",
+        )
+        Project.objects.create(
+            name="First project",
+            vendor=vendor,
+            brief=anon_brief,
+            status="DRAFT",
+        )
+
+        headers = _vendor_headers(vendor_user, vendor.id)
+        payload = {
+            "vendorId": str(vendor.id),
+            "name": "Second project same brief",
+            "briefId": str(anon_brief.id),
+        }
+        response = api_client.post(
+            "/api/v1/projects",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+        assert response.status_code == 409
+        assert (
+            Project.objects.filter(
+                vendor=vendor, brief=anon_brief, deleted_at__isnull=True
+            ).count()
+            == 1
+        )
 
     def test_get_nonexistent_project(self, api_client, vendor_user, vendor):
         """GET /projects/<random-uuid> should return 404."""

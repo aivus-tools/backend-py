@@ -37,12 +37,41 @@ CACHES = {
             "IGNORE_EXCEPTIONS": True,
         },
     },
+    # SF-4: a dedicated cache for rate limiting that must NOT swallow Redis
+    # errors. The default cache uses IGNORE_EXCEPTIONS=True so a transient Redis
+    # outage degrades gracefully for ordinary caching — but django-ratelimit
+    # counts in whatever cache RATELIMIT_USE_CACHE names, and with swallowed
+    # errors the counters silently stop incrementing, so every limit fails OPEN
+    # (unlimited traffic, including the paid-LLM endpoints) exactly when Redis is
+    # down. This alias keeps IGNORE_EXCEPTIONS off so a cache error propagates and
+    # RATELIMIT_FAIL_OPEN=False turns it into a denied request — rate limiting
+    # fails CLOSED instead.
+    "ratelimit": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": False,
+        },
+    },
 }
+
+# SF-4: point django-ratelimit at the fail-closed cache and refuse the request
+# when the limiter cannot reach Redis, so a Redis outage cannot quietly disable
+# every rate limit.
+RATELIMIT_USE_CACHE = "ratelimit"
+RATELIMIT_FAIL_OPEN = False
 
 # SECURITY
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-proxy-ssl-header
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# Number of trusted reverse-proxy hops in front of Django for rate-limit client
+# IP resolution: client -> Traefik -> Next.js -> Django. Only the right-most
+# entries of X-Forwarded-For added by these hops are trusted; everything to the
+# left is attacker-controlled and ignored. Override per deployment if the chain
+# changes.
+RATELIMIT_TRUSTED_PROXY_COUNT = env.int("RATELIMIT_TRUSTED_PROXY_COUNT", default=2)
 # https://docs.djangoproject.com/en/dev/ref/settings/#secure-ssl-redirect
 SECURE_SSL_REDIRECT = False  # Traefik handles SSL, internal requests are HTTP
 # https://docs.djangoproject.com/en/dev/ref/settings/#session-cookie-secure

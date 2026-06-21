@@ -40,6 +40,15 @@ class BriefStatus(models.TextChoices):
     COMPLETED = "COMPLETED", "Completed"
 
 
+class BriefSource(models.TextChoices):
+    """Where the brief originated from."""
+
+    DIRECT = "direct", "Direct"
+    PERSONAL_LINK = "personal_link", "Personal vendor link"
+    WEBHOOK = "webhook", "Vendor webhook"
+    WIX = "wix", "Wix landing form"
+
+
 class AuthType(models.TextChoices):
     """Authentication type choices."""
 
@@ -92,6 +101,16 @@ class FinalDocumentKind(models.TextChoices):
     PRODUCTION_BRIEF = "production_brief", "Production Brief"
     VENDOR_EMAIL = "vendor_email", "Vendor Outreach Email"
     DELIVERABLES_CHECKLIST = "deliverables_checklist", "Deliverables Checklist"
+
+
+# Document kinds a client may see. The vendor outreach email (kind=vendor_email)
+# carries the vendor's outreach strategy and contacts — vendor PII that is exposed
+# only to the authenticated owner of the brief, never on public share links or
+# their PDFs (PRD §5).
+CLIENT_FACING_DOCUMENT_KINDS = (
+    FinalDocumentKind.PRODUCTION_BRIEF,
+    FinalDocumentKind.DELIVERABLES_CHECKLIST,
+)
 
 
 class BriefPromptSlug(models.TextChoices):

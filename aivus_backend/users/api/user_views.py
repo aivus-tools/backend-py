@@ -6,17 +6,23 @@ from decimal import Decimal
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
+from django.db import IntegrityError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
+from aivus_backend.core.slugs import normalize_slug
+from aivus_backend.core.slugs import validate_slug
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
 from aivus_backend.users.models import UserSettings
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.models import VendorSettings as VendorSettingsModel
+from aivus_backend.users.models import VendorWebhookKey
+from aivus_backend.users.slug_suggest import suggest_slug
 
 MAX_NAME_LENGTH = 255
 MAX_LANGUAGE_LENGTH = 5
@@ -48,16 +54,19 @@ def user_me(request):
             "group": user.group,
             "position": user.position,
             "authType": user.auth_type,
+            "emailConfirmedAt": (
+                user.email_confirmed_at.isoformat() if user.email_confirmed_at else None
+            ),
         }
 
         # Add vendor_id or client_id if applicable
         if user.group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             if vendor:
                 response_data["vendorId"] = str(vendor.id)
 
         if user.group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             if client:
                 response_data["clientId"] = str(client.id)
 
@@ -127,13 +136,19 @@ def change_user_group(request, user_id):  # noqa: C901, PLR0912
         user.save()
 
         # Create Client or Vendor if needed
-        if new_group == "VENDOR" and not Vendor.objects.filter(owner=user).exists():
+        if (
+            new_group == "VENDOR"
+            and not Vendor.objects.filter(owner=user, deleted_at__isnull=True).exists()
+        ):
             Vendor.objects.create(
                 name=f"{user.name}'s Agency",
                 owner=user,
             )
 
-        if new_group == "CLIENT" and not Client.objects.filter(owner=user).exists():
+        if (
+            new_group == "CLIENT"
+            and not Client.objects.filter(owner=user, deleted_at__isnull=True).exists()
+        ):
             Client.objects.create(
                 name=f"{user.name}'s Company",
                 ein="",  # Will be filled later
@@ -149,12 +164,12 @@ def change_user_group(request, user_id):  # noqa: C901, PLR0912
 
         # Add vendor_id or client_id if applicable
         if user.group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             if vendor:
                 response_data["vendorId"] = str(vendor.id)
 
         if user.group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             if client:
                 response_data["clientId"] = str(client.id)
 
@@ -252,12 +267,16 @@ def user_profile(request):  # noqa: C901
         # Update Vendor/Client company name if provided
         if "company" in data:
             if user.group == "VENDOR":
-                vendor = Vendor.objects.filter(owner=user).first()
+                vendor = Vendor.objects.filter(
+                    owner=user, deleted_at__isnull=True
+                ).first()
                 if vendor:
                     vendor.name = data["company"]
                     vendor.save()
             elif user.group == "CLIENT":
-                client = Client.objects.filter(owner=user).first()
+                client = Client.objects.filter(
+                    owner=user, deleted_at__isnull=True
+                ).first()
                 if client:
                     client.name = data["company"]
                     client.save()
@@ -286,13 +305,13 @@ def _build_profile_response(user):
     }
 
     if user.group == "VENDOR":
-        vendor = Vendor.objects.filter(owner=user).first()
+        vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
         if vendor:
             response_data["vendorId"] = str(vendor.id)
             response_data["company"] = vendor.name
 
     if user.group == "CLIENT":
-        client = Client.objects.filter(owner=user).first()
+        client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
         if client:
             response_data["clientId"] = str(client.id)
             response_data["company"] = client.name
@@ -476,7 +495,7 @@ def vendor_settings(request):
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
 
-    vendor = Vendor.objects.filter(owner=user).first()
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
@@ -485,29 +504,50 @@ def vendor_settings(request):
     if request.method == "GET":
         return JsonResponse(_build_vendor_settings_response(settings))
 
+    return _patch_vendor_settings(settings, request)
+
+
+_VENDOR_PERCENT_FIELDS = {
+    "fringesPercent": "fringes_percent",
+    "handlingPercent": "handling_percent",
+    "markupPercent": "markup_percent",
+    "productionInsurancePercent": "production_insurance_percent",
+    "productionFeePercent": "production_fee_percent",
+    "postMarkupPercent": "post_markup_percent",
+    "postInsurancePercent": "post_insurance_percent",
+    "postTaxPercent": "post_tax_percent",
+}
+
+
+def _assign_vendor_settings_fields(settings, data):
+    if "companyName" in data:
+        settings.company_name = data["companyName"]
+    if "agencyName" in data:
+        settings.agency_name = data["agencyName"]
+    if "leadNotificationEmail" in data:
+        error = _apply_lead_notification_email(settings, data)
+        if error:
+            return error
+    if "slug" in data:
+        error = _apply_slug(settings, data)
+        if error:
+            return error
+    for json_key, model_field in _VENDOR_PERCENT_FIELDS.items():
+        if json_key in data:
+            setattr(settings, model_field, Decimal(str(data[json_key])))
+    return None
+
+
+def _patch_vendor_settings(settings, request):
     try:
         data = json.loads(request.body)
-
-        if "companyName" in data:
-            settings.company_name = data["companyName"]
-        if "agencyName" in data:
-            settings.agency_name = data["agencyName"]
-
-        percent_fields_map = {
-            "fringesPercent": "fringes_percent",
-            "handlingPercent": "handling_percent",
-            "markupPercent": "markup_percent",
-            "productionInsurancePercent": "production_insurance_percent",
-            "productionFeePercent": "production_fee_percent",
-            "postMarkupPercent": "post_markup_percent",
-            "postInsurancePercent": "post_insurance_percent",
-            "postTaxPercent": "post_tax_percent",
-        }
-        for json_key, model_field in percent_fields_map.items():
-            if json_key in data:
-                setattr(settings, model_field, Decimal(str(data[json_key])))
-
-        settings.save()
+        error = _assign_vendor_settings_fields(settings, data)
+        if error:
+            return error
+        try:
+            settings.save()
+        except IntegrityError:
+            return JsonResponse({"error": "This link is taken"}, status=409)
         return JsonResponse(_build_vendor_settings_response(settings))
 
     except json.JSONDecodeError:
@@ -529,7 +569,7 @@ def vendor_settings_logo(request):
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
 
-    vendor = Vendor.objects.filter(owner=user).first()
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
@@ -548,6 +588,161 @@ def vendor_settings_logo(request):
     return JsonResponse({"logoUrl": settings.logo.url})
 
 
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_slug_suggest(request):
+    user_data = request.user_data
+    user_id = user_data.get("id")
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
+    if not vendor:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    # This endpoint hits a paid LLM, so it must be rate-limited per vendor. The
+    # built-in key="user" is broken under the HMAC middleware (it never sets
+    # request.user, so every caller shares one AnonymousUser bucket). Key on the
+    # resolved vendor.id instead — the limit is the vendor's, not a global one.
+    if _vendor_ratelimited(request, vendor, "vendor_slug_suggest", "20/h", "GET"):
+        return JsonResponse({"error": "Too many requests"}, status=429)
+
+    settings, _created = VendorSettingsModel.objects.get_or_create(vendor=vendor)
+    slug = suggest_slug(settings, use_llm=True)
+    return JsonResponse({"slug": slug})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_slug_check(request):
+    """Report whether the requested slug is free for this vendor to take.
+
+    Unavailable when the format is invalid, the name is reserved, or another
+    vendor already holds it. The vendor's own current slug counts as available
+    so re-saving an unchanged value does not flip to taken.
+    """
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+
+    raw = normalize_slug(request.GET.get("slug") or "")
+    if validate_slug(raw) is not None:
+        return JsonResponse({"available": False})
+
+    taken = (
+        VendorSettingsModel.objects.filter(slug=raw)
+        .exclude(vendor_id=vendor.id)
+        .exists()
+    )
+    return JsonResponse({"available": not taken})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_webhook_key(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    key_row, _created = VendorWebhookKey.objects.get_or_create(vendor=vendor)
+    return JsonResponse(_build_webhook_key_response(key_row))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_webhook_key_rotate(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    key_row, _created = VendorWebhookKey.objects.get_or_create(vendor=vendor)
+    if not _created:
+        key_row.rotate()
+    return JsonResponse(_build_webhook_key_response(key_row))
+
+
+def _vendor_for_request(request):
+    user_id = request.user_data.get("id")
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    return Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
+
+
+def _vendor_ratelimited(request, vendor, group: str, rate: str, method: str) -> bool:
+    """Per-vendor.id rate-limit check used after the vendor is resolved.
+
+    Mirrors projects.api.views_brief_v3._vendor_ratelimited: the HMAC middleware
+    never sets request.user, so django-ratelimit's key="user" is broken; key on
+    the resolved vendor.id instead. Disabled together with RATELIMIT_ENABLE so
+    tests and local dev stay a no-op.
+    """
+    from django.conf import settings as django_settings  # noqa: PLC0415
+
+    if not getattr(django_settings, "RATELIMIT_ENABLE", True):
+        return False
+    from django_ratelimit.core import is_ratelimited  # noqa: PLC0415
+
+    return is_ratelimited(
+        request=request,
+        group=group,
+        key=lambda *_args: str(vendor.id),
+        rate=rate,
+        method=method,
+        increment=True,
+    )
+
+
+def _build_webhook_key_response(key_row):
+    return {
+        "key": key_row.key,
+        "isActive": key_row.is_active,
+        "createdAt": key_row.created_at.isoformat() if key_row.created_at else None,
+        "rotatedAt": key_row.rotated_at.isoformat() if key_row.rotated_at else None,
+    }
+
+
+def _apply_lead_notification_email(settings, data):
+    raw = data.get("leadNotificationEmail")
+    email = (raw or "").strip()
+    if email:
+        try:
+            validate_email(email)
+        except ValidationError:
+            return JsonResponse({"error": "Invalid email"}, status=400)
+    settings.lead_notification_email = email
+    return None
+
+
+def _apply_slug(settings, data):
+    value = data.get("slug")
+    # Explicit null clears the slug; a string is normalised; anything else
+    # (number, object, list) is a malformed payload and must 400 rather than
+    # silently coercing to "" and wiping the existing slug.
+    if value is not None and not isinstance(value, str):
+        return JsonResponse({"error": "slug must be a string"}, status=400)
+    raw = normalize_slug(value if isinstance(value, str) else "")
+    if not raw:
+        settings.slug = None
+        return None
+    error = validate_slug(raw)
+    if error:
+        return JsonResponse({"error": error}, status=400)
+    if (
+        VendorSettingsModel.objects.filter(slug=raw)
+        .exclude(vendor_id=settings.vendor_id)
+        .exists()
+    ):
+        return JsonResponse({"error": "This link is taken"}, status=409)
+    settings.slug = raw
+    return None
+
+
 def _build_vendor_settings_response(settings):
     return {
         "id": str(settings.id),
@@ -555,6 +750,13 @@ def _build_vendor_settings_response(settings):
         "logoUrl": settings.logo.url if settings.logo else None,
         "companyName": settings.company_name,
         "agencyName": settings.agency_name,
+        # SF-7: GET returns the stored slug as-is and null when unset — it never
+        # generates one. Slug generation hits the LLM, which must not run on a
+        # plain settings GET (that sync-LLM-on-GET was removed in round 1). The
+        # vendor opts into a suggestion through the explicit "Suggest" button
+        # (vendor_slug_suggest); this is deliberate, not a missing default.
+        "slug": settings.slug or None,
+        "leadNotificationEmail": settings.lead_notification_email,
         "fringesPercent": str(settings.fringes_percent),
         "handlingPercent": str(settings.handling_percent),
         "markupPercent": str(settings.markup_percent),

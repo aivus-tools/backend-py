@@ -1,5 +1,6 @@
 """Serializers for projects API."""
 
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
 from aivus_backend.projects.models import BriefFeedback
@@ -56,11 +57,14 @@ def serialize_client_manager(manager: ClientManager) -> dict:
 
 def serialize_project(project: Project, include_relations: bool = True) -> dict:  # noqa: FBT001, FBT002
     """Serialize Project model to dict."""
+    brief = project.brief if project.brief_id else None
     result = {
         "id": str(project.id),
         "name": project.name,
         "vendorId": str(project.vendor_id),
         "briefId": str(project.brief_id) if project.brief_id else None,
+        "briefConversationStatus": brief.conversation_status if brief else None,
+        "hasContactEmail": bool(brief.contact_email) if brief else False,
         "teamId": str(project.team_id) if project.team_id else None,
         "status": project.status,
         # New fields
@@ -414,6 +418,7 @@ def serialize_brief_v3(brief: Brief, *, user=None) -> dict:
     return {
         "id": str(brief.id),
         "status": brief.status,
+        "source": brief.source,
         "title": brief.title,
         "contactEmail": brief.contact_email,
         "contactName": brief.contact_name,
@@ -490,7 +495,11 @@ def serialize_brief_share(share: BriefShare) -> dict:
 
 def serialize_brief_share_public(share: BriefShare) -> dict:
     brief = share.brief
-    documents = list(brief.final_documents.order_by("kind"))
+    documents = list(
+        brief.final_documents.filter(kind__in=CLIENT_FACING_DOCUMENT_KINDS).order_by(
+            "kind"
+        )
+    )
     return {
         "token": share.token,
         "briefId": str(brief.id),

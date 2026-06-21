@@ -22,6 +22,16 @@ urlpatterns = [
         views.project_thumbnail,
         name="project_thumbnail",
     ),
+    path(
+        "vendor/projects/<uuid:project_id>/brief/documents",
+        views.vendor_project_brief_documents,
+        name="vendor_project_brief_documents",
+    ),
+    path(
+        "vendor/projects/<uuid:project_id>/brief/documents/<uuid:document_id>/pdf",
+        views.vendor_project_brief_document_pdf,
+        name="vendor_project_brief_document_pdf",
+    ),
     # Briefs (legacy - vendor/system access)
     path("briefs", views.briefs_list, name="briefs_list"),
     path("briefs/<uuid:brief_id>", views.brief_detail, name="brief_detail"),
@@ -119,6 +129,11 @@ urlpatterns = [
         name="client_brief_ai_drafts",
     ),
     path(
+        "client/briefs/ai/sent-to-vendor",
+        views_brief_v3.client_brief_ai_sent_to_vendor,
+        name="client_brief_ai_sent_to_vendor",
+    ),
+    path(
         "client/briefs/ai/<uuid:brief_id>/start",
         views_brief_v3.client_brief_ai_start,
         name="client_brief_ai_start",
@@ -183,6 +198,11 @@ urlpatterns = [
         views_brief_v3.client_brief_ai_final_document_pdf,
         name="client_brief_ai_final_document_pdf",
     ),
+    path(
+        "client/briefs/ai/<uuid:brief_id>/send",
+        views_brief_v3.client_brief_ai_send,
+        name="client_brief_ai_send",
+    ),
     # Brief share (authenticated owner)
     path(
         "client/briefs/ai/<uuid:brief_id>/share",
@@ -205,6 +225,26 @@ urlpatterns = [
         "public/briefs/ai/from-wix",
         views_brief_v3.public_brief_ai_from_wix,
         name="public_brief_ai_from_wix",
+    ),
+    path(
+        "public/briefs/ai/from-webhook",
+        views_brief_v3.public_brief_ai_from_webhook,
+        name="public_brief_ai_from_webhook",
+    ),
+    path(
+        "public/briefs/ai/by-slug/<slug:slug>",
+        views_brief_v3.public_brief_ai_by_slug,
+        name="public_brief_ai_by_slug",
+    ),
+    path(
+        "public/briefs/ai/by-slug/<slug:slug>/drafts",
+        views_brief_v3.public_brief_ai_by_slug_drafts,
+        name="public_brief_ai_by_slug_drafts",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/send",
+        views_brief_v3.public_brief_ai_send,
+        name="public_brief_ai_send",
     ),
     path(
         "public/briefs/ai/drafts",
@@ -240,6 +280,16 @@ urlpatterns = [
         "public/briefs/ai/<uuid:brief_id>/attachments/<uuid:attachment_id>",
         views_brief_v3.public_brief_ai_attachment_delete,
         name="public_brief_ai_attachment_delete",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/final-documents",
+        views_brief_v3.public_brief_ai_final_documents,
+        name="public_brief_ai_final_documents",
+    ),
+    path(
+        "public/briefs/ai/<uuid:brief_id>/final-documents/<uuid:document_id>",
+        views_brief_v3.public_brief_ai_final_document_update,
+        name="public_brief_ai_final_document_update",
     ),
     path(
         "public/briefs/ai/<uuid:brief_id>",

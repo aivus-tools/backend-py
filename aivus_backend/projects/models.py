@@ -9,6 +9,7 @@ from django.db import models
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.core.enums import BriefPromptSlug
+from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import ConversationStatus
 from aivus_backend.core.enums import FeedbackRating
@@ -37,6 +38,12 @@ class Brief(models.Model):
     status = models.CharField(
         max_length=20, choices=BriefStatus.choices, default=BriefStatus.DRAFT
     )
+    source = models.CharField(
+        max_length=20,
+        choices=BriefSource.choices,
+        default=BriefSource.DIRECT,
+        db_index=True,
+    )
     details = models.JSONField(default=dict)
     structured_data = models.JSONField(default=dict, blank=True)
     client = models.ForeignKey(
@@ -51,6 +58,9 @@ class Brief(models.Model):
     contact_email = models.CharField(max_length=254, blank=True, default="")
     contact_name = models.CharField(max_length=255, blank=True, default="")
     pending_task_id = models.CharField(max_length=64, blank=True, default="")
+    pending_task_started_at = models.DateTimeField(null=True, blank=True)
+    pending_task_error = models.CharField(max_length=64, blank=True, default="")
+    finalize_failed = models.BooleanField(default=False)
     document_language = models.CharField(max_length=10, blank=True, default="")
     conversation_status = models.CharField(
         max_length=20,
@@ -127,6 +137,9 @@ class Project(models.Model):
         blank=True,
     )
 
+    emails_sent_at = models.DateTimeField(null=True, blank=True)
+    vendor_notified_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -136,6 +149,13 @@ class Project(models.Model):
     class Meta:
         db_table = "project"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["vendor", "brief"],
+                condition=models.Q(deleted_at__isnull=True, brief__isnull=False),
+                name="uniq_active_project_per_vendor_brief",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.vendor.name})"

@@ -14,6 +14,8 @@ from typing import Any
 from celery import chain
 from celery.result import AsyncResult
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import F
 from django.http import HttpResponse
@@ -21,11 +23,17 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django_ratelimit.decorators import ratelimit
 
+from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
+from aivus_backend.core.enums import BriefSource
+from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.core.ratelimit import client_ip_ratelimit_key
+from aivus_backend.core.ratelimit import user_ratelimit_key
 from aivus_backend.core.sanitize import sanitize_html
+from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.projects import stt
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
@@ -50,13 +58,21 @@ from aivus_backend.projects.models import BriefFeedback
 from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
+from aivus_backend.projects.models import Project
 from aivus_backend.projects.tasks import clear_brief_pending_task
 from aivus_backend.projects.tasks import finalize_brief_task
 from aivus_backend.projects.tasks import generate_first_reply_task
 from aivus_backend.projects.tasks import import_wix_attachments_task
+from aivus_backend.projects.tasks import mark_brief_finalize_failed_task
+from aivus_backend.projects.tasks import mark_brief_send_failed_task
+from aivus_backend.projects.tasks import mark_project_sent_task
 from aivus_backend.projects.tasks import persist_message_traces
+from aivus_backend.projects.tasks import send_emails_task
+from aivus_backend.projects.tasks import set_brief_pending_task
 from aivus_backend.users.models import Client
 from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
+from aivus_backend.users.models import VendorSettings
 
 if TYPE_CHECKING:
     from django.core.files.uploadedfile import UploadedFile
@@ -67,25 +83,38 @@ MESSAGE_LIMIT_AUTH = 100
 MESSAGE_LIMIT_ANON = 50
 MAX_BRIEF_COST_USD = Decimal("5.00")
 MAX_MESSAGE_LENGTH = 10000
+# Stand-in first message for a webhook lead that arrives with contact details but
+# no message text, so an empty-message external form does not lose the lead.
+WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER = "New inquiry submitted via website form."
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
 MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
 MAX_ATTACHMENTS_PER_BRIEF_ANON = 3
 VALID_FEEDBACK_RATINGS = {"up", "down"}
 
+# Upper bound on how long the Send chain may legitimately hold the pending marker.
+# The chain runs finalize (a multi-document LLM call), the project promotion to RFP
+# and two emails; even a slow LLM finishes well inside a few minutes. The Send chain
+# is enqueued without a tracked task id (the marker is a standalone uuid), so an
+# AsyncResult on the marker always reports an unknown PENDING task and never failed.
+# If a worker is SIGKILLed/OOM-killed mid-chain without raising, neither the tail
+# clear step nor the link_error fires and the marker would stay set forever, wedging
+# the brief at "pending" and making every re-Send return 409 already_being_sent.
+# A pending marker older than this ceiling is treated as a dead chain: the status
+# endpoint reports "failed" and releases the marker so the client can re-Send. The
+# bound is generous over the worst-case chain duration to never trip a live Send.
+SEND_PENDING_MAX_AGE_SECONDS = 600
+
+# The white-label anonymous flow shows the brief to an unauthenticated visitor on
+# the vendor's branded page. Anonymous token reads/edits are restricted to the
+# client-facing kinds; vendor_email is exposed only to the authenticated owner of
+# the brief (PRD §5). Source of truth lives in core.enums.
+ANON_VISIBLE_DOCUMENT_KINDS = CLIENT_FACING_DOCUMENT_KINDS
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def conditional_ratelimit(**ratelimit_kwargs):
-    def decorator(func):
-        if getattr(settings, "RATELIMIT_ENABLE", True):
-            return ratelimit(**ratelimit_kwargs)(func)
-        return func
-
-    return decorator
 
 
 def _parse_json_body(request):
@@ -135,6 +164,19 @@ def _parse_attachment_ids(body) -> list[str]:
     return [str(x) for x in ids if x]
 
 
+def _parse_document_html(body) -> str | None:
+    """Read the editor's live document HTML from a chat body.
+
+    The brief editor posts ``documentHtml`` with every message so the AI edits
+    on top of the client's in-flight manual changes. Returns None when absent or
+    not a string; capped at the same limit as the document PATCH endpoint.
+    """
+    html = body.get("documentHtml")
+    if not isinstance(html, str):
+        return None
+    return html[:MAX_FINAL_DOCUMENT_HTML_LENGTH]
+
+
 def _get_brief_for_client(brief_id, request) -> Brief | None:
     client_id = request.user_data.get("client_id")
     if not client_id:
@@ -164,6 +206,23 @@ def _get_client_safe(request) -> Client | None:
     return Client.objects.filter(id=client_id).first()
 
 
+def _ensure_client_for_claim(request) -> Client | None:
+    """Lazily create the Client profile for the authenticated user on claim.
+
+    A lead who registered through a personal-link email needs a Client profile
+    to own the brief, but we must not flip their User.group — the role toggle is
+    a separate explicit action (PRD S2-14, §12 p.3/15).
+    """
+    user = _get_request_user(request)
+    if not user:
+        return None
+    client, _created = Client.objects.get_or_create(
+        owner=user,
+        defaults={"name": f"{user.name}'s Company", "ein": ""},
+    )
+    return client
+
+
 def _get_request_user(request) -> User | None:
     user_id = (getattr(request, "user_data", None) or {}).get("id")
     if not user_id:
@@ -175,8 +234,15 @@ def _build_chat_response(
     brief: Brief,
     assistant_message: ChatMessage,
     result: dict,
+    visible_kinds: tuple[str, ...] | None = None,
 ) -> dict:
     updated = result.get("updated_documents") or []
+    if visible_kinds is not None:
+        # Anonymous branded flow: never leak vendor_email (vendor outreach
+        # strategy + contacts, owner-only per PRD §5) in the HTTP body. After
+        # finalize the anon visitor keeps chatting and process_finalized_turn may
+        # emit an edit to vendor_email; drop any out-of-scope kind from the reply.
+        updated = [x for x in updated if x.kind in visible_kinds]
     return {
         "reply": result["reply"],
         "messageId": str(assistant_message.id),
@@ -189,6 +255,64 @@ def _build_chat_response(
         "messageCount": brief.message_count,
         "updatedDocuments": [serialize_brief_final_document(x) for x in updated],
     }
+
+
+def _guard_chat_turn(brief: Brief) -> JsonResponse | None:
+    """Pre-`_process_chat` gate shared by the auth and anon chat endpoints.
+
+    BE-CHAT-AFTER-SEND-EDIT: a finalized brief routes the chat turn into
+    ``process_finalized_turn``, which unconditionally rewrites the editable
+    documents (production_brief, vendor_email). After Send the vendor reads the
+    very same brief — there is no copy — and the anonymous token survives Send
+    (it is only cleared on claim), so a post-Send chat turn would silently
+    tamper with the document the vendor already sees. The PATCH endpoints are
+    already gated by ``_brief_already_sent``; this closes the chat hole the same
+    way. Returns a 409 once any vendor project reaches RFP.
+
+    R11-1: the same gate establishes ordering with the finalize retry-reset
+    below — once sent, the chat is locked and ``finalize_failed`` is never reset,
+    so the retry path can only run before Send.
+
+    The gate keys off ``_brief_already_sent`` alone (project at RFP+), matching
+    the PATCH endpoints, rather than narrowing to ``finalized``: a sent brief is
+    always finalized (the Send chain finalizes first), and gating on the sent
+    state alone leaves no chat turn able to mutate a delivered brief.
+    """
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
+    return None
+
+
+def _maybe_reset_finalize_retry(brief: Brief) -> None:
+    """R11-1: make an explicit chat message a real finalize retry before Send.
+
+    round-10 (8879c14) set ``finalize_failed`` on a failed finalize-on-ready and
+    only ``_dispatch_send`` ever cleared it, so the GET-driven dispatch refused to
+    re-run finalize forever. The BRIEF_V3_FINALIZE_FAILED_HINT tells the user to
+    "send a message in the chat to retry generation", which was a lie: the chat
+    turn never touched the flag, and Send requires a SENDABLE status and would
+    immediately email the vendor (skipping review). This resets the flag on an
+    explicit user message — never automatically on a poll, so the round-9
+    dead-loop is not recreated — when the brief still has no documents and has
+    not been sent yet (project < RFP). The next final-documents GET then
+    legitimately re-dispatches finalize without emailing the vendor, which makes
+    the existing hint true.
+
+    Must run after ``_guard_chat_turn`` so a sent brief is never reset here.
+    """
+    if not brief.finalize_failed:
+        return
+    if brief.final_documents.exists():
+        return
+    if _brief_already_sent(brief):
+        return
+    updated = Brief.objects.filter(id=brief.id, finalize_failed=True).update(
+        finalize_failed=False
+    )
+    if updated:
+        brief.finalize_failed = False
 
 
 def _handle_post_finalize_feedback(
@@ -258,6 +382,7 @@ def _process_chat(
     brief: Brief,
     user_message_obj: ChatMessage,
     message_text: str,
+    current_document_html: str | None = None,
 ) -> tuple[ChatMessage | None, dict | None, JsonResponse | None]:
     # Post-finalize feedback branch: if the last assistant message was a
     # feedback_request, treat the user reply as feedback text and short-circuit
@@ -277,11 +402,13 @@ def _process_chat(
         )
     )
 
-    turn_runner = (
-        process_finalized_turn
-        if brief.conversation_status == "finalized"
-        else process_brief_turn
-    )
+    is_finalized = brief.conversation_status == "finalized"
+    turn_runner = process_finalized_turn if is_finalized else process_brief_turn
+    # documentHtml is only meaningful once the editable document exists (finalized
+    # turn); pre-finalize chat has no document yet.
+    extra_kwargs: dict[str, Any] = {}
+    if is_finalized and current_document_html is not None:
+        extra_kwargs["current_document_html"] = current_document_html
 
     try:
         result = turn_runner(
@@ -289,6 +416,7 @@ def _process_chat(
             user_message=message_text,
             attachments=attachments,
             history=history,
+            **extra_kwargs,
         )
     except Exception:
         logger.exception(
@@ -485,9 +613,41 @@ def client_brief_ai_list(request):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("CLIENT")
+def client_brief_ai_sent_to_vendor(request):
+    """List the client's briefs already sent to the vendor behind ``slug``.
+
+    A brief counts as sent once it has a project for that vendor at RFP or
+    beyond. The frontend uses this to hide the Send button for briefs already
+    delivered to the vendor on the branded page.
+    """
+    client_id = request.user_data.get("client_id")
+    slug = (request.GET.get("slug") or "").strip()
+    if not client_id or not slug:
+        return JsonResponse({"briefIds": []})
+
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"briefIds": []})
+
+    brief_ids = (
+        Project.objects.filter(
+            vendor=vendor,
+            brief__client_id=client_id,
+            brief__deleted_at__isnull=True,
+            status__in=SENT_PROJECT_STATUSES,
+        )
+        .values_list("brief_id", flat=True)
+        .distinct()
+    )
+    return JsonResponse({"briefIds": [str(x) for x in brief_ids]})
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_drafts(request):
     """Create an empty draft brief so the user can upload attachments before
     sending the first message."""
@@ -506,7 +666,7 @@ def client_brief_ai_drafts(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_start(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -570,6 +730,30 @@ def client_brief_ai_start(request, brief_id):
     )
 
 
+def _send_pending_expired(brief: Brief) -> bool:
+    """Release a Send-chain pending marker that has outlived its TTL.
+
+    The Send chain is enqueued without a tracked task id, so its pending marker
+    cannot be probed with AsyncResult — a worker killed mid-chain (SIGKILL/OOM)
+    leaves the marker set forever. The marker is stamped with
+    ``pending_task_started_at`` only by the Send chain; single-task flows leave it
+    null and keep their AsyncResult-based reporting untouched. When a stamped
+    marker is older than ``SEND_PENDING_MAX_AGE_SECONDS`` the chain is presumed
+    dead: clear the marker (and the stamp) so the status reads "failed" and a
+    fresh Send is no longer blocked by the 409 guard. Returns True when expired.
+    """
+    if not brief.pending_task_id or brief.pending_task_started_at is None:
+        return False
+    age = (timezone.now() - brief.pending_task_started_at).total_seconds()
+    if age < SEND_PENDING_MAX_AGE_SECONDS:
+        return False
+    Brief.objects.filter(id=brief.id, pending_task_id=brief.pending_task_id).update(
+        pending_task_id="", pending_task_started_at=None
+    )
+    logger.error("Send chain marker expired after %ss: brief_id=%s", int(age), brief.id)
+    return True
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("CLIENT")
@@ -579,6 +763,15 @@ def client_brief_ai_status(request, brief_id):
         return JsonResponse({"error": "Brief not found"}, status=404)
 
     brief.refresh_from_db()
+    if brief.pending_task_error:
+        # The Send chain failed: its link_error stamped pending_task_error and
+        # cleared the pending marker. Report "failed" (never "done") and clear
+        # the flag so a fresh Send can re-arm cleanly.
+        Brief.objects.filter(id=brief.id).update(pending_task_error="")
+        logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
+    if _send_pending_expired(brief):
+        return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)
         if result.failed():
@@ -601,11 +794,15 @@ def client_brief_ai_status(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="20/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    gate = _guard_chat_turn(brief)
+    if gate is not None:
+        return gate
 
     if MESSAGE_LIMIT_AUTH and brief.message_count >= MESSAGE_LIMIT_AUTH:
         return JsonResponse({"error": "Message limit reached"}, status=429)
@@ -633,6 +830,12 @@ def client_brief_ai_chat(request, brief_id):
         return JsonResponse({"error": "User not found"}, status=401)
 
     attachment_ids = _parse_attachment_ids(body)
+    document_html = _parse_document_html(body)
+
+    # Reset a stale finalize-failed flag only once we know this is a real turn
+    # (valid message, within limits) about to be persisted — otherwise a malformed
+    # or empty POST would clear finalize_failed without any actual retry.
+    _maybe_reset_finalize_retry(brief)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
@@ -651,7 +854,7 @@ def client_brief_ai_chat(request, brief_id):
 
     brief.refresh_from_db()
     assistant_message, result, error_response = _process_chat(
-        brief, user_message, message
+        brief, user_message, message, current_document_html=document_html
     )
     if error_response or assistant_message is None or result is None:
         return error_response or JsonResponse(
@@ -715,7 +918,7 @@ def client_brief_ai_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="30/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="30/m", method="POST")
 def client_brief_ai_attachments(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -766,7 +969,7 @@ def client_brief_ai_attachment_delete(request, brief_id, attachment_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="10/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_ai_chat_transcribe(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -919,7 +1122,7 @@ def client_brief_ai_message_trace(request, brief_id, message_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="5/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="5/m", method="POST")
 def client_brief_ai_finalize(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -982,11 +1185,20 @@ def client_brief_ai_final_documents(request, brief_id):
 @csrf_exempt
 @require_http_methods(["PATCH"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="60/m", method="PATCH")
+@conditional_ratelimit(key=user_ratelimit_key, rate="60/m", method="PATCH")
 def client_brief_ai_final_document_update(request, brief_id, document_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    # SF-1: once the brief is sent the vendor reads this very document (no copy),
+    # so an edit after Send would silently rewrite what the vendor already sees.
+    # The anonymous PATCH path is gated the same way; without this an authenticated
+    # client could keep editing post-Send and tamper with the delivered brief.
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
 
     document = BriefFinalDocument.objects.filter(id=document_id, brief=brief).first()
     if not document:
@@ -1056,7 +1268,7 @@ def _pdf_response_for_document(document: BriefFinalDocument) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET", "POST", "PATCH"])
 @require_groups("CLIENT")
-@conditional_ratelimit(key="user", rate="30/m", method="POST")
+@conditional_ratelimit(key=user_ratelimit_key, rate="30/m", method="POST")
 def client_brief_ai_share(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -1098,7 +1310,7 @@ def client_brief_ai_share(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="120/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="120/m", method="GET")
 def public_brief_share_get(request, token):
     share = (
         BriefShare.objects.filter(token=token, is_active=True)
@@ -1115,7 +1327,7 @@ def public_brief_share_get(request, token):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_share_document_pdf(request, token, document_id):
     share = (
         BriefShare.objects.filter(token=token, is_active=True)
@@ -1126,7 +1338,7 @@ def public_brief_share_document_pdf(request, token, document_id):
         return JsonResponse({"error": "Share not found"}, status=404)
 
     document = BriefFinalDocument.objects.filter(
-        id=document_id, brief=share.brief
+        id=document_id, brief=share.brief, kind__in=ANON_VISIBLE_DOCUMENT_KINDS
     ).first()
     if not document:
         return JsonResponse({"error": "Document not found"}, status=404)
@@ -1144,6 +1356,14 @@ def _wix_str(value) -> str:
 
 def _normalize_contact_email(value: str) -> str:
     return (value or "").strip().lower()[:254]
+
+
+def _is_valid_email(value: str) -> bool:
+    try:
+        validate_email(value)
+    except ValidationError:
+        return False
+    return True
 
 
 def _normalize_contact_name(value: str) -> str:
@@ -1212,12 +1432,241 @@ def _extract_wix_payload(body: dict) -> dict:
     return {"email": email, "name": name, "message": message, "files": files}
 
 
+def _project_name_for_brief(brief: Brief) -> str:
+    title = (brief.title or "").strip()
+    return (title or "New brief lead")[:255]
+
+
+SENDABLE_CONVERSATION_STATUSES = {"ready_to_finalize", "finalized"}
+SENT_PROJECT_STATUSES = {
+    ProjectStatus.RFP,
+    ProjectStatus.REVIEWING,
+    ProjectStatus.ONGOING,
+}
+
+
+def _brief_already_sent_to_vendor(brief: Brief, vendor: Vendor) -> bool:
+    return (
+        Project.objects.filter(brief=brief, vendor=vendor, deleted_at__isnull=True)
+        .filter(status__in=SENT_PROJECT_STATUSES)
+        .exists()
+    )
+
+
+def _brief_already_sent(brief: Brief) -> bool:
+    """True once the brief has been sent to any vendor (project at RFP+).
+
+    After Send the vendor reads the very same brief — there is no copy — so the
+    anonymous client must not be able to keep editing the document the vendor is
+    already looking at.
+    """
+    return (
+        Project.objects.filter(brief=brief, deleted_at__isnull=True)
+        .filter(status__in=SENT_PROJECT_STATUSES)
+        .exists()
+    )
+
+
+def _dispatch_send(brief: Brief, vendor: Vendor, recipient_email: str, language: str):
+    """Validate and enqueue the Send chain.
+
+    Returns a JsonResponse. The chain finalizes the brief first when it has not
+    been finalized yet, then promotes the vendor project to RFP and sends the
+    emails. Every step is idempotent so retries and double-Send are safe.
+    """
+    if brief.conversation_status not in SENDABLE_CONVERSATION_STATUSES:
+        return JsonResponse(
+            {"error": "Brief is not ready to send", "code": "not_ready"}, status=400
+        )
+
+    brief_id_str = str(brief.id)
+    vendor_id_str = str(vendor.id)
+    # One pending id tracks the entire Send chain (finalize, if needed, then the
+    # project promotion to RFP, then the emails). It is set before the chain runs
+    # and cleared by the tail step, so the status endpoint reports "pending" until
+    # the project has actually been promoted. Send never reports "sent" before the
+    # promotion — the client polls this id and only then shows success.
+    send_chain_task_id = str(uuid.uuid4())
+    mark_signature = mark_project_sent_task.si(brief_id_str, vendor_id_str)
+    send_signature = send_emails_task.si(
+        brief_id_str, vendor_id_str, recipient_email, language
+    )
+    clear_signature = clear_brief_pending_task.si(brief_id_str)
+
+    # Serialize concurrent Sends on the brief row so a double click or retry
+    # cannot enqueue two chains (which would create a duplicate project and a
+    # second set of emails). The locked re-read also catches a project that a
+    # previous in-flight Send already promoted to RFP.
+    with transaction.atomic():
+        locked = Brief.objects.select_for_update().get(id=brief.id)
+        if _brief_already_sent_to_vendor(locked, vendor):
+            return JsonResponse(
+                {"error": "Brief already sent to this vendor", "code": "already_sent"},
+                status=409,
+            )
+
+        # Only generate when no documents exist yet. The branded anonymous flow
+        # renders the document on ready (finalize-on-ready) and lets the client
+        # edit it before Send; re-running finalize here would discard those
+        # manual edits. Documents already present are taken as-is.
+        needs_finalize = not locked.final_documents.exists()
+        # Any non-empty pending marker means a task already owns this brief, so a
+        # second Send must not enqueue another chain. Two cases:
+        #   1) needs_finalize — a GET-triggered finalize (the branded flow polls
+        #      final-documents, which dispatches finalize-on-ready) is in flight
+        #      with no documents yet. A second finalize would race the first and
+        #      generate_final_documents would delete+recreate the document,
+        #      discarding the in-flight result and any manual edits.
+        #   2) not needs_finalize — a previous Send chain is already armed (its
+        #      project promotion to RFP runs async, after this lock is released).
+        #      A concurrent Send would see the project still at DRAFT, pass the
+        #      _brief_already_sent_to_vendor guard, and enqueue a second chain that
+        #      sends the client and vendor emails twice. The marker closes that gap.
+        # Either way we leave the existing marker intact and tell the client to
+        # retry, so the in-flight task is never disturbed.
+        if locked.pending_task_id:
+            if needs_finalize:
+                message = "Brief is still generating, try again shortly"
+                code = "still_generating"
+            else:
+                message = "Brief is already being sent, try again shortly"
+                code = "already_being_sent"
+            return JsonResponse({"error": message, "code": code}, status=409)
+        # Arm the pending marker and clear any stale failure from a previous Send
+        # so the status endpoint reports "pending" again, not the old "failed".
+        # finalize_failed is cleared too: a deliberate re-Send is an explicit
+        # retry, so the finalize-on-ready loop-breaker (BE-1) must release.
+        Brief.objects.filter(id=locked.id).update(
+            pending_task_id=send_chain_task_id,
+            pending_task_started_at=timezone.now(),
+            pending_task_error="",
+            finalize_failed=False,
+        )
+        if needs_finalize:
+            # SF-1: finalize runs with keep_pending=True so it never clears the
+            # Send chain's marker. The brief therefore stays "pending" continuously
+            # from here until the tail clear step, closing the window where the
+            # status endpoint could report "done" before the project is promoted
+            # to RFP. set_brief_pending_task re-asserts the marker as a belt-and-
+            # braces guard against a finalize retry path that misses keep_pending.
+            workflow = chain(
+                finalize_brief_task.si(brief_id_str, keep_pending=True),
+                set_brief_pending_task.si(brief_id_str, send_chain_task_id),
+                mark_signature,
+                send_signature,
+                clear_signature,
+            )
+        else:
+            workflow = chain(mark_signature, send_signature, clear_signature)
+
+    # On any step failure the chain's link_error stamps pending_task_error with
+    # this chain id and clears the pending marker, so the status endpoint reports
+    # "failed" instead of silently flipping to "done". Success runs
+    # clear_brief_pending_task (the tail) which leaves pending_task_error empty.
+    transaction.on_commit(
+        lambda: workflow.apply_async(
+            link_error=mark_brief_send_failed_task.si(brief_id_str, send_chain_task_id)
+        )
+    )
+
+    response: dict[str, Any] = {"ok": True, "finalizingTaskId": send_chain_task_id}
+    return JsonResponse(response)
+
+
+def _resolve_vendor_by_slug(slug: str) -> Vendor | None:
+    """Resolve an active vendor from a brief-link slug.
+
+    The incoming slug is normalised to lowercase before the lookup so a
+    MixedCase link still resolves; stored slugs are always lowercase. Soft-deleted
+    vendors are filtered manually because the FK uses no on_delete cascade for
+    deleted_at; a slug pointing at a deleted vendor must 404.
+    """
+    normalized = normalize_slug(slug)
+    if not normalized:
+        return None
+    settings_row = (
+        VendorSettings.objects.filter(slug=normalized).select_related("vendor").first()
+    )
+    if not settings_row:
+        return None
+    vendor = settings_row.vendor
+    if vendor.deleted_at is not None:
+        return None
+    return vendor
+
+
+def _public_send_vendor_matches_brief(brief: Brief, vendor: Vendor) -> bool:
+    """Guard the anonymous Send against slug swapping.
+
+    A personal-link brief is started on one vendor's branded page, which attaches
+    exactly one DRAFT project to that vendor. The slug in the Send body must point
+    back at that same vendor; otherwise an anonymous client could swap the slug
+    and send the lead to the wrong agency. When the brief has no project yet
+    (started outside the by-slug flow) the resolved vendor is accepted as-is.
+    """
+    existing_vendor_ids = set(
+        Project.objects.filter(brief=brief, deleted_at__isnull=True)
+        .values_list("vendor_id", flat=True)
+        .distinct()
+    )
+    if not existing_vendor_ids:
+        return True
+    return vendor.id in existing_vendor_ids
+
+
+def _vendor_public_branding(vendor: Vendor, slug: str) -> dict:
+    settings_row = VendorSettings.objects.filter(vendor=vendor).first()
+    logo_url = None
+    vendor_name = vendor.name
+    if settings_row:
+        if settings_row.logo:
+            logo_url = settings_row.logo.url
+        vendor_name = (
+            (settings_row.company_name or "").strip()
+            or (settings_row.agency_name or "").strip()
+            or vendor.name
+        )
+    return {
+        "valid": True,
+        "vendorName": vendor_name,
+        "vendorLogoUrl": logo_url,
+        "slug": slug,
+    }
+
+
 def _verify_wix_secret(request) -> bool:
     expected = getattr(settings, "WIX_WEBHOOK_SECRET", "")
     if not expected:
         return False
     provided = request.headers.get("X-Aivus-Webhook-Secret", "")
     return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+def _verify_vendor_webhook_key(request) -> Vendor | None:
+    """Resolve the vendor from the per-vendor webhook key header.
+
+    Uses a constant-time compare against the active key. A revoked or unknown
+    key, or a soft-deleted vendor, returns None so the caller answers 401.
+    """
+    from aivus_backend.users.models import VendorWebhookKey  # noqa: PLC0415
+
+    provided = request.headers.get("X-Aivus-Webhook-Key", "")
+    if not provided:
+        return None
+
+    row = (
+        VendorWebhookKey.objects.filter(is_active=True)
+        .select_related("vendor")
+        .filter(key=provided)
+        .first()
+    )
+    if not row:
+        return None
+    if not hmac.compare_digest(row.key, provided):
+        return None
+    if row.vendor.deleted_at is not None:
+        return None
+    return row.vendor
 
 
 def _create_inbound_brief(  # noqa: PLR0913
@@ -1239,6 +1688,7 @@ def _create_inbound_brief(  # noqa: PLR0913
             anonymous_token=token,
             contact_email=_normalize_contact_email(contact_email),
             contact_name=_normalize_contact_name(contact_name),
+            source=source or BriefSource.DIRECT,
         )
         ChatMessage.objects.create(
             brief=brief,
@@ -1251,6 +1701,15 @@ def _create_inbound_brief(  # noqa: PLR0913
             message_count=F("message_count") + 1,
             pending_task_id=task_id,
         )
+        if vendor is not None:
+            Project.objects.get_or_create(
+                vendor=vendor,
+                brief=brief,
+                defaults={
+                    "name": _project_name_for_brief(brief),
+                    "status": ProjectStatus.RFP,
+                },
+            )
 
     brief_id_str = str(brief.id)
     if file_specs:
@@ -1277,7 +1736,7 @@ def _create_inbound_brief(  # noqa: PLR0913
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="30/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
 def public_brief_ai_from_wix(request):
     """Create an anonymous brief from a Wix landing form submission, remember the
     contact email and start the first AI reply. Returns the public brief URL for
@@ -1321,7 +1780,231 @@ def public_brief_ai_from_wix(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="6/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/h", method="POST")
+def public_brief_ai_from_webhook(request):
+    """Create a vendor lead via the per-vendor webhook key.
+
+    Authenticates with the X-Aivus-Webhook-Key header (separate from the global
+    Wix secret), creates the inbound brief with source=webhook and immediately
+    attaches an RFP project to the vendor. The IP rate-limit fires before the key
+    is resolved so an attacker cannot brute-force keys; it sits above the 50/h
+    per-vendor limit (PRD §6/§8) so a legitimate vendor posting from a single
+    server IP is bounded by the vendor limit, not the anti-brute IP limit. Once
+    the key resolves the 50/h per vendor_id limit caps a leaked key from flooding
+    the inbox.
+    """
+    vendor = _verify_vendor_webhook_key(request)
+    if not vendor:
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    if _webhook_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+    if not isinstance(body, dict):
+        return JsonResponse({"error": "Invalid payload"}, status=400)
+
+    payload = _extract_wix_payload(body)
+
+    # SF-5: an external form may submit only contact details with no message. We
+    # must not drop a lead over an empty message, so substitute a placeholder
+    # before validation; an over-long message is still rejected.
+    message = (payload.get("message") or "").strip()
+    if not message:
+        message = WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return JsonResponse({"error": "Message too long"}, status=400)
+
+    brief, task_id, token = _create_inbound_brief(
+        message=message,
+        contact_email=payload["email"],
+        contact_name=payload["name"],
+        file_specs=payload["files"][:MAX_ATTACHMENTS_PER_BRIEF_ANON],
+        source="webhook",
+        vendor=vendor,
+    )
+    _notify_vendor_of_lead(brief, vendor, request)
+    return JsonResponse(
+        {"briefId": str(brief.id), "token": token, "taskId": task_id},
+        status=201,
+    )
+
+
+def _notify_vendor_of_lead(brief: Brief, vendor: Vendor, request) -> None:
+    """Dispatch the vendor lead notification for an inbound webhook brief.
+
+    Mirrors the Send flow's vendor email, scheduled on_commit so the worker only
+    runs once the brief and its project are persisted. The email language comes
+    from the vendor's own settings (resolved inside send_vendor_lead_email), not
+    the brief's document_language, which is empty for inbound webhook/wix leads.
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    def _dispatch() -> None:
+        project = Project.objects.filter(brief=brief, vendor=vendor).first()
+        if not project:
+            return
+        brief_emails.send_vendor_lead_email(project, brief)
+
+    transaction.on_commit(_dispatch)
+
+
+def _vendor_ratelimited(request, vendor, group: str, rate: str) -> bool:
+    if not getattr(settings, "RATELIMIT_ENABLE", True):
+        return False
+    from django_ratelimit.core import is_ratelimited  # noqa: PLC0415
+
+    return is_ratelimited(
+        request=request,
+        group=group,
+        key=lambda *_args: str(vendor.id),
+        rate=rate,
+        method="POST",
+        increment=True,
+    )
+
+
+def _webhook_vendor_ratelimited(request, vendor) -> bool:
+    return _vendor_ratelimited(request, vendor, "vendor_webhook", "50/h")
+
+
+def _slug_drafts_vendor_ratelimited(request, vendor) -> bool:
+    """SF-2: cap personal-link draft creation per vendor.
+
+    The IP rate-limit alone lets an IP-rotating botnet flood a vendor's dashboard
+    with empty DRAFT leads. A per-vendor.id cap bounds the damage regardless of
+    how many source IPs the attacker controls; it sits above the per-IP limit so a
+    single legitimate visitor is throttled by IP first.
+    """
+    return _vendor_ratelimited(request, vendor, "slug_drafts_vendor", "100/h")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/h", method="GET")
+def public_brief_ai_by_slug(request, slug):
+    """Resolve a vendor brief-link slug to public branding for the start screen.
+
+    Returns 404 for unknown or soft-deleted vendors so the frontend can render
+    the "link not found" state without leaking vendor existence detail.
+    """
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"valid": False, "error": "Link not found"}, status=404)
+    return JsonResponse(_vendor_public_branding(vendor, slug))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="30/h", method="POST")
+def public_brief_ai_by_slug_drafts(request, slug):
+    """Start an anonymous brief on a vendor's personal link.
+
+    Creates the draft brief (source=personal_link) and immediately attaches a
+    DRAFT project to the vendor so the lead shows up "in progress" before the
+    client finishes. The project is created in the bypass path because the
+    standard vendor guard forbids attaching anonymous briefs vendors did not
+    already touch — here the vendor explicitly owns the link.
+    """
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"error": "Link not found"}, status=404)
+
+    if _slug_drafts_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
+
+    token = secrets.token_urlsafe(48)
+    with transaction.atomic():
+        brief = Brief.objects.create(
+            client=None,
+            anonymous_token=token,
+            source=BriefSource.PERSONAL_LINK,
+        )
+        Project.objects.get_or_create(
+            vendor=vendor,
+            brief=brief,
+            defaults={
+                "name": _project_name_for_brief(brief),
+                "status": ProjectStatus.DRAFT,
+            },
+        )
+    return JsonResponse(
+        {"briefId": str(brief.id), "token": token},
+        status=201,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/h", method="POST")
+def public_brief_ai_send(request, brief_id):
+    """Anonymous Send: finalize (if needed), attach the vendor project, email.
+
+    The vendor is resolved from the ``slug`` in the body; the contact email is
+    required so the client receives their copy. The response shape is uniform
+    regardless of whether the email already has an account (anti-enumeration).
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse(
+            {"error": "Brief not found", "code": "brief_not_found"}, status=404
+        )
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    slug = (body.get("slug") or "").strip()
+    vendor = _resolve_vendor_by_slug(slug) if slug else None
+    if not vendor:
+        return JsonResponse(
+            {
+                "error": "This agency is no longer accepting briefs",
+                "code": "agency_not_found",
+            },
+            status=404,
+        )
+
+    # The brief was started on one vendor's branded link; reject a Send whose slug
+    # points at a different vendor than the brief's existing project (slug swap).
+    if not _public_send_vendor_matches_brief(brief, vendor):
+        return JsonResponse(
+            {"error": "Brief does not belong to this link", "code": "vendor_mismatch"},
+            status=409,
+        )
+
+    recipient_email = _normalize_contact_email(body.get("email") or "")
+    if not recipient_email:
+        return JsonResponse(
+            {"error": "email is required", "code": "email_required"}, status=400
+        )
+    if not _is_valid_email(recipient_email):
+        return JsonResponse(
+            {"error": "Enter a valid email address", "code": "invalid_email"},
+            status=400,
+        )
+
+    if recipient_email != brief.contact_email:
+        Brief.objects.filter(id=brief.id).update(contact_email=recipient_email)
+        brief.contact_email = recipient_email
+
+    language = brief_emails.resolve_email_language(
+        brief, request.headers.get("Accept-Language", "")
+    )
+    return _dispatch_send(brief, vendor, recipient_email, language)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="6/h", method="POST")
 def public_brief_ai_drafts(request):
     """Create an empty anonymous draft brief."""
     token = secrets.token_urlsafe(48)
@@ -1335,7 +2018,7 @@ def public_brief_ai_drafts(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="3/h", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="3/h", method="POST")
 def public_brief_ai_start(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1400,13 +2083,22 @@ def public_brief_ai_start(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_ai_status(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
 
     brief.refresh_from_db()
+    if brief.pending_task_error:
+        # The Send chain failed: its link_error stamped pending_task_error and
+        # cleared the pending marker. Report "failed" (never "done") and clear
+        # the flag so a fresh Send can re-arm cleanly.
+        Brief.objects.filter(id=brief.id).update(pending_task_error="")
+        logger.error("Send chain failed: brief_id=%s", brief_id)
+        return JsonResponse({"status": "failed", "error": "Send failed"})
+    if _send_pending_expired(brief):
+        return JsonResponse({"status": "failed", "error": "Send failed"})
     if brief.pending_task_id:
         result = AsyncResult(brief.pending_task_id)
         if result.failed():
@@ -1424,11 +2116,15 @@ def public_brief_ai_status(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="5/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="5/m", method="POST")
 def public_brief_ai_chat(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
         return JsonResponse({"error": "Brief not found"}, status=404)
+
+    gate = _guard_chat_turn(brief)
+    if gate is not None:
+        return gate
 
     if brief.message_count >= MESSAGE_LIMIT_ANON:
         return JsonResponse({"error": "Message limit reached"}, status=429)
@@ -1453,6 +2149,12 @@ def public_brief_ai_chat(request, brief_id):
 
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
+    document_html = _parse_document_html(body)
+
+    # Reset a stale finalize-failed flag only once we know this is a real turn
+    # (valid message, within limits) about to be persisted — otherwise a malformed
+    # or empty POST would clear finalize_failed without any actual retry.
+    _maybe_reset_finalize_retry(brief)
 
     with transaction.atomic():
         user_message = ChatMessage.objects.create(
@@ -1472,7 +2174,7 @@ def public_brief_ai_chat(request, brief_id):
 
     brief.refresh_from_db()
     assistant_message, result, error_response = _process_chat(
-        brief, user_message, message
+        brief, user_message, message, current_document_html=document_html
     )
     if error_response or assistant_message is None or result is None:
         return error_response or JsonResponse(
@@ -1480,13 +2182,20 @@ def public_brief_ai_chat(request, brief_id):
         )
 
     brief.refresh_from_db()
-    return JsonResponse(_build_chat_response(brief, assistant_message, result))
+    return JsonResponse(
+        _build_chat_response(
+            brief,
+            assistant_message,
+            result,
+            visible_kinds=ANON_VISIBLE_DOCUMENT_KINDS,
+        )
+    )
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="10/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST")
 def public_brief_ai_attachments(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1535,7 +2244,7 @@ def public_brief_ai_attachment_delete(request, brief_id, attachment_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="10/m", method="POST")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="10/m", method="POST")
 def public_brief_ai_chat_transcribe(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1596,7 +2305,7 @@ def public_brief_ai_chat_transcribe(request, brief_id):
 @csrf_exempt
 @require_http_methods(["GET"])
 @public_endpoint
-@conditional_ratelimit(key="ip", rate="60/m", method="GET")
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
 def public_brief_ai_detail(request, brief_id):
     brief = _get_brief_for_token(brief_id, request)
     if not brief:
@@ -1611,12 +2320,237 @@ def public_brief_ai_detail(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/h", method="POST")
+def client_brief_ai_send(request, brief_id):
+    """Authenticated Send: attach the brief to the chosen vendor as a project.
+
+    No email is asked of the client (they are already in the cabinet); the
+    vendor is resolved from the ``slug`` in the body. The same idempotent chain
+    promotes/creates the project and notifies the vendor.
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = _get_brief_for_client(brief_id, request)
+    if not brief:
+        return JsonResponse(
+            {"error": "Brief not found", "code": "brief_not_found"}, status=404
+        )
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    slug = (body.get("slug") or "").strip()
+    vendor = _resolve_vendor_by_slug(slug) if slug else None
+    if not vendor:
+        return JsonResponse(
+            {
+                "error": "This agency is no longer accepting briefs",
+                "code": "agency_not_found",
+            },
+            status=404,
+        )
+
+    language = brief_emails.resolve_email_language(
+        brief, request.headers.get("Accept-Language", "")
+    )
+    return _dispatch_send(brief, vendor, "", language)
+
+
+def _dispatch_finalize_if_ready(brief: Brief) -> bool:
+    """Kick off finalize asynchronously when the ready brief has no documents.
+
+    The branded anonymous flow shows and edits the document before Send, but the
+    documents only exist after finalize. Running the LLM inside the request (and
+    under a row lock) would block a worker and the brief row, so generation is
+    dispatched to ``finalize_brief_task`` instead. Idempotency is guarded by
+    ``pending_task_id``: an in-flight finalize is never dispatched twice. The
+    front-end polls this endpoint until the documents appear.
+
+    SF-5: a finalize that fails persistently must not be re-dispatched on every
+    GET. Previously the link_error cleared the pending marker unconditionally, so
+    the next poll saw a ready brief with no documents and no marker and fired
+    finalize again — an unbounded retry loop that keeps hitting the paid LLM.
+
+    BE-1: the loop-breaker must not key off ``pending_task_error``, because both
+    status endpoints clear that field on read to let a fresh Send re-arm. In the
+    branded flow the 1.5s status poller runs faster than the 3s final-documents
+    poller, so it would wipe the error between a failed finalize and the next GET,
+    re-opening the loop. Instead the failure sets a dedicated ``finalize_failed``
+    flag (only if the dispatch still owns the marker) that status reads never
+    touch and only a fresh Send resets; this function refuses to dispatch while
+    it is set, and the GET surfaces it so the client stops polling.
+
+    Returns True when generation is in progress (either freshly dispatched or
+    already pending), False otherwise (including when a previous finalize failed).
+    """
+    if brief.conversation_status != "ready_to_finalize":
+        return False
+    if brief.final_documents.exists():
+        return False
+    if brief.finalize_failed:
+        # A previous finalize failed. Do not re-dispatch; the GET reports the
+        # failure and the client stops polling rather than looping the LLM.
+        return False
+
+    finalize_task_id = str(uuid.uuid4())
+    dispatched = False
+    with transaction.atomic():
+        locked = Brief.objects.select_for_update().get(id=brief.id)
+        if locked.conversation_status != "ready_to_finalize":
+            return False
+        if BriefFinalDocument.objects.filter(brief=locked).exists():
+            return False
+        if locked.finalize_failed:
+            return False
+        if locked.pending_task_id:
+            # A finalize is already running; the poller waits for it.
+            return True
+        Brief.objects.filter(id=locked.id).update(pending_task_id=finalize_task_id)
+        dispatched = True
+
+    if dispatched:
+        brief_id_str = str(brief.id)
+        transaction.on_commit(
+            lambda: finalize_brief_task.apply_async(
+                args=[brief_id_str],
+                task_id=finalize_task_id,
+                # On failure set finalize_failed and surrender the marker (only if
+                # it still owns it), so the next GET reports the failure and
+                # _dispatch_finalize_if_ready refuses to re-dispatch. A separate
+                # flag from pending_task_error survives a concurrent status poll.
+                link_error=mark_brief_finalize_failed_task.si(
+                    brief_id_str, finalize_task_id
+                ),
+            )
+        )
+    return True
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="GET")
+def public_brief_ai_final_documents(request, brief_id):
+    """Token-scoped read of the anonymous brief's final documents (S2-7).
+
+    When the brief is ready but has no documents yet, finalize is dispatched
+    asynchronously and the response carries ``generating: true`` with an empty
+    document list; the front-end polls until the documents appear. No LLM call
+    runs inside the request.
+    """
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    generating = _dispatch_finalize_if_ready(brief)
+
+    # Never expose the vendor outreach email to the anonymous client (PRD §5):
+    # the brief is shown on the vendor's branded page and vendor_email holds the
+    # vendor's outreach strategy and contacts.
+    documents = list(
+        brief.final_documents.filter(kind__in=ANON_VISIBLE_DOCUMENT_KINDS).order_by(
+            "kind"
+        )
+    )
+    # SF-5/BE-1: when a previous finalize failed, the marker is gone and no new
+    # one is dispatched (the loop is broken). Surface the failure so the client
+    # stops polling and shows an error instead of spinning forever. The signal is
+    # finalize_failed, not pending_task_error, so a concurrent status poll that
+    # clears pending_task_error cannot hide it (and reopen the dispatch loop).
+    brief.refresh_from_db(fields=["finalize_failed"])
+    finalize_failed = brief.finalize_failed and not documents
+    return JsonResponse(
+        {
+            "briefId": str(brief.id),
+            "conversationStatus": brief.conversation_status,
+            "documents": [serialize_brief_final_document(x) for x in documents],
+            "generating": generating and not documents,
+            "finalizeFailed": finalize_failed,
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+@public_endpoint
+@conditional_ratelimit(key=client_ip_ratelimit_key, rate="60/m", method="PATCH")
+def public_brief_ai_final_document_update(request, brief_id, document_id):
+    """Token-scoped edit of an anonymous brief's final document (S2-7).
+
+    Mirrors the authenticated editor PATCH so the white-label anonymous client
+    can review and tweak the document before Send.
+    """
+    brief = _get_brief_for_token(brief_id, request)
+    if not brief:
+        return JsonResponse({"error": "Brief not found"}, status=404)
+
+    # Once the brief is sent the vendor reads this very document (no copy), so an
+    # anonymous edit after Send would silently change what the vendor sees. Lock
+    # editing as soon as any vendor project reaches RFP.
+    if _brief_already_sent(brief):
+        return JsonResponse(
+            {"error": "Brief already sent and can no longer be edited"}, status=409
+        )
+
+    # vendor_email is vendor PII and invisible to the anonymous client (PRD §5):
+    # scope the lookup to the client-facing kinds so an anonymous edit can neither
+    # read nor mutate it. An out-of-scope kind looks like a missing document (404),
+    # which also avoids confirming the vendor_email exists.
+    document = (
+        BriefFinalDocument.objects.filter(id=document_id, brief=brief)
+        .filter(kind__in=ANON_VISIBLE_DOCUMENT_KINDS)
+        .first()
+    )
+    if not document:
+        return JsonResponse({"error": "Document not found"}, status=404)
+
+    body, error = _parse_json_body(request)
+    if error:
+        return error
+
+    html = body.get("html")
+    if not isinstance(html, str):
+        return JsonResponse({"error": "html is required"}, status=400)
+    if len(html) > MAX_FINAL_DOCUMENT_HTML_LENGTH:
+        return JsonResponse({"error": "Document too large"}, status=400)
+
+    document.html = sanitize_html(html)
+
+    plain_text = body.get("plainText")
+    if isinstance(plain_text, str):
+        document.plain_text = plain_text[:MAX_FINAL_DOCUMENT_HTML_LENGTH]
+
+    document.save(update_fields=["html", "plain_text", "updated_at"])
+    return JsonResponse(serialize_brief_final_document(document))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT")
 def client_brief_ai_claim(request, brief_id):
     token = request.headers.get("X-Brief-Token", "")
     if not token:
         return JsonResponse({"error": "X-Brief-Token is required"}, status=400)
 
-    client = _get_client_safe(request)
+    user = _get_request_user(request)
+    if not user:
+        return JsonResponse({"error": "Client profile not found"}, status=403)
+
+    claimable = Brief.objects.filter(
+        id=brief_id,
+        anonymous_token=token,
+        client__isnull=True,
+        deleted_at__isnull=True,
+    ).first()
+    if not claimable:
+        return JsonResponse({"error": "Brief not found or already claimed"}, status=404)
+
+    contact_email = (claimable.contact_email or "").strip()
+    if contact_email and contact_email.casefold() != (user.email or "").casefold():
+        return JsonResponse({"error": "Brief belongs to a different email"}, status=403)
+
+    client = _get_client_safe(request) or _ensure_client_for_claim(request)
     if not client:
         return JsonResponse({"error": "Client profile not found"}, status=403)
 
@@ -1643,13 +2577,29 @@ def client_brief_ai_claim(request, brief_id):
             anonymous_token=token,
         ).update(anonymous_token="")
 
-        brief = Brief.objects.filter(id=brief_id).first()
+        # Backfill the client onto any lead projects created while the brief was
+        # anonymous (anonymous Send creates Project with client=None). Without this
+        # the vendor's lead has no link back to the now-registered client.
+        Project.objects.filter(brief_id=brief_id, client__isnull=True).update(
+            client=client
+        )
+
+        # Re-read under the row lock (mirrors _dispatch_finalize_if_ready): an
+        # anonymous finalize-on-ready dispatched by the white-label poller may
+        # already own the brief (pending_task_id set, documents still generating,
+        # status not yet COMPLETED). A plain read here would miss that marker and
+        # dispatch a second finalize, racing the first — both reach
+        # generate_final_documents which delete+recreates the documents, burning a
+        # duplicate paid LLM call. The pending_task_id guard refuses to dispatch
+        # while a finalize is already in flight.
+        brief = Brief.objects.select_for_update().filter(id=brief_id).first()
         if not brief:
             return JsonResponse({"error": "Brief not found"}, status=404)
 
         should_finalize = (
             brief.conversation_status == "ready_to_finalize"
             and brief.status != "COMPLETED"
+            and not brief.pending_task_id
             and not brief.final_documents.exists()
         )
         if should_finalize:

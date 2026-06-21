@@ -46,7 +46,27 @@ urlpatterns = [
         user_views.vendor_settings_logo,
         name="vendor-settings-logo",
     ),
+    path(
+        "api/v1/vendor/settings/slug/suggest",
+        user_views.vendor_slug_suggest,
+        name="vendor-slug-suggest",
+    ),
+    path(
+        "api/v1/vendor/settings/slug/check",
+        user_views.vendor_slug_check,
+        name="vendor-slug-check",
+    ),
     path("api/v1/vendor/settings", user_views.vendor_settings, name="vendor-settings"),
+    path(
+        "api/v1/vendor/webhook-key/rotate",
+        user_views.vendor_webhook_key_rotate,
+        name="vendor-webhook-key-rotate",
+    ),
+    path(
+        "api/v1/vendor/webhook-key",
+        user_views.vendor_webhook_key,
+        name="vendor-webhook-key",
+    ),
     # Catalog API
     path("api/v1/", include("aivus_backend.catalog.api.urls", namespace="catalog_api")),
     # Projects API (briefs, projects, offers)

@@ -8,7 +8,9 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
 
+from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.ai_brief_v3 import feedback_question_for
 from aivus_backend.projects.ai_brief_v3 import generate_brief_title
 from aivus_backend.projects.ai_brief_v3 import generate_final_documents
@@ -20,8 +22,11 @@ from aivus_backend.projects.attachments import WIX_FILE_HOST_SUFFIXES
 from aivus_backend.projects.attachments import download_remote_file
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import BriefAttachment
+from aivus_backend.projects.models import BriefFinalDocument
+from aivus_backend.projects.models import BriefShare
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import LLMCallTrace
+from aivus_backend.projects.models import Project
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,58 @@ logger = logging.getLogger(__name__)
 @shared_task
 def clear_brief_pending_task(brief_id: str) -> None:
     Brief.objects.filter(id=brief_id).update(pending_task_id="")
+
+
+@shared_task
+def set_brief_pending_task(brief_id: str, task_id: str) -> dict:
+    """Re-assert the brief's pending marker mid-chain.
+
+    Inside the Send chain the brief must stay "pending" until the project is
+    promoted. The preceding finalize step now runs with keep_pending=True so the
+    marker normally never drops, making this a no-op re-assert; it remains as a
+    belt-and-braces guard for any path that clears the marker before promotion.
+    A single atomic update sets the marker and clears any stale error so there is
+    no clear-then-set window where the status endpoint could read it empty.
+    """
+    Brief.objects.filter(id=brief_id).update(
+        pending_task_id=task_id, pending_task_error=""
+    )
+    return {"ok": True}
+
+
+@shared_task
+def mark_brief_send_failed_task(brief_id: str, task_id: str) -> None:
+    """Record a failed Send chain so the status endpoint reports "failed".
+
+    Used as the chain's ``link_error``. The Send chain is not dispatched with a
+    single tracked id, so an ``AsyncResult`` on the pending marker can never see
+    the failure. Persisting the failing chain id here is the source of truth:
+    the status endpoint clears the pending marker and reports "failed" instead
+    of silently flipping to "done". Only the chain that still owns the pending
+    marker may stamp the error, so a stale retry cannot clobber a fresh Send.
+    """
+    Brief.objects.filter(id=brief_id, pending_task_id=task_id).update(
+        pending_task_id="", pending_task_error=task_id
+    )
+
+
+@shared_task
+def mark_brief_finalize_failed_task(brief_id: str, task_id: str) -> None:
+    """Record a failed finalize-on-ready so the GET-driven dispatch stops looping.
+
+    Used as the ``link_error`` of the asynchronous finalize-on-ready dispatch in
+    the branded anonymous flow. The loop-breaker (BE-1) must survive a concurrent
+    status poll: the status endpoints clear ``pending_task_error`` on read to let
+    a fresh Send re-arm, which would also wipe a marker shared with this signal.
+    A dedicated ``finalize_failed`` flag, which status reads never touch and only
+    a fresh Send resets, keeps the loop broken: the next final-documents GET sees
+    the flag, refuses to re-dispatch the paid finalize, and surfaces the failure.
+    Only the dispatch that still owns the pending marker may set it, so a stale
+    retry cannot clobber a fresh attempt.
+    """
+    Brief.objects.filter(id=brief_id, pending_task_id=task_id).update(
+        pending_task_id="", finalize_failed=True
+    )
 
 
 def persist_message_traces(chat_message: ChatMessage, traces: list[dict]) -> None:
@@ -206,13 +263,43 @@ def import_wix_attachments_task(brief_id: str, file_specs: list[dict]) -> dict:
     retry_backoff=True,
     max_retries=1,
 )
-def finalize_brief_task(brief_id: str) -> dict:
+def finalize_brief_task(brief_id: str, *, keep_pending: bool = False) -> dict:  # noqa: C901
+    """Generate the brief's final documents and flip it to finalized.
+
+    SF-1: when this task is the first step of a Send chain (``keep_pending=True``)
+    it must not clear ``pending_task_id``. Clearing it would open a window between
+    this task finishing and the next chain step re-arming the marker, during which
+    the status endpoint would report ``done`` even though the project is still at
+    DRAFT and no emails were sent — the client would redirect to success too early.
+    Leaving the Send chain's marker in place keeps the brief ``pending`` until the
+    tail clear step runs after the project is promoted to RFP. A standalone finalize
+    (chat flow) keeps the default and clears the marker so polling can stop.
+    """
     with transaction.atomic():
         try:
             brief = Brief.objects.select_for_update().get(id=brief_id)
         except Brief.DoesNotExist:
             logger.warning("Brief not found for finalization: brief_id=%s", brief_id)
             return {"error": "Brief not found"}
+
+        # Idempotency guard: a brief that is already finalized and has documents
+        # must never be re-finalized. generate_final_documents deletes and
+        # recreates the documents, which would discard the existing copy and any
+        # manual edits the client made before Send. This can happen when a Send is
+        # pressed while a GET-triggered finalize is still in flight (MF-2 race) or
+        # on a Celery retry. The select_for_update above serialises this check
+        # against a concurrent finalize on the same row.
+        if (
+            brief.status == "COMPLETED"
+            and brief.conversation_status == "finalized"
+            and BriefFinalDocument.objects.filter(brief=brief).exists()
+        ):
+            logger.info(
+                "Brief already finalized, skipping re-finalize: brief_id=%s", brief_id
+            )
+            if not keep_pending:
+                Brief.objects.filter(id=brief.id).update(pending_task_id="")
+            return serialize_brief_v3_detail(brief)
 
     started_at = time.monotonic()
     try:
@@ -255,8 +342,11 @@ def finalize_brief_task(brief_id: str) -> dict:
             "total_input_tokens": F("total_input_tokens") + result["input_tokens"],
             "total_output_tokens": F("total_output_tokens") + result["output_tokens"],
             "total_cost_usd": F("total_cost_usd") + Decimal(str(result["cost_usd"])),
-            "pending_task_id": "",
         }
+        # SF-1: inside a Send chain (keep_pending) the marker must survive so the
+        # status endpoint keeps reporting "pending" until the project is promoted.
+        if not keep_pending:
+            update_kwargs["pending_task_id"] = ""
         if new_title and not brief.title:
             update_kwargs["title"] = new_title
         Brief.objects.filter(id=brief.id).update(**update_kwargs)
@@ -284,3 +374,177 @@ def finalize_brief_task(brief_id: str) -> dict:
         )
 
     return serialize_brief_v3_detail(brief)
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def mark_project_sent_task(brief_id: str, vendor_id: str) -> dict:
+    """Promote the vendor's lead project to RFP once the brief is finalized.
+
+    Idempotent: a project already at RFP or beyond is left untouched so a
+    double Send (double click, retry, browser back) never produces a second
+    project. For the logged-in "pick an existing brief" flow no DRAFT project
+    exists yet, so one is created directly at RFP.
+
+    BE-2: the public share is created in the SAME atomic block that promotes the
+    project. The hard, must-succeed part of Send (promotion + share) therefore
+    commits or rolls back as one unit. The subsequent send_emails_task only
+    dispatches the emails best-effort and never raises, so an email failure can no
+    longer leave a promoted lead that the client is told "failed" yet cannot
+    re-send (the re-Send 409s on the already-promoted lead).
+    """
+    promoted_statuses = {
+        ProjectStatus.RFP,
+        ProjectStatus.REVIEWING,
+        ProjectStatus.ONGOING,
+    }
+    with transaction.atomic():
+        brief = Brief.objects.filter(id=brief_id).first()
+        if not brief:
+            logger.warning("mark_project_sent: brief not found %s", brief_id)
+            return {"ok": False}
+
+        # Filter deleted_at to match the conditional unique constraint
+        # (uniq_active_project_per_vendor_brief, deleted_at IS NULL). Without it
+        # get_or_create would match a soft-deleted lead and resurrect it at RFP
+        # while leaving deleted_at set, instead of creating a fresh active project.
+        project, created = Project.objects.select_for_update().get_or_create(
+            vendor_id=vendor_id,
+            brief=brief,
+            deleted_at__isnull=True,
+            defaults={
+                "name": (brief.title or "New brief lead")[:255],
+                "status": ProjectStatus.RFP,
+                "client_id": brief.client_id,
+            },
+        )
+        already_sent = not created and project.status in promoted_statuses
+        if not created and not already_sent:
+            project.status = ProjectStatus.RFP
+            if not (project.name or "").strip() or project.name == "New brief lead":
+                project.name = (brief.title or project.name or "New brief lead")[:255]
+            if brief.client_id and not project.client_id:
+                project.client_id = brief.client_id
+            project.save(update_fields=["status", "name", "client", "updated_at"])
+
+        # The share lives with the promotion so the must-succeed part of Send is
+        # one atomic unit (BE-2). Idempotent: an existing share is reused, so a
+        # retry never duplicates it. The emails_sent_at marker stays in
+        # send_emails_task where it guards against duplicate email dispatch.
+        share, _share_created = BriefShare.objects.get_or_create(brief=brief)
+
+    return {
+        "ok": True,
+        "projectId": str(project.id),
+        "alreadySent": already_sent,
+        "shareToken": share.token,
+    }
+
+
+def _claim_lead_email_dispatch(brief, vendor_id: str, recipient_email: str):
+    """Claim the per-recipient email markers under a row lock.
+
+    Stamps a marker only for the email this run is about to attempt, so a
+    redelivered task skips what was already sent and still picks up what a
+    previous run failed to enqueue. The share is created with the promotion, so
+    it always exists here; get_or_create is a defensive fallback for a direct
+    call. Returns ``(project, share, send_client, send_vendor)`` or None when the
+    project is missing.
+    """
+    with transaction.atomic():
+        project = (
+            Project.objects.select_for_update()
+            .filter(vendor_id=vendor_id, brief=brief, deleted_at__isnull=True)
+            .select_related("vendor", "vendor__owner")
+            .first()
+        )
+        if not project:
+            return None
+        share, _created = BriefShare.objects.get_or_create(brief=brief)
+        send_client = bool(recipient_email) and project.emails_sent_at is None
+        send_vendor = project.vendor_notified_at is None
+        now = timezone.now()
+        update_fields = ["updated_at"]
+        if send_client:
+            project.emails_sent_at = now
+            update_fields.append("emails_sent_at")
+        if send_vendor:
+            project.vendor_notified_at = now
+            update_fields.append("vendor_notified_at")
+        if len(update_fields) > 1:
+            project.save(update_fields=update_fields)
+    return project, share, send_client, send_vendor
+
+
+@shared_task
+def send_emails_task(
+    brief_id: str,
+    vendor_id: str,
+    recipient_email: str = "",
+    language: str = "en",
+) -> dict:
+    """Dispatch the client + vendor lead emails best-effort after promotion.
+
+    BE-2: the must-succeed part of Send (project promotion + BriefShare) now runs
+    atomically in mark_project_sent_task. This task only sends the emails and
+    never raises (no autoretry) — so an email failure cannot flip the client to
+    "failed" and strand a promoted lead that can no longer be re-sent (the
+    re-Send 409s on the already-promoted project). The client email is only sent
+    when an email was provided (anonymous Send); the vendor email always fires.
+
+    Duplicate dispatch is guarded per recipient: emails_sent_at claims the client
+    email and vendor_notified_at claims the vendor email, each stamped under a row
+    lock, so a redelivered task (Celery at-least-once) sees the marker and skips.
+
+    R11-2: the two markers are independent because the vendor email enqueue can
+    fail on its own (broker hiccup). A single shared marker stamped before sending
+    meant a failed vendor enqueue still flipped the marker, so a redelivered task
+    skipped both and the vendor was never told about the lead. Now the vendor
+    marker is stamped only after a successful enqueue and rolled back on failure,
+    so a retry re-sends the vendor email without ever re-sending the client email
+    (which its own marker still guards).
+    """
+    from aivus_backend.projects import brief_emails  # noqa: PLC0415
+
+    brief = Brief.objects.filter(id=brief_id).first()
+    if not brief:
+        logger.warning("send_emails: brief not found %s", brief_id)
+        return {"ok": False}
+
+    claimed = _claim_lead_email_dispatch(brief, vendor_id, recipient_email)
+    if claimed is None:
+        logger.warning("send_emails: project not found brief=%s", brief_id)
+        return {"ok": False}
+    project, share, send_client, send_vendor = claimed
+
+    if not send_client and not send_vendor:
+        logger.info("send_emails: already sent brief=%s, skipping", brief_id)
+        return {"ok": True, "alreadySent": True}
+
+    if send_client:
+        try:
+            brief_emails.send_client_lead_email(
+                brief, recipient_email, share.token, language, project=project
+            )
+        except Exception:
+            # The client enqueue failed: release the marker so a redelivered task
+            # (or a fresh Send) re-sends the client email. The vendor marker stays
+            # under its own guard, so the vendor is never emailed twice by the
+            # retry. Mirrors the vendor rollback below.
+            logger.exception("client lead email failed brief=%s", brief_id)
+            Project.objects.filter(id=project.id).update(emails_sent_at=None)
+
+    if send_vendor:
+        try:
+            brief_emails.send_vendor_lead_email(project, brief)
+        except Exception:
+            # The vendor enqueue failed: release the marker so a redelivered task
+            # (or a fresh Send) re-sends the vendor email. The client marker stays
+            # stamped, so the client is never emailed twice by the retry.
+            logger.exception("vendor lead email failed brief=%s", brief_id)
+            Project.objects.filter(id=project.id).update(vendor_notified_at=None)
+
+    return {"ok": True, "shareToken": share.token}

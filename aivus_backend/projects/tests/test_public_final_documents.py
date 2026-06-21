@@ -1,0 +1,442 @@
+"""Tests for token-scoped anonymous final-document GET/PATCH (Stage 2 S2-7)."""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import patch
+
+import pytest
+from django.test import Client as DjangoTestClient
+from django.urls import reverse
+from django.utils import timezone
+
+from aivus_backend.core.enums import FinalDocumentKind
+from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefFinalDocument
+from aivus_backend.projects.models import Project
+from aivus_backend.users.models import User
+from aivus_backend.users.models import Vendor
+
+
+@pytest.fixture
+def api_client() -> DjangoTestClient:
+    return DjangoTestClient()
+
+
+@pytest.fixture
+def anon_brief_with_document(db):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="final-doc-token",
+        conversation_status="ready_to_finalize",
+    )
+    document = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.PRODUCTION_BRIEF,
+        html="<p>Original</p>",
+        plain_text="Original",
+    )
+    return brief, document
+
+
+def _run_on_commit(func):
+    func()
+
+
+@pytest.mark.django_db
+def test_get_final_documents_with_token(api_client, anon_brief_with_document):
+    brief, document = anon_brief_with_document
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["briefId"] == str(brief.id)
+    assert len(body["documents"]) == 1
+    assert body["documents"][0]["id"] == str(document.id)
+    assert body["generating"] is False
+
+
+@pytest.mark.django_db
+def test_get_final_documents_dispatches_finalize_when_ready_and_empty(api_client):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="ready-no-docs",
+        conversation_status="ready_to_finalize",
+    )
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+        ) as finalize_mock,
+    ):
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="ready-no-docs",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["documents"] == []
+    assert body["generating"] is True
+    assert body["conversationStatus"] == "ready_to_finalize"
+    finalize_mock.apply_async.assert_called_once()
+    brief.refresh_from_db()
+    assert brief.pending_task_id != ""
+
+
+@pytest.mark.django_db
+def test_get_final_documents_does_not_redispatch_when_pending(api_client):
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="already-pending",
+        conversation_status="ready_to_finalize",
+        pending_task_id="existing-task",
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="already-pending",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generating"] is True
+    finalize_mock.apply_async.assert_not_called()
+    brief.refresh_from_db()
+    assert brief.pending_task_id == "existing-task"
+
+
+@pytest.mark.django_db
+def test_get_final_documents_does_not_redispatch_after_finalize_failed(api_client):
+    """SF-5/BE-1: a finalize that failed must not be re-dispatched on every GET.
+
+    The failed finalize sets finalize_failed and surrenders the marker. The next
+    poll must NOT fire finalize again (the old unconditional clear caused an
+    unbounded LLM retry loop); it reports finalizeFailed so the client stops
+    polling instead of driving the loop.
+    """
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="finalize-failed",
+        conversation_status="ready_to_finalize",
+        pending_task_id="",
+        finalize_failed=True,
+    )
+
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="finalize-failed",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    finalize_mock.apply_async.assert_not_called()
+    assert body["generating"] is False
+    assert body["finalizeFailed"] is True
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+
+
+@pytest.mark.django_db
+def test_get_final_documents_finalize_link_error_marks_failed(api_client):
+    """SF-5/BE-1: finalize-on-ready must use mark_brief_finalize_failed_task as
+    link_error (which sets the dedicated finalize_failed flag) rather than a bare
+    clear, so a failure is recorded and the retry loop is broken even when a
+    concurrent status poll clears pending_task_error."""
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="link-error-check",
+        conversation_status="ready_to_finalize",
+    )
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+        ) as finalize_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.mark_brief_finalize_failed_task"
+        ) as fail_mock,
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.clear_brief_pending_task"
+        ) as clear_mock,
+    ):
+        api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="link-error-check",
+        )
+
+    finalize_mock.apply_async.assert_called_once()
+    link_error = finalize_mock.apply_async.call_args.kwargs["link_error"]
+    # link_error must come from mark_brief_finalize_failed_task, not the bare clear.
+    fail_mock.si.assert_called_once()
+    clear_mock.si.assert_not_called()
+    assert link_error is fail_mock.si.return_value
+
+
+@pytest.mark.django_db
+def test_status_poll_does_not_reopen_finalize_loop(api_client):
+    """BE-1: the interleaving regression. A failed finalize-on-ready sets
+    finalize_failed AND pending_task_error (the latter via the real link_error
+    task semantics). The 1.5s status poller runs before the 3s final-documents
+    poller and clears pending_task_error on read. The next final-documents GET
+    must STILL refuse to re-dispatch the paid finalize, because the loop-breaker
+    keys off finalize_failed, which the status read never touches.
+    """
+    from aivus_backend.projects.tasks import mark_brief_finalize_failed_task
+
+    brief = Brief.objects.create(
+        client=None,
+        anonymous_token="interleave-token",
+        conversation_status="ready_to_finalize",
+        pending_task_id="failed-finalize-id",
+    )
+
+    # 1) The finalize-on-ready link_error fires: it surrenders the marker and sets
+    #    the dedicated finalize_failed flag (only because it still owns the marker).
+    mark_brief_finalize_failed_task(str(brief.id), "failed-finalize-id")
+    # Model the worst case where a Send-chain error also left pending_task_error
+    # set, so the status read below actually has something to clear.
+    Brief.objects.filter(id=brief.id).update(pending_task_error="stale-send-error")
+    brief.refresh_from_db()
+    assert brief.finalize_failed is True
+    assert brief.pending_task_id == ""
+
+    # 2) The faster status poller reads and clears pending_task_error (legitimate:
+    #    it lets a fresh Send re-arm). It must not touch finalize_failed.
+    status_response = api_client.get(
+        reverse("projects_api:public_brief_ai_status", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="interleave-token",
+    )
+    assert status_response.status_code == 200
+    brief.refresh_from_db()
+    assert brief.pending_task_error == ""
+    assert brief.finalize_failed is True
+
+    # 3) The next final-documents poll must NOT re-dispatch the paid finalize.
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        docs_response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="interleave-token",
+        )
+
+    assert docs_response.status_code == 200
+    finalize_mock.apply_async.assert_not_called()
+    body = docs_response.json()
+    assert body["generating"] is False
+    assert body["finalizeFailed"] is True
+    brief.refresh_from_db()
+    assert brief.pending_task_id == ""
+
+
+@pytest.mark.django_db
+def test_get_final_documents_not_generating_when_present(
+    api_client, anon_brief_with_document
+):
+    brief, _document = anon_brief_with_document
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.finalize_brief_task"
+    ) as finalize_mock:
+        response = api_client.get(
+            reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+            HTTP_X_BRIEF_TOKEN="final-doc-token",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generating"] is False
+    finalize_mock.apply_async.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_get_final_documents_wrong_token_404(api_client, anon_brief_with_document):
+    brief, _document = anon_brief_with_document
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="wrong-token",
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_patch_final_document_with_token(api_client, anon_brief_with_document):
+    brief, document = anon_brief_with_document
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>Edited by anon</p>", "plainText": "Edited"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 200
+    document.refresh_from_db()
+    assert "Edited by anon" in document.html
+    assert document.plain_text == "Edited"
+
+
+@pytest.mark.django_db
+def test_patch_final_document_wrong_token_404(api_client, anon_brief_with_document):
+    brief, document = anon_brief_with_document
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>nope</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="wrong-token",
+    )
+    assert response.status_code == 404
+    document.refresh_from_db()
+    assert "nope" not in document.html
+
+
+@pytest.mark.django_db
+def test_patch_final_document_requires_html(api_client, anon_brief_with_document):
+    brief, document = anon_brief_with_document
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"plainText": "no html"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_patch_final_document_blocked_after_send(api_client, anon_brief_with_document):
+    """Once the brief is sent (project at RFP) the vendor reads this very
+    document, so an anonymous PATCH after Send must be rejected (MF-6)."""
+    brief, document = anon_brief_with_document
+    owner = User.objects.create_user(
+        email="docs-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="Docs Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>sneaky edit</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 409
+    document.refresh_from_db()
+    assert "sneaky edit" not in document.html
+
+
+@pytest.mark.django_db
+def test_patch_allowed_when_only_soft_deleted_rfp_project(
+    api_client, anon_brief_with_document
+):
+    """SF-5: _brief_already_sent must count only active projects. A soft-deleted
+    RFP project means the brief is not really sent, so the anonymous client may
+    still edit the document."""
+    brief, document = anon_brief_with_document
+    owner = User.objects.create_user(
+        email="sf5-vendor@example.com", password="p@ssw0rd", group="VENDOR"
+    )
+    vendor = Vendor.objects.create(name="SF5 Studio", owner=owner)
+    Project.objects.create(
+        vendor=vendor,
+        brief=brief,
+        name="lead",
+        status=ProjectStatus.RFP,
+        deleted_at=timezone.now(),
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, document.id],
+        ),
+        data=json.dumps({"html": "<p>still editable</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+    assert response.status_code == 200
+    document.refresh_from_db()
+    assert "still editable" in document.html
+
+
+@pytest.mark.django_db
+def test_get_final_documents_excludes_vendor_email(
+    api_client, anon_brief_with_document
+):
+    """MF-3: the anonymous white-label GET must never expose the vendor outreach
+    email — it carries the vendor's outreach strategy and contacts (PRD §5)."""
+    brief, production_doc = anon_brief_with_document
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.VENDOR_EMAIL,
+        html="<p>Vendor outreach strategy and contacts</p>",
+        plain_text="Vendor outreach strategy and contacts",
+    )
+
+    response = api_client.get(
+        reverse("projects_api:public_brief_ai_final_documents", args=[brief.id]),
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    returned_ids = {doc["id"] for doc in body["documents"]}
+    assert str(production_doc.id) in returned_ids
+    assert str(vendor_email.id) not in returned_ids
+    assert "outreach strategy" not in json.dumps(body)
+
+
+@pytest.mark.django_db
+def test_patch_vendor_email_rejected_for_anon(api_client, anon_brief_with_document):
+    """MF-3: the anonymous client must not be able to read or edit the vendor
+    outreach email. The out-of-scope kind looks like a missing document (404)."""
+    brief, _production_doc = anon_brief_with_document
+    vendor_email = BriefFinalDocument.objects.create(
+        brief=brief,
+        kind=FinalDocumentKind.VENDOR_EMAIL,
+        html="<p>Original vendor email</p>",
+        plain_text="Original vendor email",
+    )
+
+    response = api_client.patch(
+        reverse(
+            "projects_api:public_brief_ai_final_document_update",
+            args=[brief.id, vendor_email.id],
+        ),
+        data=json.dumps({"html": "<p>anon tampering</p>"}),
+        content_type="application/json",
+        HTTP_X_BRIEF_TOKEN="final-doc-token",
+    )
+
+    assert response.status_code == 404
+    vendor_email.refresh_from_db()
+    assert "tampering" not in vendor_email.html
+    assert "Original vendor email" in vendor_email.html

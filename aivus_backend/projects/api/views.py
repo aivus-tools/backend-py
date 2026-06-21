@@ -1,5 +1,6 @@
 """API views for projects app."""
 
+import contextlib
 import json
 import logging
 import uuid as uuid_module
@@ -12,47 +13,28 @@ import openpyxl
 from django.db import IntegrityError
 from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone as tz
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-
-try:
-    from django_ratelimit.decorators import ratelimit
-except ImportError:
-    from django.conf import settings as django_settings
-
-    if not django_settings.DEBUG:
-        msg = (
-            "django-ratelimit is required in production but not installed. "
-            "Run: pip install django-ratelimit"
-        )
-        raise ImportError(msg) from None
-
-    # Fallback: no-op decorator only in DEBUG mode
-    def ratelimit(**kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-
-import contextlib
-
-from django.utils import timezone as tz
 
 from aivus_backend.catalog.models import Category
 from aivus_backend.catalog.models import Entry
 from aivus_backend.catalog.models import Unit
+from aivus_backend.core.decorators import conditional_ratelimit
 from aivus_backend.core.decorators import public_endpoint
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
 from aivus_backend.core.enums import BriefStatus
 from aivus_backend.core.enums import OfferSource
 from aivus_backend.core.enums import OfferStatus
 from aivus_backend.core.enums import ProjectStatus
+from aivus_backend.core.ratelimit import user_ratelimit_key
 from aivus_backend.projects.ai_brief import analyze_brief
 from aivus_backend.projects.ai_brief import analyze_comparison
 from aivus_backend.projects.ai_brief import process_chat_message
 from aivus_backend.projects.api.serializers import serialize_brief
 from aivus_backend.projects.api.serializers import serialize_brief_detail
+from aivus_backend.projects.api.serializers import serialize_brief_final_document
 from aivus_backend.projects.api.serializers import serialize_brief_offer
 from aivus_backend.projects.api.serializers import serialize_brief_with_offers
 from aivus_backend.projects.api.serializers import serialize_offer
@@ -64,6 +46,7 @@ from aivus_backend.projects.api.serializers import serialize_share
 from aivus_backend.projects.api.serializers import serialize_share_public
 from aivus_backend.projects.api.serializers import serialize_template
 from aivus_backend.projects.models import Brief
+from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import BriefOffer
 from aivus_backend.projects.models import ChatMessage
 from aivus_backend.projects.models import ClientManager
@@ -145,7 +128,7 @@ def projects_list(request):  # noqa: C901, PLR0912, PLR0915
             Project.objects.filter(
                 vendor_id=vendor_id,
             )
-            .select_related("client")
+            .select_related("client", "brief")
             .prefetch_related("collaborators", "client_managers")
         )
         return JsonResponse([serialize_project(p) for p in projects], safe=False)
@@ -243,20 +226,32 @@ def projects_list(request):  # noqa: C901, PLR0912, PLR0915
                 except Client.DoesNotExist:
                     return JsonResponse({"error": "Client not found"}, status=404)
 
-            project = Project.objects.create(
-                name=name,
-                vendor=vendor,
-                brief=brief,
-                team=team,
-                status=status,
-                crm_id=crm_id,
-                description=description,
-                client=client,
-                client_name=client_name,
-                irs_ein=irs_ein,
-                brand_name=brand_name,
-                agency_name=agency_name,
-            )
+            try:
+                with transaction.atomic():
+                    project = Project.objects.create(
+                        name=name,
+                        vendor=vendor,
+                        brief=brief,
+                        team=team,
+                        status=status,
+                        crm_id=crm_id,
+                        description=description,
+                        client=client,
+                        client_name=client_name,
+                        irs_ein=irs_ein,
+                        brand_name=brand_name,
+                        agency_name=agency_name,
+                    )
+            except IntegrityError as ex:
+                # uniq_active_project_per_vendor_brief (migration 0038): a second
+                # active project for the same vendor+brief is a conflict, not a
+                # server error. Without this the bare create raised a 500.
+                if "uniq_active_project_per_vendor_brief" in str(ex):
+                    return JsonResponse(
+                        {"error": "This brief is already linked to a project"},
+                        status=409,
+                    )
+                raise
 
             # Create collaborators
             for collab in collaborators:
@@ -308,7 +303,7 @@ def projects_archived(request):
             vendor_id=vendor_id,
             deleted_at__isnull=False,
         )
-        .select_related("client")
+        .select_related("client", "brief")
         .prefetch_related("collaborators", "client_managers")
     )
     return JsonResponse([serialize_project(p) for p in projects], safe=False)
@@ -2239,7 +2234,7 @@ def client_brief_offers(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="20/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_chat(request):
     """AI-powered chat for brief creation."""
     try:
@@ -2306,7 +2301,7 @@ def client_brief_chat(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_chat_analyze(request):
     """Analyze a brief and provide suggestions.
 
@@ -2498,7 +2493,7 @@ def client_brief_comparison(request, brief_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_groups("CLIENT", "SYSTEM")
-@ratelimit(key="user_or_ip", rate="10/m", method="POST", block=True)
+@conditional_ratelimit(key=user_ratelimit_key, rate="10/m", method="POST")
 def client_brief_comparison_analyze(request, brief_id):
     """AI analysis of comparison data for a brief's offers.
 
@@ -2888,3 +2883,67 @@ def share_export_data(request, token):
         return JsonResponse({"error": "Offer not found"}, status=404)
 
     return JsonResponse(_build_offer_export_data(offer, include_internal_costs=False))
+
+
+# ==================== Vendor brief read (Stage 2 S2-10) ====================
+
+
+def _vendor_project_for_read(project_id, request) -> Project | None:
+    """Return the project only when it belongs to the requesting vendor.
+
+    Authorization is by ownership: the project's vendor must match the vendor
+    resolved for the authenticated user. SYSTEM is allowed for tooling.
+    """
+    vendor_id = request.user_data.get("vendor_id")
+    if not vendor_id and request.user_data.get("group") != "SYSTEM":
+        return None
+    query = Project.objects.filter(id=project_id, deleted_at__isnull=True)
+    if vendor_id:
+        query = query.filter(vendor_id=vendor_id)
+    return query.select_related("brief").first()
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_project_brief_documents(request, project_id):
+    """List the final documents of a brief the vendor received as a project."""
+    project = _vendor_project_for_read(project_id, request)
+    brief = project.brief if project else None
+    if not project or not brief:
+        return JsonResponse({"error": "Project or brief not found"}, status=404)
+
+    documents = brief.final_documents.filter(
+        kind__in=CLIENT_FACING_DOCUMENT_KINDS
+    ).order_by("kind")
+    return JsonResponse(
+        {
+            "projectId": str(project.id),
+            "briefId": str(brief.id),
+            "conversationStatus": brief.conversation_status,
+            "documents": [serialize_brief_final_document(x) for x in documents],
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def vendor_project_brief_document_pdf(request, project_id, document_id):
+    """Download a brief document PDF for a project the vendor owns."""
+    from aivus_backend.projects.api.views_brief_v3 import (  # noqa: PLC0415
+        _pdf_response_for_document,
+    )
+
+    project = _vendor_project_for_read(project_id, request)
+    if not project or not project.brief_id:
+        return JsonResponse({"error": "Project or brief not found"}, status=404)
+
+    document = BriefFinalDocument.objects.filter(
+        id=document_id,
+        brief_id=project.brief_id,
+        kind__in=CLIENT_FACING_DOCUMENT_KINDS,
+    ).first()
+    if not document:
+        return JsonResponse({"error": "Document not found"}, status=404)
+    return _pdf_response_for_document(document)
