@@ -53,11 +53,11 @@ class HMACAuthenticationMiddleware(MiddlewareMixin):
         client_id = None
 
         if db_group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             vendor_id = str(vendor.id) if vendor else None
 
         if db_group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             client_id = str(client.id) if client else None
 
         return {

@@ -54,16 +54,19 @@ def user_me(request):
             "group": user.group,
             "position": user.position,
             "authType": user.auth_type,
+            "emailConfirmedAt": (
+                user.email_confirmed_at.isoformat() if user.email_confirmed_at else None
+            ),
         }
 
         # Add vendor_id or client_id if applicable
         if user.group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             if vendor:
                 response_data["vendorId"] = str(vendor.id)
 
         if user.group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             if client:
                 response_data["clientId"] = str(client.id)
 
@@ -133,13 +136,19 @@ def change_user_group(request, user_id):  # noqa: C901, PLR0912
         user.save()
 
         # Create Client or Vendor if needed
-        if new_group == "VENDOR" and not Vendor.objects.filter(owner=user).exists():
+        if (
+            new_group == "VENDOR"
+            and not Vendor.objects.filter(owner=user, deleted_at__isnull=True).exists()
+        ):
             Vendor.objects.create(
                 name=f"{user.name}'s Agency",
                 owner=user,
             )
 
-        if new_group == "CLIENT" and not Client.objects.filter(owner=user).exists():
+        if (
+            new_group == "CLIENT"
+            and not Client.objects.filter(owner=user, deleted_at__isnull=True).exists()
+        ):
             Client.objects.create(
                 name=f"{user.name}'s Company",
                 ein="",  # Will be filled later
@@ -155,12 +164,12 @@ def change_user_group(request, user_id):  # noqa: C901, PLR0912
 
         # Add vendor_id or client_id if applicable
         if user.group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             if vendor:
                 response_data["vendorId"] = str(vendor.id)
 
         if user.group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             if client:
                 response_data["clientId"] = str(client.id)
 
@@ -258,12 +267,16 @@ def user_profile(request):  # noqa: C901
         # Update Vendor/Client company name if provided
         if "company" in data:
             if user.group == "VENDOR":
-                vendor = Vendor.objects.filter(owner=user).first()
+                vendor = Vendor.objects.filter(
+                    owner=user, deleted_at__isnull=True
+                ).first()
                 if vendor:
                     vendor.name = data["company"]
                     vendor.save()
             elif user.group == "CLIENT":
-                client = Client.objects.filter(owner=user).first()
+                client = Client.objects.filter(
+                    owner=user, deleted_at__isnull=True
+                ).first()
                 if client:
                     client.name = data["company"]
                     client.save()
@@ -292,13 +305,13 @@ def _build_profile_response(user):
     }
 
     if user.group == "VENDOR":
-        vendor = Vendor.objects.filter(owner=user).first()
+        vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
         if vendor:
             response_data["vendorId"] = str(vendor.id)
             response_data["company"] = vendor.name
 
     if user.group == "CLIENT":
-        client = Client.objects.filter(owner=user).first()
+        client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
         if client:
             response_data["clientId"] = str(client.id)
             response_data["company"] = client.name
@@ -482,7 +495,7 @@ def vendor_settings(request):
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
 
-    vendor = Vendor.objects.filter(owner=user).first()
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
@@ -556,7 +569,7 @@ def vendor_settings_logo(request):
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
 
-    vendor = Vendor.objects.filter(owner=user).first()
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
@@ -587,7 +600,7 @@ def vendor_slug_suggest(request):
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
 
-    vendor = Vendor.objects.filter(owner=user).first()
+    vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
     if not vendor:
         return JsonResponse({"error": "Vendor not found"}, status=404)
 
@@ -658,7 +671,7 @@ def _vendor_for_request(request):
     user = User.objects.filter(id=user_id).first()
     if not user:
         return None
-    return Vendor.objects.filter(owner=user).first()
+    return Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
 
 
 def _vendor_ratelimited(request, vendor, group: str, rate: str, method: str) -> bool:

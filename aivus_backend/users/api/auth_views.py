@@ -94,18 +94,23 @@ def _save_pending_brief(user, data):
 
 
 def _ensure_client_profile(user):
-    """Get or lazily create the user's Client profile without changing group.
+    """Return the owner's active Client, reviving a soft-deleted one or creating it.
 
     A visitor who came through a personal vendor link registers to claim their
     brief; their User.group may stay UNCONFIRMED/CONFIRMED while they still need
     a Client profile to own the brief. The group toggle stays a separate,
-    explicit user action.
+    explicit user action. A soft-deleted profile is revived rather than orphaned
+    so a returning owner keeps their company and briefs.
     """
-    client, _created = Client.objects.get_or_create(
-        owner=user,
-        defaults={"name": f"{user.name}'s Company", "ein": ""},
-    )
-    return client
+    client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
+    if client is not None:
+        return client
+    revived = Client.objects.filter(owner=user, deleted_at__isnull=False).first()
+    if revived is not None:
+        revived.deleted_at = None
+        revived.save(update_fields=["deleted_at"])
+        return revived
+    return Client.objects.create(owner=user, name=f"{user.name}'s Company", ein="")
 
 
 def _try_claim_pending_brief(user):
@@ -215,7 +220,8 @@ def register(request):  # noqa: C901, PLR0912, PLR0915
                 )
             hashed_password = make_password(password)
 
-        group = "CONFIRMED" if is_google else "UNCONFIRMED"
+        group = "CONFIRMED"
+        email_confirmed_at = timezone.now() if is_google else None
 
         language = resolve_language(
             data.get("language"),
@@ -230,9 +236,18 @@ def register(request):  # noqa: C901, PLR0912, PLR0915
             existing.deleted_at = None
             existing.pending_brief_id = None
             existing.pending_brief_token = None
+            existing.email_confirmed_at = email_confirmed_at
             existing.save()
             user = existing
-            logger.info("Restored soft-deleted user %s", user.email)
+            Vendor.objects.filter(owner=user, deleted_at__isnull=False).update(
+                deleted_at=None
+            )
+            Client.objects.filter(owner=user, deleted_at__isnull=False).update(
+                deleted_at=None
+            )
+            logger.info(
+                "Restored soft-deleted user %s and their vendor/client", user.email
+            )
         else:
             user = User.objects.create(
                 email=email,
@@ -240,6 +255,7 @@ def register(request):  # noqa: C901, PLR0912, PLR0915
                 password=hashed_password,
                 auth_type=auth_type,
                 group=group,
+                email_confirmed_at=email_confirmed_at,
             )
 
         UserSettings.objects.update_or_create(
@@ -255,26 +271,37 @@ def register(request):  # noqa: C901, PLR0912, PLR0915
             "group": user.group,
         }
 
-        if is_google:
-            if user.pending_brief_id:
+        # A pending brief grants the CLIENT role and an immediate claim for both
+        # Google and credential signups. Email confirmation no longer gates this:
+        # the user lands on their brief straight away and confirms email later.
+        # Claim first: _try_claim_pending_brief enforces the brief's contact-email
+        # match and creates the Client profile only on success. Promote to CLIENT
+        # solely when the claim lands, so a mismatched email leaves the user
+        # roleless (CONFIRMED) instead of an orphan CLIENT with an empty company.
+        if user.pending_brief_id:
+            claimed = _try_claim_pending_brief(user)
+            if claimed:
                 user.group = "CLIENT"
                 user.save(update_fields=["group"])
-                client, _ = Client.objects.get_or_create(
-                    owner=user,
-                    defaults={"name": f"{user.name}'s Company", "ein": ""},
-                )
+                client = Client.objects.filter(
+                    owner=user, deleted_at__isnull=True
+                ).first()
                 response_data["group"] = user.group
-                response_data["clientId"] = str(client.id)
-                claimed = _try_claim_pending_brief(user)
-                if claimed:
-                    response_data["claimedBriefId"] = claimed
-        else:
+                if client:
+                    response_data["clientId"] = str(client.id)
+                response_data["claimedBriefId"] = claimed
+
+        if not is_google:
             token_obj = AuthToken.create_token(user, TokenType.EMAIL_CONFIRMATION)
             email_sent = send_confirmation_email(user, token_obj.token)
             if email_sent:
                 logger.info("Confirmation email sent to %s", user.email)
             else:
                 logger.error("Failed to send confirmation email to %s", user.email)
+
+        response_data["emailConfirmedAt"] = (
+            user.email_confirmed_at.isoformat() if user.email_confirmed_at else None
+        )
 
         return JsonResponse(response_data, status=201)
 
@@ -355,15 +382,18 @@ def login(request):  # noqa: C901, PLR0912
             "name": user.name,
             "group": user.group,
             "isStaff": bool(user.is_staff),
+            "emailConfirmedAt": (
+                user.email_confirmed_at.isoformat() if user.email_confirmed_at else None
+            ),
         }
 
         # Add vendor_id or client_id if applicable
         if user.group == "VENDOR":
-            vendor = Vendor.objects.filter(owner=user).first()
+            vendor = Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
             if vendor:
                 response_data["vendorId"] = str(vendor.id)
         elif user.group == "CLIENT":
-            client = Client.objects.filter(owner=user).first()
+            client = Client.objects.filter(owner=user, deleted_at__isnull=True).first()
             if client:
                 response_data["clientId"] = str(client.id)
 
@@ -418,8 +448,7 @@ def confirm_email(request):
 
         user = token_obj.user
 
-        # QA4-033: Only allow confirming UNCONFIRMED users
-        if user.group != "UNCONFIRMED":
+        if user.email_confirmed_at is not None:
             return JsonResponse(
                 {"error": "Email already confirmed"},
                 status=400,
@@ -427,22 +456,21 @@ def confirm_email(request):
 
         response_data = {}
 
-        if user.pending_brief_id:
+        # Safety net for legacy accounts that registered before soft confirmation:
+        # their role/claim may still be pending. New signups already claimed at
+        # registration, so this is a no-op for them.
+        if user.group == "UNCONFIRMED" and user.pending_brief_id:
             user.group = "CLIENT"
-            user.save()
-            Client.objects.get_or_create(
-                owner=user,
-                defaults={"name": f"{user.name}'s Company", "ein": ""},
-            )
+            client = _ensure_client_profile(user)
             claimed = _try_claim_pending_brief(user)
             if claimed:
                 response_data["claimedBriefId"] = claimed
-            client = Client.objects.filter(owner=user).first()
-            if client:
-                response_data["clientId"] = str(client.id)
-        else:
+            response_data["clientId"] = str(client.id)
+        elif user.group == "UNCONFIRMED":
             user.group = "CONFIRMED"
-            user.save()
+
+        user.email_confirmed_at = timezone.now()
+        user.save()
 
         logger.info("Email confirmed for user: %s (group=%s)", user.email, user.group)
         token_obj.delete()
@@ -453,6 +481,7 @@ def confirm_email(request):
                 "email": user.email,
                 "name": user.name,
                 "group": user.group,
+                "emailConfirmedAt": user.email_confirmed_at.isoformat(),
             }
         )
         return JsonResponse(response_data, status=200)
@@ -580,7 +609,7 @@ def resend_confirmation(request):
         # QA4-009: Exclude soft-deleted users
         user = User.objects.filter(email=email, deleted_at__isnull=True).first()
 
-        if user and user.group == "UNCONFIRMED":
+        if user and user.email_confirmed_at is None:
             # Delete old confirmation tokens
             AuthToken.objects.filter(
                 user=user,
@@ -644,17 +673,11 @@ def set_pending_brief(request):
         if user.group == "CONFIRMED":
             user.group = "CLIENT"
             user.save(update_fields=["group"])
-            Client.objects.get_or_create(
-                owner=user,
-                defaults={"name": f"{user.name}'s Company", "ein": ""},
-            )
+            client = _ensure_client_profile(user)
             claimed = _try_claim_pending_brief(user)
-            client_id = (
-                Client.objects.filter(owner=user).values_list("id", flat=True).first()
-            )
             response_data = {
                 "group": user.group,
-                "clientId": str(client_id),
+                "clientId": str(client.id),
             }
             if claimed:
                 response_data["claimedBriefId"] = claimed

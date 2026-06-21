@@ -65,6 +65,8 @@ class User(AbstractUser):
         max_length=64, null=True, blank=True
     )
 
+    email_confirmed_at = models.DateTimeField(null=True, blank=True)
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 
