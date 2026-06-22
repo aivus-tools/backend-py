@@ -124,6 +124,48 @@ def test_webhook_revoked_key_401(api_client, webhook_url, vendor_with_key):
 
 
 @pytest.mark.django_db
+def test_webhook_valid_key_in_body_creates_lead(
+    api_client, webhook_url, vendor_with_key
+):
+    """No-code integrations (e.g. the native Wix automation webhook step) cannot
+    set custom headers, so the key may be passed in the JSON body instead."""
+    _user, vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps(
+                {
+                    "email": "lead@ext.com",
+                    "message": "Need a 30s spot",
+                    "key": key_row.key,
+                }
+            ),
+            content_type="application/json",
+        )
+
+    assert response.status_code == 201
+    brief = Brief.objects.get(id=response.json()["briefId"])
+    assert brief.source == BriefSource.WEBHOOK
+    assert brief.contact_email == "lead@ext.com"
+    assert Project.objects.filter(brief=brief, vendor=vendor).exists()
+    # The auth key must not leak into the brief message.
+    first_message = brief.chat_messages.first()
+    assert first_message is not None
+    assert key_row.key not in first_message.content
+
+
+@pytest.mark.django_db
+def test_webhook_invalid_key_in_body_401(api_client, webhook_url, vendor_with_key):
+    response = api_client.post(
+        webhook_url,
+        data=json.dumps({"message": "hi", "key": "totally-wrong-key"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 401
+    assert Brief.objects.count() == 0
+
+
+@pytest.mark.django_db
 def test_webhook_missing_message_still_creates_lead(
     api_client, webhook_url, vendor_with_key
 ):

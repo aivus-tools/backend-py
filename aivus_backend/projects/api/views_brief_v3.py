@@ -1642,15 +1642,22 @@ def _verify_wix_secret(request) -> bool:
     return bool(provided) and hmac.compare_digest(provided, expected)
 
 
-def _verify_vendor_webhook_key(request) -> Vendor | None:
-    """Resolve the vendor from the per-vendor webhook key header.
+def _verify_vendor_webhook_key(request, body: dict | None = None) -> Vendor | None:
+    """Resolve the vendor from the per-vendor webhook key.
 
-    Uses a constant-time compare against the active key. A revoked or unknown
-    key, or a soft-deleted vendor, returns None so the caller answers 401.
+    The key may arrive in the X-Aivus-Webhook-Key header (preferred) or, for
+    no-code integrations that cannot set custom headers (e.g. the native Wix
+    automation webhook step), in the JSON body as "key"/"webhookKey". The body
+    travels in the POST payload over HTTPS and is not written to access logs,
+    unlike a URL query parameter. Uses a constant-time compare against the
+    active key. A revoked or unknown key, or a soft-deleted vendor, returns
+    None so the caller answers 401.
     """
     from aivus_backend.users.models import VendorWebhookKey  # noqa: PLC0415
 
     provided = request.headers.get("X-Aivus-Webhook-Key", "")
+    if not provided and isinstance(body, dict):
+        provided = _wix_str(body.get("key")) or _wix_str(body.get("webhookKey"))
     if not provided:
         return None
 
@@ -1793,18 +1800,21 @@ def public_brief_ai_from_webhook(request):
     the key resolves the 50/h per vendor_id limit caps a leaked key from flooding
     the inbox.
     """
-    vendor = _verify_vendor_webhook_key(request)
-    if not vendor:
-        return JsonResponse({"error": "Unauthorized"}, status=401)
-
-    if _webhook_vendor_ratelimited(request, vendor):
-        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
-
     body, error = _parse_json_body(request)
     if error:
         return error
     if not isinstance(body, dict):
         return JsonResponse({"error": "Invalid payload"}, status=400)
+
+    # The key may come in the header or, for no-code webhook steps that cannot
+    # set headers (e.g. native Wix automations), in the JSON body. The IP rate
+    # limit decorator already guards brute force before we get here.
+    vendor = _verify_vendor_webhook_key(request, body)
+    if not vendor:
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    if _webhook_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
 
     payload = _extract_wix_payload(body)
 
