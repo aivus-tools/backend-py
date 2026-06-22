@@ -97,4 +97,9 @@ RUN DATABASE_URL="" \
   API_KEY="build" \
   python manage.py compilemessages
 
+# Git commit baked in at build time (CI passes --build-arg GIT_COMMIT=<sha>).
+# Placed late so changing the SHA does not bust earlier build cache layers.
+ARG GIT_COMMIT=dev
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 ENTRYPOINT ["/entrypoint"]

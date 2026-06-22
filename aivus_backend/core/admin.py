@@ -3,6 +3,7 @@ from allauth.mfa.models import Authenticator
 from allauth.socialaccount.models import SocialAccount
 from allauth.socialaccount.models import SocialApp
 from allauth.socialaccount.models import SocialToken
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth.models import Group
 from django.contrib.sites.models import Site
@@ -26,3 +27,8 @@ admin.site.unregister(CrontabSchedule)
 admin.site.unregister(IntervalSchedule)
 admin.site.unregister(PeriodicTask)
 admin.site.unregister(SolarSchedule)
+
+
+def admin_environment_callback(request):
+    commit = getattr(settings, "GIT_COMMIT", "dev")
+    return [f"build {commit[:7]}", "info"]

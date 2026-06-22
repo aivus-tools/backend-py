@@ -128,7 +128,7 @@ STATIC_URL = f"https://storage.googleapis.com/{GS_BUCKET_NAME}/static/"
 # ------------------------------------------------------------------------------
 EMAIL_BACKEND = "anymail.backends.resend.EmailBackend"
 ANYMAIL = {
-    "RESEND_API_KEY": env("RESEND_API_KEY"),
+    "RESEND_API_KEY": env("RESEND_API_KEY", default=""),
 }
 DEFAULT_FROM_EMAIL = env(
     "DJANGO_DEFAULT_FROM_EMAIL",

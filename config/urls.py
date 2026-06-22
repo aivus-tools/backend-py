@@ -6,9 +6,11 @@ from django.urls import path
 from django.views import defaults as default_views
 from django.views.generic import TemplateView
 
+from aivus_backend.core import views as core_views
 from aivus_backend.users.api import user_views
 
 urlpatterns = [
+    path("healthz", core_views.healthz, name="healthz"),
     path("", TemplateView.as_view(template_name="pages/home.html"), name="home"),
     path(
         "about/",

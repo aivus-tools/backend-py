@@ -97,17 +97,41 @@ jobs:
           context: .
           file: ./compose/production/django/Dockerfile
           push: true
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
+  changes:
+    if: >
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    outputs:
+      migrations: ${{ steps.filter.outputs.migrations }}
+      static: ${{ steps.filter.outputs.static }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            migrations:
+              - '**/migrations/*.py'
+            static:
+              - '**/static/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+
   deploy:
     if: >
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
       github.event_name == 'workflow_dispatch'
-    needs: build-and-push
+    needs: [build-and-push, changes]
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -115,15 +139,51 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+          RUN_MIGRATE: ${{ needs.changes.outputs.migrations }}
+          RUN_COLLECTSTATIC: ${{ needs.changes.outputs.static }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: GHCR_TOKEN,GITHUB_ACTOR
+          envs: GHCR_TOKEN,GITHUB_ACTOR,RUN_MIGRATE,RUN_COLLECTSTATIC,FORCE_ALL
           script: |
             set -e
+            COMPOSE="docker compose -f docker-compose.production.yml"
+            t0=$(date +%s)
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             cd ~/aivus
-            docker compose -f docker-compose.production.yml pull django celeryworker celerybeat flower
-            docker compose -f docker-compose.production.yml up -d --no-deps django celeryworker celerybeat flower
+
+            echo "[deploy] pulling images..."
+            $COMPOSE pull django celeryworker celerybeat flower
+
+            if [ "$RUN_MIGRATE" = "true" ] || [ "$FORCE_ALL" = "true" ]; then
+              echo "[deploy] migrations changed -> running migrate (one-shot, new image)"
+              $COMPOSE run --rm --no-deps --label traefik.enable=false django python manage.py migrate --noinput
+            else
+              echo "[deploy] no migration changes -> skip migrate"
+            fi
+
+            if [ "$RUN_COLLECTSTATIC" = "true" ] || [ "$FORCE_ALL" = "true" ]; then
+              echo "[deploy] static/deps changed -> running collectstatic (one-shot, new image)"
+              $COMPOSE run --rm --no-deps --label traefik.enable=false django python manage.py collectstatic --noinput
+            else
+              echo "[deploy] no static changes -> skip collectstatic"
+            fi
+
+            echo "[deploy] rolling django (zero-downtime via docker rollout)..."
+            # Refuse to roll if the live compose lacks the /healthz healthcheck:
+            # docker rollout would silently fall back to a blind 10s sleep and
+            # reintroduce the 502 window this whole change exists to kill.
+            $COMPOSE config | grep -q '/healthz' || { echo "[deploy] FATAL: django healthcheck missing in live compose; apply Server prerequisites (see DEPLOYMENT.md) before deploying"; exit 1; }
+            tr0=$(date +%s)
+            docker rollout -t 180 -f docker-compose.production.yml django
+            tr1=$(date +%s)
+            echo "[deploy] django healthy, rollout took $((tr1 - tr0))s"
+
+            echo "[deploy] recreating celery services..."
+            $COMPOSE up -d --no-deps celeryworker celerybeat flower
+
             docker image prune -f
+            t1=$(date +%s)
+            echo "[deploy] DONE in $((t1 - t0))s (migrate=$RUN_MIGRATE static=$RUN_COLLECTSTATIC force=$FORCE_ALL)"

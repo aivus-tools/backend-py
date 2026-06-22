@@ -5,11 +5,10 @@ set -o pipefail
 set -o nounset
 
 
-python /app/manage.py migrate --noinput
-python /app/manage.py collectstatic --noinput
-
 exec gunicorn config.wsgi --bind 0.0.0.0:5000 --chdir=/app \
+  --config /app/config/gunicorn_conf.py \
   --workers 4 \
+  --preload \
   --timeout 180 \
   --graceful-timeout 30 \
   --access-logfile - \

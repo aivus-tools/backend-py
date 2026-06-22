@@ -326,10 +326,15 @@ MANAGERS = ADMINS
 # https://cookiecutter-django.readthedocs.io/en/latest/settings.html#other-environment-settings
 # Force the `admin` sign in process to go through the `django-allauth` workflow
 DJANGO_ADMIN_FORCE_ALLAUTH = env.bool("DJANGO_ADMIN_FORCE_ALLAUTH", default=False)
+# Short git SHA of the deployed image, baked in at build time (see Dockerfile +
+# ci.yml build-args). Defaults to "dev" for local runs. Shown in the admin header.
+GIT_COMMIT = env("GIT_COMMIT", default="dev")
+
 UNFOLD = {
     "SITE_TITLE": "Aivus Admin",
     "SITE_HEADER": "Aivus Admin",
     "SITE_LOGO": "images/favicons/favicon.ico",
+    "ENVIRONMENT": "aivus_backend.core.admin.admin_environment_callback",
     "STYLES": [
         lambda request: "/static/css/admin-custom.css",
     ],
