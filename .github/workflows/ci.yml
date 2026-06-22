@@ -177,7 +177,7 @@ jobs:
             # reintroduce the 502 window this whole change exists to kill.
             $COMPOSE config | grep -q '/healthz' || { echo "[deploy] FATAL: django healthcheck missing in live compose; apply Server prerequisites (see DEPLOYMENT.md) before deploying"; exit 1; }
             tr0=$(date +%s)
-            docker rollout -t 180 -f docker-compose.production.yml django
+            docker rollout -t 180 --wait-after-healthy 10 -f docker-compose.production.yml django
             tr1=$(date +%s)
             echo "[deploy] django healthy, rollout took $((tr1 - tr0))s"
 
