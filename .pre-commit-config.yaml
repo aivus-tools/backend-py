@@ -30,7 +30,7 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: bash -c 'set -a && source .envs/.local/.django && set +a && DJANGO_SETTINGS_MODULE=config.settings.test uv run mypy aivus_backend'
+        entry: bash -c 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" && set -a && source .envs/.local/.django && set +a && DJANGO_SETTINGS_MODULE=config.settings.test uv run mypy aivus_backend'
         language: system
         types: [python]
         pass_filenames: false

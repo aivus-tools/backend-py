@@ -349,6 +349,102 @@ def test_webhook_vendor_rate_limit_disabled_in_tests_by_default(vendor_with_key)
     assert _webhook_vendor_ratelimited(request, vendor) is False
 
 
+@pytest.mark.django_db
+def test_webhook_response_includes_brief_url(api_client, webhook_url, vendor_with_key):
+    """The JSON response carries briefUrl so callers can link the lead to the brief."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps({"email": "lead@ext.com", "message": "Need a 30s spot"}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["briefUrl"].endswith(
+        f"/public-brief/{body['briefId']}?token={body['token']}&taskId={body['taskId']}"
+    )
+
+
+@pytest.mark.django_db
+def test_webhook_autoredirect_query_redirects_to_brief_url(
+    api_client, webhook_url, vendor_with_key
+):
+    """autoredirect=1 in the query string makes the endpoint 302 to briefUrl
+    instead of returning JSON, so a plain HTML form lands the visitor on the brief."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url + "?autoredirect=1",
+            data=json.dumps({"email": "lead@ext.com", "message": "Need a 30s spot"}),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 302
+    brief = Brief.objects.get(source=BriefSource.WEBHOOK)
+    assert f"/public-brief/{brief.id}" in response["Location"]
+    assert "token=" in response["Location"]
+
+
+@pytest.mark.django_db
+def test_webhook_autoredirect_in_body_redirects(
+    api_client, webhook_url, vendor_with_key
+):
+    """autoredirect can also be passed in the JSON body for no-code steps."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data=json.dumps(
+                {"email": "lead@ext.com", "message": "hi", "autoredirect": "1"}
+            ),
+            content_type="application/json",
+            HTTP_X_AIVUS_WEBHOOK_KEY=key_row.key,
+        )
+    assert response.status_code == 302
+    assert "/public-brief/" in response["Location"]
+
+
+@pytest.mark.django_db
+def test_webhook_form_encoded_with_autoredirect(
+    api_client, webhook_url, vendor_with_key
+):
+    """A plain HTML <form> posts url-encoded fields (key in the body) with
+    ?autoredirect=1 in the action URL; the endpoint creates the lead and 302s to
+    briefUrl so the visitor lands on their brief."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url + "?autoredirect=1",
+            data={
+                "email": "lead@ext.com",
+                "message": "Need a 30s spot",
+                "key": key_row.key,
+            },
+        )
+    assert response.status_code == 302
+    assert "/public-brief/" in response["Location"]
+    brief = Brief.objects.get(source=BriefSource.WEBHOOK)
+    assert brief.contact_email == "lead@ext.com"
+
+
+@pytest.mark.django_db
+def test_webhook_form_encoded_returns_json_without_autoredirect(
+    api_client, webhook_url, vendor_with_key
+):
+    """The same form POST without autoredirect still creates the lead and returns
+    the JSON body (with briefUrl)."""
+    _user, _vendor, key_row = vendor_with_key
+    with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
+        response = api_client.post(
+            webhook_url,
+            data={"email": "lead@ext.com", "message": "hi", "key": key_row.key},
+        )
+    assert response.status_code == 201
+    assert response.json()["briefUrl"]
+
+
 # --- key management endpoints ------------------------------------------------
 
 

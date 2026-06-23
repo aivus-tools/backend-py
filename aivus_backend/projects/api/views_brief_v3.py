@@ -19,6 +19,7 @@ from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import F
 from django.http import HttpResponse
+from django.http import HttpResponseRedirect
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -1800,15 +1801,13 @@ def public_brief_ai_from_webhook(request):
     the key resolves the 50/h per vendor_id limit caps a leaked key from flooding
     the inbox.
     """
-    body, error = _parse_json_body(request)
+    body, error = _parse_webhook_body(request)
     if error:
         return error
-    if not isinstance(body, dict):
-        return JsonResponse({"error": "Invalid payload"}, status=400)
 
-    # The key may come in the header or, for no-code webhook steps that cannot
-    # set headers (e.g. native Wix automations), in the JSON body. The IP rate
-    # limit decorator already guards brute force before we get here.
+    # The key may come in the header or, for no-code integrations that cannot set
+    # headers (e.g. a plain HTML <form>), in the body. The IP rate limit decorator
+    # already guards brute force before we get here.
     vendor = _verify_vendor_webhook_key(request, body)
     if not vendor:
         return JsonResponse({"error": "Unauthorized"}, status=401)
@@ -1836,8 +1835,18 @@ def public_brief_ai_from_webhook(request):
         vendor=vendor,
     )
     _notify_vendor_of_lead(brief, vendor, request)
+
+    base_url = getattr(settings, "FRONTEND_URL", "https://go.aivus.co").rstrip("/")
+    brief_url = f"{base_url}/public-brief/{brief.id}?token={token}&taskId={task_id}"
+    if _wants_autoredirect(request, body):
+        return HttpResponseRedirect(brief_url)
     return JsonResponse(
-        {"briefId": str(brief.id), "token": token, "taskId": task_id},
+        {
+            "briefId": str(brief.id),
+            "token": token,
+            "taskId": task_id,
+            "briefUrl": brief_url,
+        },
         status=201,
     )
 
@@ -1878,6 +1887,39 @@ def _vendor_ratelimited(request, vendor, group: str, rate: str) -> bool:
 
 def _webhook_vendor_ratelimited(request, vendor) -> bool:
     return _vendor_ratelimited(request, vendor, "vendor_webhook", "50/h")
+
+
+def _wants_autoredirect(request, body: dict | None) -> bool:
+    """Whether the caller asked for a 302 to briefUrl instead of the JSON body.
+
+    Read from the query string (so a plain HTML form can POST to the URL and land
+    the visitor on the brief) or from the JSON body for no-code steps that cannot
+    append a query param. The target is the server-built briefUrl, never a value
+    from the request, so this cannot be turned into an open redirect.
+    """
+    raw = request.GET.get("autoredirect")
+    if raw is None and isinstance(body, dict):
+        raw = body.get("autoredirect")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_webhook_body(request) -> tuple[dict, JsonResponse | None]:
+    """Read the webhook payload from a JSON body or an HTML form POST.
+
+    A plain HTML <form> (e.g. action=...?autoredirect=1) submits url-encoded
+    fields, which Django exposes via request.POST; integrations posting JSON send
+    it in the body. Either shape is normalised to a flat dict for the view. On a
+    parse error the dict is empty and the caller returns the error response.
+    """
+    if request.POST:
+        return request.POST.dict(), None
+    try:
+        data = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return {}, JsonResponse({"error": "Invalid payload"}, status=400)
+    if not isinstance(data, dict):
+        return {}, JsonResponse({"error": "Invalid payload"}, status=400)
+    return data, None
 
 
 def _slug_drafts_vendor_ratelimited(request, vendor) -> bool:
