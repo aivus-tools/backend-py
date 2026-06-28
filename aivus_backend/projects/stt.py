@@ -296,7 +296,16 @@ def _build_recognition_config(
     # "auto") instead of forcing the brief's document language.
     if STT_RECOGNIZER == "_":
         config_kwargs["model"] = STT_MODEL
-        config_kwargs["language_codes"] = [language_to_bcp47(language)]
+        code = (language or "").lower()
+        if code in LANGUAGE_BCP47:
+            # Known brief language (turns 2+): constrain to it for best accuracy.
+            config_kwargs["language_codes"] = [LANGUAGE_BCP47[code]]
+        else:
+            # First turn, language not yet frozen: let the recognizer pick from
+            # the supported set instead of forcing the interface locale, so a
+            # first message dictated in any supported language transcribes
+            # correctly and the text detector can then freeze the right language.
+            config_kwargs["language_codes"] = list(LANGUAGE_BCP47.values())
     else:
         config_kwargs["language_codes"] = STT_LANGUAGE_CODES
     if explicit is not None:

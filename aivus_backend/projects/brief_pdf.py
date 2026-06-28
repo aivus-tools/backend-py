@@ -141,21 +141,67 @@ blockquote {
 }
 """
 
-DOCUMENT_TITLE_BY_KIND = {
-    "production_brief": "Production Brief",
-    "vendor_email": "Vendor Outreach Email",
-    "deliverables_checklist": "Deliverables Checklist",
+# Localized display titles for final-document covers/filenames. The document body
+# itself is generated/translated in the brief language by the LLM; only these
+# fixed labels need a lookup. Falls back to English for languages not listed.
+_DOCUMENT_TITLE_BY_LANG: dict[str, dict[str, str]] = {
+    "production_brief": {
+        "en": "Production Brief",
+        "ru": "Производственный бриф",
+        "es": "Brief de Producción",
+        "fr": "Brief de Production",
+        "de": "Produktions-Briefing",
+        "it": "Brief di Produzione",
+        "pt": "Briefing de Produção",
+        "zh": "制作简报",
+        "ja": "制作ブリーフ",
+        "ko": "프로덕션 브리프",
+    },
+    "vendor_email": {
+        "en": "Vendor Outreach Email",
+        "ru": "Письмо подрядчикам",
+        "es": "Correo para Proveedores",
+        "fr": "E-mail aux Prestataires",
+        "de": "Anschreiben an Dienstleister",
+        "it": "Email per i Fornitori",
+        "pt": "E-mail para Fornecedores",
+        "zh": "供应商邀约邮件",
+        "ja": "ベンダー向けメール",
+        "ko": "벤더 발송 이메일",
+    },
+    "deliverables_checklist": {
+        "en": "Deliverables Checklist",
+        "ru": "Чек-лист поставки",
+        "es": "Lista de Entregables",
+        "fr": "Liste des Livrables",
+        "de": "Liste der Liefergegenstände",
+        "it": "Elenco dei Deliverable",
+        "pt": "Lista de Entregáveis",
+        "zh": "交付物清单",
+        "ja": "納品物チェックリスト",
+        "ko": "산출물 체크리스트",
+    },
 }
+
+
+def document_title_for(kind: str, language: str = "") -> str:
+    """Localized display title for a final-document kind. Falls back to English
+    for unknown languages and to a generic label for unknown kinds."""
+    by_lang = _DOCUMENT_TITLE_BY_LANG.get(kind)
+    if not by_lang:
+        return "Brief Document"
+    return by_lang.get((language or "").lower()) or by_lang["en"]
 
 
 def _build_pdf_html(document: BriefFinalDocument) -> str:
     brief = document.brief
-    title = DOCUMENT_TITLE_BY_KIND.get(document.kind, "Brief Document")
+    language = brief.document_language or "en"
+    title = document_title_for(document.kind, language)
     project_name = brief.title or "Creative Brief"
     created = brief.created_at.strftime("%B %d, %Y") if brief.created_at else ""
 
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{language}">
 <head><meta charset="utf-8"><style>{PDF_CSS}</style></head>
 <body>
   <div class="cover">

@@ -36,6 +36,7 @@ from aivus_backend.core.ratelimit import user_ratelimit_key
 from aivus_backend.core.sanitize import sanitize_html
 from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.projects import stt
+from aivus_backend.projects.ai_brief_v3 import WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER
 from aivus_backend.projects.ai_brief_v3 import feedback_ack_for
 from aivus_backend.projects.ai_brief_v3 import process_brief_turn
 from aivus_backend.projects.ai_brief_v3 import process_finalized_turn
@@ -84,9 +85,9 @@ MESSAGE_LIMIT_AUTH = 100
 MESSAGE_LIMIT_ANON = 50
 MAX_BRIEF_COST_USD = Decimal("5.00")
 MAX_MESSAGE_LENGTH = 10000
-# Stand-in first message for a webhook lead that arrives with contact details but
-# no message text, so an empty-message external form does not lose the lead.
-WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER = "New inquiry submitted via website form."
+# WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER lives in ai_brief_v3 (imported above) so the
+# language detector can recognise it and refuse to freeze the brief language on
+# this synthetic English string.
 MAX_FEEDBACK_COMMENT_LENGTH = 2000
 MAX_FINAL_DOCUMENT_HTML_LENGTH = 200_000
 MAX_ATTACHMENTS_PER_BRIEF_AUTH = 10
@@ -132,30 +133,6 @@ def _validate_message(body) -> tuple[str | None, JsonResponse | None]:
     if len(message) > MAX_MESSAGE_LENGTH:
         return None, JsonResponse({"error": "Message too long"}, status=400)
     return message, None
-
-
-SUPPORTED_DOC_LANGUAGES = {"en", "ru"}
-
-
-def _parse_document_language(body) -> tuple[str | None, JsonResponse | None]:
-    """Pull `documentLanguage` from request body. Returns (language or None, error).
-
-    None means the caller did not supply the field — keep existing behaviour.
-    An empty/invalid value is a 400.
-    """
-    if not isinstance(body, dict) or "documentLanguage" not in body:
-        return None, None
-    raw = body.get("documentLanguage")
-    if not isinstance(raw, str):
-        return None, JsonResponse(
-            {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
-        )
-    normalised = raw.lower()
-    if normalised not in SUPPORTED_DOC_LANGUAGES:
-        return None, JsonResponse(
-            {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
-        )
-    return normalised, None
 
 
 def _parse_attachment_ids(body) -> list[str]:
@@ -440,8 +417,13 @@ def _process_chat(
         }
         if brief.conversation_status != "finalized":
             updates["conversation_status"] = result["conversation_status"]
-        if not brief.document_language and result.get("document_language"):
+        # Language writer for turns 2+. An explicit translation switches the
+        # frozen language even when it is already set; otherwise commit the
+        # detected language the first time it is confident (freeze_language).
+        if result.get("language_switched") and result.get("document_language"):
             updates["document_language"] = result["document_language"]
+        elif not brief.document_language and result.get("freeze_language"):
+            updates["document_language"] = result["freeze_language"]
 
         Brief.objects.filter(id=brief.id).update(**updates)
 
@@ -571,10 +553,12 @@ _TRANSCRIPTION_STATUS_MAP = {
 
 
 def _resolve_transcribe_language(request, brief: Brief) -> str:
-    raw = (request.POST.get("language") or "").strip().lower()
-    if raw in SUPPORTED_DOC_LANGUAGES:
-        return raw
-    return brief.document_language or "en"
+    """Speech language for STT. Use the brief's frozen language once known (it
+    improves recognition accuracy); otherwise return "" so the recognizer
+    auto-detects (chirp_3) or falls back to a multi-language set (synthetic
+    recognizer). The interface locale is deliberately NOT used — it is the UI
+    language, not the language being spoken."""
+    return brief.document_language or ""
 
 
 def _parse_client_duration_ms(request) -> int:
@@ -684,10 +668,6 @@ def client_brief_ai_start(request, brief_id):
     if error or message is None:
         return error or JsonResponse({"error": "Message is required"}, status=400)
 
-    document_language, error = _parse_document_language(body)
-    if error:
-        return error
-
     user = User.objects.filter(id=request.user_data["id"]).first()
     if not user:
         return JsonResponse({"error": "User not found"}, status=401)
@@ -707,8 +687,6 @@ def client_brief_ai_start(request, brief_id):
             "message_count": F("message_count") + 1,
             "pending_task_id": task_id,
         }
-        if document_language:
-            update_kwargs["document_language"] = document_language
         Brief.objects.filter(id=brief.id).update(**update_kwargs)
 
         if attachment_ids:
@@ -897,19 +875,8 @@ def client_brief_ai_detail(request, brief_id):
         brief.title = title.strip()[:255]
         update_fields.append("title")
 
-    if "documentLanguage" in body:
-        language = body.get("documentLanguage")
-        if not isinstance(language, str) or language.lower() not in {"en", "ru"}:
-            return JsonResponse(
-                {"error": "documentLanguage must be 'en' or 'ru'"}, status=400
-            )
-        brief.document_language = language.lower()
-        update_fields.append("document_language")
-
     if not update_fields:
-        return JsonResponse(
-            {"error": "title or documentLanguage is required"}, status=400
-        )
+        return JsonResponse({"error": "title is required"}, status=400)
 
     update_fields.append("updated_at")
     brief.save(update_fields=update_fields)
@@ -1139,18 +1106,6 @@ def client_brief_ai_finalize(request, brief_id):
             status=429,
         )
 
-    try:
-        body = json.loads(request.body) if request.body else {}
-    except json.JSONDecodeError:
-        body = {}
-    if isinstance(body, dict):
-        document_language, error = _parse_document_language(body)
-        if error:
-            return error
-        if document_language and document_language != brief.document_language:
-            brief.document_language = document_language
-            brief.save(update_fields=["document_language", "updated_at"])
-
     brief_id_str = str(brief.id)
     task_id = str(uuid.uuid4())
     with transaction.atomic():
@@ -1242,13 +1197,13 @@ def client_brief_ai_final_document_pdf(request, brief_id, document_id):
 def _pdf_response_for_document(document: BriefFinalDocument) -> HttpResponse:
     from urllib.parse import quote  # noqa: PLC0415
 
-    from aivus_backend.projects.brief_pdf import DOCUMENT_TITLE_BY_KIND  # noqa: PLC0415
+    from aivus_backend.projects.brief_pdf import document_title_for  # noqa: PLC0415
     from aivus_backend.projects.brief_pdf import (  # noqa: PLC0415
         render_final_document_pdf,
     )
 
     pdf_bytes = render_final_document_pdf(document)
-    label = DOCUMENT_TITLE_BY_KIND.get(document.kind, "Brief")
+    label = document_title_for(document.kind, document.brief.document_language)
     base_name = (document.brief.title or "Brief").strip()
     safe = "".join(c for c in base_name if c.isalnum() or c in " _-").strip()[:60]
     filename = f"{safe or 'Brief'} - {label}.pdf"
@@ -2087,10 +2042,6 @@ def public_brief_ai_start(request, brief_id):
     if error or message is None:
         return error or JsonResponse({"error": "Message is required"}, status=400)
 
-    document_language, error = _parse_document_language(body)
-    if error:
-        return error
-
     token = request.headers.get("X-Brief-Token", "")
     attachment_ids = _parse_attachment_ids(body)
 
@@ -2108,8 +2059,6 @@ def public_brief_ai_start(request, brief_id):
             "message_count": F("message_count") + 1,
             "pending_task_id": task_id,
         }
-        if document_language:
-            update_kwargs["document_language"] = document_language
         Brief.objects.filter(id=brief.id).update(**update_kwargs)
 
         if attachment_ids:

@@ -50,8 +50,22 @@ MAIN_TEMPERATURE = 0.7
 FINALIZATION_TEMPERATURE = 0.5
 TITLE_TEMPERATURE = 0.4
 TITLE_MAX_LENGTH = 80
+TRANSLATE_MAX_TOKENS = 8000
+TRANSLATE_TEMPERATURE = 0.2
+
+# Placeholder used when an inbound webhook lead submits no message text. Defined
+# here (not in the views module) so the language detector can recognise it and
+# refuse to freeze the brief language on this synthetic English string; the view
+# imports it from here.
+WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER = "New inquiry submitted via website form."
 
 _HISTORY_KINDS_FOR_LLM = {"chat"}
+
+# Minimum count of alphabetic characters before a Latin-script first message is
+# trusted enough to commit (freeze) the brief language. Below this the message is
+# too thin (e.g. "ok", "$10k", an emoji) and the language is decided on the next
+# substantial message instead.
+_MIN_LANGUAGE_SIGNAL_LETTERS = 4
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
 _HIRAGANA_KATAKANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
@@ -83,6 +97,8 @@ class ChatTurnResult:
     cost_usd: float
     model_used: str
     traces: list[dict]
+    freeze_language: str = ""
+    language_switched: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +111,8 @@ class ChatTurnResult:
             "cost_usd": self.cost_usd,
             "model_used": self.model_used,
             "traces": self.traces,
+            "freeze_language": self.freeze_language,
+            "language_switched": self.language_switched,
         }
 
 
@@ -112,23 +130,107 @@ def detect_language(text: str) -> str:
     return ""
 
 
-def _resolve_language(
-    user_message: str,
-    history: list[ChatMessage],
-    fallback: str,
-) -> str:
-    detected = detect_language(user_message)
-    if detected:
-        return detected
-    for msg in reversed(history):
-        detected = detect_language(msg.content)
-        if detected:
-            return detected
-    return fallback or "en"
-
-
 def _language_name(code: str) -> str:
     return _LANGUAGE_NAMES.get((code or "").lower(), "English")
+
+
+_LANGUAGE_NAME_TO_CODE = {name.lower(): code for code, name in _LANGUAGE_NAMES.items()}
+
+
+def _validate_lang(code: str | None) -> str:
+    """Normalise an LLM-reported language to a supported ISO 639-1 code.
+
+    Tolerates the model answering with the code ("ru"), the English name
+    ("Russian"), or a short phrase. Returns "" when nothing maps."""
+    text = (code or "").strip().lower()
+    if text in _LANGUAGE_NAMES:
+        return text
+    if text in _LANGUAGE_NAME_TO_CODE:
+        return _LANGUAGE_NAME_TO_CODE[text]
+    for token in re.findall(r"[a-z]{2,}", text):
+        if token in _LANGUAGE_NAME_TO_CODE:
+            return _LANGUAGE_NAME_TO_CODE[token]
+        if token[:2] in _LANGUAGE_NAMES:
+            return token[:2]
+    return ""
+
+
+def _has_language_signal(text: str) -> bool:
+    """True when a message carries enough text to commit a language from it."""
+    stripped = (text or "").strip()
+    if not stripped or stripped == WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER:
+        return False
+    letters = sum(1 for ch in stripped if ch.isalpha())
+    return letters >= _MIN_LANGUAGE_SIGNAL_LETTERS
+
+
+def detect_language_llm(text: str) -> str:
+    """Detect the language of Latin-script text the regex detector can't tell
+    apart (en/es/fr/de/...). Uses the cheap/fast model. Returns a supported ISO
+    639-1 code or "" on failure — callers must tolerate that."""
+    snippet = (text or "").strip()[:500]
+    if not snippet:
+        return ""
+    system_prompt = (
+        "You are a language detector. Identify the natural language of the "
+        "user's text and respond with ONLY its ISO 639-1 two-letter code "
+        "(for example: en, ru, es, fr, de, it, pt, zh, ja, ko). "
+        "No punctuation, no words, just the two-letter code."
+    )
+    try:
+        response = call_llm(
+            model=TITLE_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [{"type": "text", "text": snippet}]},
+            ],
+            temperature=0.0,
+            max_tokens=8,
+            json_mode=False,
+        )
+    except Exception:
+        logger.warning("LLM language detection failed", exc_info=True)
+        return ""
+    return _validate_lang(response.content)
+
+
+def _resolve_turn_language(brief: Brief, user_message: str) -> tuple[str, str]:
+    """Resolve the language for a chat turn.
+
+    Returns ``(reply_language, freeze_language)``. Once the brief language is
+    frozen it is reused and nothing new is frozen (freeze_language is ""). On the
+    first turn the language is detected from the message: the script-based
+    detector first (Cyrillic/CJK), then the cheap LLM for Latin scripts when the
+    message carries enough signal. ``reply_language`` always has a value (default
+    "en") so the assistant can reply; ``freeze_language`` is "" when the message
+    is too thin to commit a language, so a later, richer message decides it."""
+    if brief.document_language:
+        return brief.document_language, ""
+    detected = detect_language(user_message)
+    if not detected and _has_language_signal(user_message):
+        detected = detect_language_llm(user_message)
+    return (detected or "en"), detected
+
+
+def _resolve_finalize_language(brief: Brief, history: list[ChatMessage]) -> str:
+    """Language for the final documents. Normally the frozen brief language; if
+    it was somehow never committed, re-detect from the first user message (and
+    log) rather than silently defaulting to English."""
+    if brief.document_language:
+        return brief.document_language
+    first_user_msg = next(
+        (m.content for m in history if m.role == "user" and m.content), ""
+    )
+    detected = detect_language(first_user_msg)
+    if not detected and _has_language_signal(first_user_msg):
+        detected = detect_language_llm(first_user_msg)
+    detected = detected or "en"
+    logger.warning(
+        "finalize: document_language was empty, re-detected=%s brief=%s",
+        detected,
+        brief.id,
+    )
+    return detected
 
 
 def _build_language_rule(doc_language: str) -> str:
@@ -136,13 +238,16 @@ def _build_language_rule(doc_language: str) -> str:
     code = (doc_language or "").lower()
     rule = (
         "=== LANGUAGE & MARKET ===\n"
-        f"Brief document language: {name} (frozen — never translate final brief).\n"
+        f"Brief document language: {name} (frozen). The brief and your replies stay\n"
+        f"in {name}.\n"
         f"Reply language is {name}. ALWAYS write every reply in {name}, even if the\n"
         f"user's message arrives in another language, mixes languages, or contains\n"
         "only numbers, short acknowledgements, or transcribed text that looks like a\n"
-        f"different language. Never switch the reply language mid-conversation — the\n"
-        f"brief was started in {name} and stays in {name}. Section/brief text always\n"
-        "stays in the frozen document language.\n"
+        "different language. Do NOT switch the language just because a single message\n"
+        f"comes in another language — the brief was started in {name} and stays in\n"
+        f"{name}. The ONLY exception is when the user EXPLICITLY asks to translate or\n"
+        "switch the brief/email to another language; outside that explicit request,\n"
+        "section and brief text always stay in the frozen document language.\n"
     )
     if code and code != "en":
         rule += (
@@ -465,9 +570,7 @@ def process_brief_turn(
     attachments = attachments or []
     history = history or []
 
-    doc_language = brief.document_language or _resolve_language(
-        user_message, history, fallback=""
-    )
+    reply_language, freeze_language = _resolve_turn_language(brief, user_message)
 
     main_body = _load_prompt_body("main_system_prompt")
     master_body = _load_prompt_body("master_brief_template")
@@ -478,8 +581,8 @@ def process_brief_turn(
         main_body=main_body,
         master_template_body=master_body,
         archetypes_body=archetypes_body,
-        language_rule=_build_language_rule(doc_language),
-        market_rule=_build_market_rule(doc_language),
+        language_rule=_build_language_rule(reply_language),
+        market_rule=_build_market_rule(reply_language),
         auth_rule=_build_auth_rule(
             is_anonymous=brief.client_id is None,
             is_finalized=brief.conversation_status == "finalized",
@@ -532,7 +635,7 @@ def process_brief_turn(
 
     if not reply:
         logger.warning("LLM returned empty reply for brief %s", brief.id)
-        reply = _fallback_reply(doc_language)
+        reply = _fallback_reply(reply_language)
 
     conversation_status = "ready_to_finalize" if ready_to_finalize else "in_progress"
 
@@ -540,7 +643,8 @@ def process_brief_turn(
         reply=reply,
         ready_to_finalize=ready_to_finalize,
         conversation_status=conversation_status,
-        document_language=doc_language,
+        document_language=reply_language,
+        freeze_language=freeze_language,
         input_tokens=response.input_tokens,
         output_tokens=response.output_tokens,
         cost_usd=response.cost_usd,
@@ -652,7 +756,7 @@ Available edit tools:
 
 Output STRICT JSON (no markdown fences). Schema:
 {
-  "reply": "short chat reply in the user's language, confirming what you did",
+  "reply": "short chat reply in the brief document language, confirming what you did",
   "edits": [
     {
       "tool": "replace_text" | "rewrite_section",
@@ -663,14 +767,22 @@ Output STRICT JSON (no markdown fences). Schema:
       "new_html": "<new section HTML incl. heading>",  // only for rewrite_section
       "reason": "one short phrase, optional"
     }
-  ]
+  ],
+  "translate_to": "<ISO 639-1 code, e.g. en/ru/es — ONLY when the user explicitly
+                   asks to translate or switch the WHOLE brief/email to another
+                   language; otherwise omit or leave empty>"
 }
 
 Rules:
 - Keep the rest of each document untouched. Only the diff you declare changes.
 - Preserve existing HTML structure and classes. Do not strip inline tags.
-- Match the document language. The document language is frozen; translate
-  user-provided replacements into it if needed.
+- Write all replacements in the brief document language. Do not switch the
+  document language just because the user typed in another language.
+- WHOLE-DOCUMENT TRANSLATION: if (and only if) the user explicitly asks to
+  translate or switch the entire brief or email to another language, set
+  `translate_to` to that language's ISO 639-1 code, return `edits: []`, and put
+  a short confirmation in `reply`. Do NOT translate via piecemeal edits — the
+  system performs the full translation when `translate_to` is set.
 - Never tell the user to click any button. Your edits apply automatically.
   If the user asks for a full rebuild of the whole package from scratch,
   reply plainly that a full rebuild is a separate action in the interface
@@ -780,6 +892,145 @@ def _apply_edits(
     return list(changed.values())
 
 
+def _translation_done_reply(code: str) -> str:
+    name = _language_name(code)
+    if (code or "").lower() == "ru":
+        return f"Готово — перевёл бриф и письмо на {name}."
+    return f"Done — I've translated the brief and email into {name}."
+
+
+def translate_final_documents(brief: Brief, target_language: str) -> dict[str, Any]:
+    """Translate the brief's editable final documents into ``target_language`` in
+    a single LLM call, preserving HTML structure 1:1. Documents that come back
+    empty are left untouched (no destructive overwrite). Returns the changed
+    documents plus usage/traces."""
+    editable_kinds = _editable_kinds_for_brief(brief)
+    document_qs = BriefFinalDocument.objects.filter(
+        brief=brief, kind__in=list(editable_kinds)
+    )
+    documents: dict[str, BriefFinalDocument] = {doc.kind: doc for doc in document_qs}
+    sources = {
+        kind: documents[kind].html
+        for kind in documents
+        if (documents[kind].html or "").strip()
+    }
+    empty_result: dict[str, Any] = {
+        "updated_documents": [],
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "model_used": "",
+        "traces": [],
+    }
+    if not sources:
+        return empty_result
+
+    name = _language_name(target_language)
+    model = _model_for_prompt("finalization_prompt")
+    system_prompt = (
+        f"Translate the given HTML document(s) into {name}.\n"
+        "- Translate ONLY human-readable text. Keep every HTML tag, attribute,\n"
+        "  href and the overall structure exactly as-is.\n"
+        "- Do not add, remove, summarise, or reorder content.\n"
+        f"- The result must read entirely in {name}; leave no source-language\n"
+        "  text except industry acronyms (SAG, AICP, IATSE, MSA, RTB, SMP) when\n"
+        f"  there is no natural {name} equivalent.\n"
+        "Return STRICT JSON (no markdown, no comments): an object whose keys are\n"
+        "exactly the given document keys and whose values are the translated HTML\n"
+        "strings."
+    )
+    payload = json.dumps(sources, ensure_ascii=False)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": [{"type": "text", "text": payload}]},
+    ]
+    parsed, response = call_llm_json(
+        model=model,
+        messages=messages,
+        temperature=TRANSLATE_TEMPERATURE,
+        max_tokens=TRANSLATE_MAX_TOKENS,
+    )
+    if isinstance(parsed, list):
+        parsed = next((x for x in parsed if isinstance(x, dict)), {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    updated_documents: list[BriefFinalDocument] = []
+    for kind in sources:
+        translated = sanitize_html(str(parsed.get(kind, "")).strip())
+        if not translated:
+            logger.warning("translation empty for kind=%s brief=%s", kind, brief.id)
+            continue
+        document = documents[kind]
+        document.html = translated
+        document.plain_text = _strip_html(translated)
+        document.save(update_fields=["html", "plain_text", "updated_at"])
+        updated_documents.append(document)
+
+    return {
+        "updated_documents": updated_documents,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "cost_usd": response.cost_usd,
+        "model_used": response.model_used,
+        "traces": [_trace_entry("translate", response)],
+    }
+
+
+def _maybe_handle_translate(
+    brief: Brief,
+    parsed: dict[str, Any],
+    response: LLMResponse,
+    doc_language: str,
+) -> dict[str, Any] | None:
+    """If the finalized-turn model flagged an explicit whole-document translation
+    (`translate_to`), perform it and build the turn result. Returns None when no
+    translation was requested so the caller continues with normal edits."""
+    translate_to = _validate_lang(parsed.get("translate_to"))
+    if not translate_to or translate_to == doc_language:
+        return None
+
+    try:
+        tr = translate_final_documents(brief, translate_to)
+    except Exception:
+        logger.exception("translate_final_documents failed brief=%s", brief.id)
+        tr = None
+
+    base: dict[str, Any] = {
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "freeze_language": "",
+        "model_used": response.model_used,
+    }
+    if tr and tr["updated_documents"]:
+        reply = str(parsed.get("reply", "")).strip() or _translation_done_reply(
+            translate_to
+        )
+        return {
+            **base,
+            "reply": reply,
+            "document_language": translate_to,
+            "language_switched": True,
+            "input_tokens": response.input_tokens + tr["input_tokens"],
+            "output_tokens": response.output_tokens + tr["output_tokens"],
+            "cost_usd": response.cost_usd + tr["cost_usd"],
+            "traces": [_trace_entry("finalized_chat", response), *tr["traces"]],
+            "updated_documents": tr["updated_documents"],
+        }
+    # Translation failed: do not echo a false "done" reply or switch the language.
+    return {
+        **base,
+        "reply": _fallback_reply(doc_language),
+        "document_language": doc_language,
+        "language_switched": False,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "cost_usd": response.cost_usd,
+        "traces": [_trace_entry("finalized_chat", response)],
+        "updated_documents": [],
+    }
+
+
 def process_finalized_turn(
     brief: Brief,
     user_message: str,
@@ -864,6 +1115,13 @@ def process_finalized_turn(
     if not isinstance(parsed, dict):
         parsed = {}
 
+    # Explicit whole-document translation: the user asked to switch the finished
+    # brief/email to another language. Handled out-of-line so this turn keeps the
+    # per-edit path simple.
+    translated = _maybe_handle_translate(brief, parsed, response, doc_language)
+    if translated is not None:
+        return translated
+
     reply = str(parsed.get("reply", "")).strip() or _fallback_reply(doc_language)
     raw_edits = parsed.get("edits") or []
     if not isinstance(raw_edits, list):
@@ -879,6 +1137,8 @@ def process_finalized_turn(
         "ready_to_finalize": False,
         "conversation_status": "finalized",
         "document_language": doc_language,
+        "freeze_language": "",
+        "language_switched": False,
         "input_tokens": response.input_tokens,
         "output_tokens": response.output_tokens,
         "cost_usd": response.cost_usd,
@@ -902,7 +1162,7 @@ def generate_final_documents(brief: Brief) -> dict[str, Any]:
     finalization_body = _load_prompt_body("finalization_prompt")
     model = _model_for_prompt("finalization_prompt")
 
-    doc_language = brief.document_language or "en"
+    doc_language = _resolve_finalize_language(brief, history)
 
     system_prompt = _build_system_prompt(
         main_body=main_body,

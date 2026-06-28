@@ -173,9 +173,12 @@ def generate_first_reply_task(brief_id: str) -> dict:
     )
 
     with transaction.atomic():
-        if not brief.document_language and result.get("document_language"):
+        # First turn freezes the brief language detected from the first message.
+        # freeze_language is "" when that message was too thin to commit to (then
+        # a later, richer turn decides it via _process_chat).
+        if not brief.document_language and result.get("freeze_language"):
             Brief.objects.filter(id=brief.id).update(
-                document_language=result["document_language"]
+                document_language=result["freeze_language"]
             )
 
         Brief.objects.filter(id=brief.id).update(

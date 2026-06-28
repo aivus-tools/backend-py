@@ -1415,36 +1415,40 @@ def test_post_finalize_chat_records_feedback_without_llm(
 
 
 @pytest.mark.django_db
-def test_patch_brief_updates_document_language(
+def test_patch_brief_ignores_document_language(
     api_client, client_user, client_profile, seeded_prompts
 ):
-    brief = Brief.objects.create(client=client_profile, document_language="en")
+    """Document language is no longer settable via PATCH — it is derived from the
+    first message. PATCH only updates the title; documentLanguage is ignored."""
+    brief = Brief.objects.create(client=client_profile, document_language="ru")
 
     resp = api_client.patch(
         reverse("projects_api:client_brief_ai_detail", args=[brief.id]),
-        data=json.dumps({"documentLanguage": "ru"}),
+        data=json.dumps({"title": "New title", "documentLanguage": "en"}),
         content_type="application/json",
         **_auth_headers(client_user),
     )
     assert resp.status_code == 200
     brief.refresh_from_db()
+    assert brief.title == "New title"
     assert brief.document_language == "ru"
 
 
 @pytest.mark.django_db
-def test_patch_brief_rejects_unknown_language(
+def test_patch_brief_requires_title(
     api_client, client_user, client_profile, seeded_prompts
 ):
-    brief = Brief.objects.create(client=client_profile, document_language="en")
+    """PATCH with only documentLanguage (no title) is a 400 — nothing to update."""
+    brief = Brief.objects.create(client=client_profile, document_language="ru")
     resp = api_client.patch(
         reverse("projects_api:client_brief_ai_detail", args=[brief.id]),
-        data=json.dumps({"documentLanguage": "fr"}),
+        data=json.dumps({"documentLanguage": "en"}),
         content_type="application/json",
         **_auth_headers(client_user),
     )
     assert resp.status_code == 400
     brief.refresh_from_db()
-    assert brief.document_language == "en"
+    assert brief.document_language == "ru"
 
 
 @pytest.mark.django_db
@@ -2214,10 +2218,11 @@ def test_process_brief_turn_injects_post_finalize_auth_rule(
 
 
 @pytest.mark.django_db
-def test_client_start_stores_document_language_from_body(
+def test_client_start_ignores_document_language_from_body(
     api_client, client_user, client_profile, seeded_prompts
 ):
-    """POST /start with documentLanguage persists it on the brief before task."""
+    """documentLanguage in the start body is ignored — the language is derived
+    from the first message during the first turn, not the interface locale."""
     brief = Brief.objects.create(client=client_profile)
 
     with patch("aivus_backend.projects.api.views_brief_v3.transaction.on_commit"):
@@ -2229,29 +2234,16 @@ def test_client_start_stores_document_language_from_body(
         )
     assert resp.status_code == 201
     brief.refresh_from_db()
-    assert brief.document_language == "ru"
+    assert brief.document_language == ""
     assert brief.pending_task_id == resp.json()["taskId"]
 
 
 @pytest.mark.django_db
-def test_client_start_rejects_invalid_document_language(
+def test_client_finalize_ignores_document_language(
     api_client, client_user, client_profile, seeded_prompts
 ):
-    brief = Brief.objects.create(client=client_profile)
-    resp = api_client.post(
-        reverse("projects_api:client_brief_ai_start", args=[brief.id]),
-        data=json.dumps({"message": "Hi", "documentLanguage": "fr"}),
-        content_type="application/json",
-        **_auth_headers(client_user),
-    )
-    assert resp.status_code == 400
-
-
-@pytest.mark.django_db
-def test_client_finalize_overrides_document_language(
-    api_client, client_user, client_profile, seeded_prompts
-):
-    """POST /finalize with documentLanguage overrides brief.document_language."""
+    """POST /finalize no longer accepts documentLanguage — the frozen language
+    stays as-is."""
     brief = Brief.objects.create(
         client=client_profile,
         document_language="ru",
@@ -2267,7 +2259,7 @@ def test_client_finalize_overrides_document_language(
         )
     assert resp.status_code == 200
     brief.refresh_from_db()
-    assert brief.document_language == "en"
+    assert brief.document_language == "ru"
     assert brief.pending_task_id == resp.json()["taskId"]
 
 
@@ -2347,10 +2339,11 @@ def test_generate_final_documents_uses_frozen_brief_language(
 
 
 @pytest.mark.django_db
-def test_public_start_stores_document_language_from_body(
+def test_public_start_ignores_document_language_from_body(
     api_client, client_profile, seeded_prompts
 ):
-    """POST /public/start also accepts documentLanguage, mirroring auth flow."""
+    """POST /public/start ignores documentLanguage too — language is derived from
+    the first message, not the request body."""
     brief = Brief.objects.create(
         client=None,
         anonymous_token="tok-lang",
@@ -2364,5 +2357,401 @@ def test_public_start_stores_document_language_from_body(
         )
     assert resp.status_code == 201
     brief.refresh_from_db()
-    assert brief.document_language == "ru"
+    assert brief.document_language == ""
     assert brief.pending_task_id == resp.json()["taskId"]
+
+
+# ----------------------------------------------------------------------------
+# Language detection, freezing and translation (founder: language = first message)
+# ----------------------------------------------------------------------------
+
+
+def _fake_llm_response(model: str = "gemini-3.1-pro-preview", content: str = "{}"):
+    from aivus_backend.core.llm import LLMResponse
+
+    return LLMResponse(
+        content=content,
+        model_used=model,
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=0.0,
+        latency_ms=1,
+        request_messages=[],
+        request_params={},
+    )
+
+
+def test_detect_language_by_script():
+    from aivus_backend.projects.ai_brief_v3 import detect_language
+
+    assert detect_language("Привет, нужен ролик") == "ru"
+    assert detect_language("こんにちは") == "ja"
+    assert detect_language("안녕하세요") == "ko"
+    assert detect_language("你好世界") == "zh"
+    assert detect_language("Hello world") == ""
+    assert detect_language("") == ""
+
+
+def test_validate_lang_accepts_code_and_name():
+    from aivus_backend.projects.ai_brief_v3 import _validate_lang
+
+    assert _validate_lang("ru") == "ru"
+    assert _validate_lang(" ES ") == "es"
+    assert _validate_lang("Russian") == "ru"
+    assert _validate_lang("spanish") == "es"
+    assert _validate_lang("klingon") == ""
+    assert _validate_lang(None) == ""
+
+
+def test_has_language_signal():
+    from aivus_backend.projects.ai_brief_v3 import WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER
+    from aivus_backend.projects.ai_brief_v3 import _has_language_signal
+
+    assert _has_language_signal("Necesito un video corporativo") is True
+    assert _has_language_signal("ok") is False
+    assert _has_language_signal("$10k") is False
+    assert _has_language_signal("🎬") is False
+    assert _has_language_signal(WEBHOOK_EMPTY_MESSAGE_PLACEHOLDER) is False
+
+
+@pytest.mark.django_db
+def test_resolve_turn_language_frozen_reuses_value(client_profile):
+    from aivus_backend.projects.ai_brief_v3 import _resolve_turn_language
+
+    brief = Brief.objects.create(client=client_profile, document_language="en")
+    # Even a Russian message does not change a frozen English brief.
+    assert _resolve_turn_language(brief, "Привет, продолжим на русском") == ("en", "")
+
+
+@pytest.mark.django_db
+def test_resolve_turn_language_detects_cyrillic_without_llm(client_profile):
+    from aivus_backend.projects.ai_brief_v3 import _resolve_turn_language
+
+    brief = Brief.objects.create(client=client_profile)
+    with patch("aivus_backend.projects.ai_brief_v3.call_llm") as call_llm_mock:
+        assert _resolve_turn_language(brief, "Привет, нужен ролик") == ("ru", "ru")
+    call_llm_mock.assert_not_called()
+
+
+def test_document_title_for_localizes():
+    from aivus_backend.projects.brief_pdf import document_title_for
+
+    assert document_title_for("production_brief", "ru") == "Производственный бриф"
+    assert document_title_for("production_brief", "en") == "Production Brief"
+    assert document_title_for("production_brief", "xx") == "Production Brief"
+    assert document_title_for("deliverables_checklist", "ru") == "Чек-лист поставки"
+    assert document_title_for("unknown_kind", "ru") == "Brief Document"
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_freezes_russian_from_first_message(
+    client_profile, seeded_prompts
+):
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(client=client_profile)
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {"reply": "Привет!", "ready_to_finalize": False},
+            _fake_llm_response(model),
+        )
+
+    with (
+        patch(
+            "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+        ),
+        patch("aivus_backend.projects.ai_brief_v3.call_llm") as call_llm_mock,
+    ):
+        result = process_brief_turn(
+            brief=brief,
+            user_message="Привет, нужен ролик про завод в Москве",
+            history=[],
+        )
+    assert result["document_language"] == "ru"
+    assert result["freeze_language"] == "ru"
+    # Cyrillic is caught by the regex detector — no flash detector call needed.
+    call_llm_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_detects_latin_via_llm(client_profile, seeded_prompts):
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(client=client_profile)
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {"reply": "¡Hola!", "ready_to_finalize": False},
+            _fake_llm_response(model),
+        )
+
+    with (
+        patch(
+            "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+        ),
+        patch(
+            "aivus_backend.projects.ai_brief_v3.call_llm",
+            return_value=_fake_llm_response(content="es"),
+        ),
+    ):
+        result = process_brief_turn(
+            brief=brief,
+            user_message="Necesito un video corporativo para mi empresa",
+            history=[],
+        )
+    assert result["document_language"] == "es"
+    assert result["freeze_language"] == "es"
+
+
+@pytest.mark.django_db
+def test_process_brief_turn_thin_message_does_not_freeze(
+    client_profile, seeded_prompts
+):
+    from aivus_backend.projects.ai_brief_v3 import process_brief_turn
+
+    brief = Brief.objects.create(client=client_profile)
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {"reply": "Hi!", "ready_to_finalize": False},
+            _fake_llm_response(model),
+        )
+
+    with (
+        patch(
+            "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+        ),
+        patch("aivus_backend.projects.ai_brief_v3.call_llm") as call_llm_mock,
+    ):
+        result = process_brief_turn(brief=brief, user_message="ok", history=[])
+    assert result["document_language"] == "en"
+    assert result["freeze_language"] == ""
+    call_llm_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_first_reply_task_freezes_detected_language(
+    client_profile, client_user, seeded_prompts
+):
+    from aivus_backend.projects.tasks import generate_first_reply_task
+
+    brief = Brief.objects.create(client=client_profile)
+    ChatMessage.objects.create(
+        brief=brief,
+        user=client_user,
+        role="user",
+        content="Здравствуйте, нужен корпоративный ролик для завода",
+    )
+    Brief.objects.filter(id=brief.id).update(message_count=1, pending_task_id="t1")
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {"reply": "Здравствуйте!", "ready_to_finalize": False},
+            _fake_llm_response(model),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+    ):
+        generate_first_reply_task(str(brief.id))
+
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"
+
+
+@pytest.mark.django_db
+def test_first_reply_task_thin_message_does_not_freeze(
+    client_profile, client_user, seeded_prompts
+):
+    from aivus_backend.projects.tasks import generate_first_reply_task
+
+    brief = Brief.objects.create(client=client_profile)
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="ok")
+    Brief.objects.filter(id=brief.id).update(message_count=1, pending_task_id="t1")
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {"reply": "Hi!", "ready_to_finalize": False},
+            _fake_llm_response(model),
+        )
+
+    with (
+        patch(
+            "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+        ),
+        patch("aivus_backend.projects.ai_brief_v3.call_llm") as call_llm_mock,
+    ):
+        generate_first_reply_task(str(brief.id))
+
+    brief.refresh_from_db()
+    assert brief.document_language == ""
+    call_llm_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_translate_final_documents_translates_editable_docs(
+    client_profile, seeded_prompts
+):
+    from aivus_backend.projects.ai_brief_v3 import translate_final_documents
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="en",
+        conversation_status="finalized",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<h2>Production Brief</h2>"
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>Hello vendor</p>"
+    )
+
+    def fake_json(model, messages, **kwargs):
+        return (
+            {
+                "production_brief": "<h2>Производственный бриф</h2>",
+                "vendor_email": "<p>Здравствуйте</p>",
+            },
+            _fake_llm_response(model),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+    ):
+        result = translate_final_documents(brief, "ru")
+
+    assert {d.kind for d in result["updated_documents"]} == {
+        "production_brief",
+        "vendor_email",
+    }
+    pb = BriefFinalDocument.objects.get(brief=brief, kind="production_brief")
+    assert "Производственный" in pb.html
+
+
+@pytest.mark.django_db
+def test_process_finalized_turn_translates_on_request(client_profile, seeded_prompts):
+    from aivus_backend.projects.ai_brief_v3 import process_finalized_turn
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        document_language="en",
+        conversation_status="finalized",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<h2>Production Brief</h2>"
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="vendor_email", html="<p>Hello vendor</p>"
+    )
+
+    calls: list[int] = []
+
+    def fake_json(model, messages, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return (
+                {"reply": "Перевожу", "edits": [], "translate_to": "ru"},
+                _fake_llm_response(model),
+            )
+        return (
+            {
+                "production_brief": "<h2>Производственный бриф</h2>",
+                "vendor_email": "<p>Здравствуйте</p>",
+            },
+            _fake_llm_response(model),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+    ):
+        result = process_finalized_turn(
+            brief=brief, user_message="переведи бриф на русский", history=[]
+        )
+
+    assert result["language_switched"] is True
+    assert result["document_language"] == "ru"
+    assert {d.kind for d in result["updated_documents"]} == {
+        "production_brief",
+        "vendor_email",
+    }
+
+
+@pytest.mark.django_db
+def test_chat_persists_language_switch_on_translation(
+    api_client, client_user, client_profile, seeded_prompts
+):
+    """The _process_chat writer must persist an explicit translation switch even
+    when the brief language is already frozen."""
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+        document_language="en",
+    )
+    ChatMessage.objects.create(brief=brief, user=client_user, role="user", content="hi")
+
+    fake_result = {
+        "reply": "Перевёл",
+        "ready_to_finalize": False,
+        "conversation_status": "finalized",
+        "document_language": "ru",
+        "freeze_language": "",
+        "language_switched": True,
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cost_usd": 0.0,
+        "model_used": "gemini-3.1-pro-preview",
+        "traces": [],
+        "updated_documents": [],
+    }
+    with patch(
+        "aivus_backend.projects.api.views_brief_v3.process_finalized_turn",
+        return_value=fake_result,
+    ):
+        resp = api_client.post(
+            reverse("projects_api:client_brief_ai_chat", args=[brief.id]),
+            data=json.dumps({"message": "translate the brief to russian"}),
+            content_type="application/json",
+            **_auth_headers(client_user),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["documentLanguage"] == "ru"
+    brief.refresh_from_db()
+    assert brief.document_language == "ru"
+
+
+@pytest.mark.django_db
+def test_generate_final_documents_redetects_when_language_missing(
+    client_user, client_profile, seeded_prompts
+):
+    from aivus_backend.projects.ai_brief_v3 import generate_final_documents
+
+    brief = Brief.objects.create(client=client_profile, document_language="")
+    ChatMessage.objects.create(
+        brief=brief,
+        user=client_user,
+        role="user",
+        content="Сделай бриф про фитнес-приложение, бюджет 50к рублей.",
+    )
+
+    captured = {}
+
+    def fake_json(model, messages, **kwargs):
+        captured["system"] = next(
+            m["content"] for m in messages if m["role"] == "system"
+        )
+        return (
+            {
+                "production_brief_html": "<h1>Brief</h1>",
+                "vendor_email_html": "<p>hi</p>",
+                "vendor_email_text": "hi",
+            },
+            _fake_llm_response(model),
+        )
+
+    with patch(
+        "aivus_backend.projects.ai_brief_v3.call_llm_json", side_effect=fake_json
+    ):
+        generate_final_documents(brief=brief)
+
+    assert "Brief document language: Russian" in captured["system"]

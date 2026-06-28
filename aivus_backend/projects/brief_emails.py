@@ -141,7 +141,7 @@ def _brief_pdf_attachment(brief) -> tuple[str, str, str] | None:
     except Exception:
         logger.exception("brief pdf render failed for email: brief=%s", brief.id)
         return None
-    label = brief_pdf.DOCUMENT_TITLE_BY_KIND.get(document.kind, "Brief")
+    label = brief_pdf.document_title_for(document.kind, brief.document_language)
     base_name = (brief.title or "Brief").strip()
     safe = "".join(c for c in base_name if c.isalnum() or c in " _-").strip()[:60]
     filename = f"{safe or 'Brief'} - {label}.pdf"
