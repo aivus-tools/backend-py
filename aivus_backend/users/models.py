@@ -303,6 +303,7 @@ class VendorSettings(models.Model):
         blank=True,
     )
     lead_notification_email = models.EmailField(blank=True, default="")
+    custom_ai_instructions = models.TextField(blank=True, default="")
     fringes_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     handling_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     markup_percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)

@@ -507,6 +507,8 @@ def vendor_settings(request):
     return _patch_vendor_settings(settings, request)
 
 
+_CUSTOM_AI_INSTRUCTIONS_MAX_LEN = 500
+
 _VENDOR_PERCENT_FIELDS = {
     "fringesPercent": "fringes_percent",
     "handlingPercent": "handling_percent",
@@ -524,14 +526,16 @@ def _assign_vendor_settings_fields(settings, data):
         settings.company_name = data["companyName"]
     if "agencyName" in data:
         settings.agency_name = data["agencyName"]
-    if "leadNotificationEmail" in data:
-        error = _apply_lead_notification_email(settings, data)
-        if error:
-            return error
-    if "slug" in data:
-        error = _apply_slug(settings, data)
-        if error:
-            return error
+    appliers = (
+        ("leadNotificationEmail", _apply_lead_notification_email),
+        ("slug", _apply_slug),
+        ("customAiInstructions", _apply_custom_ai_instructions),
+    )
+    for json_key, applier in appliers:
+        if json_key in data:
+            error = applier(settings, data)
+            if error:
+                return error
     for json_key, model_field in _VENDOR_PERCENT_FIELDS.items():
         if json_key in data:
             setattr(settings, model_field, Decimal(str(data[json_key])))
@@ -719,6 +723,27 @@ def _apply_lead_notification_email(settings, data):
     return None
 
 
+def _apply_custom_ai_instructions(settings, data):
+    raw = data.get("customAiInstructions")
+    if raw is not None and not isinstance(raw, str):
+        return JsonResponse(
+            {"error": "customAiInstructions must be a string"}, status=400
+        )
+    value = (raw or "").strip()
+    if len(value) > _CUSTOM_AI_INSTRUCTIONS_MAX_LEN:
+        return JsonResponse(
+            {
+                "error": (
+                    "Custom AI instructions must be "
+                    f"{_CUSTOM_AI_INSTRUCTIONS_MAX_LEN} characters or fewer"
+                )
+            },
+            status=400,
+        )
+    settings.custom_ai_instructions = value
+    return None
+
+
 def _apply_slug(settings, data):
     value = data.get("slug")
     # Explicit null clears the slug; a string is normalised; anything else
@@ -757,6 +782,7 @@ def _build_vendor_settings_response(settings):
         # (vendor_slug_suggest); this is deliberate, not a missing default.
         "slug": settings.slug or None,
         "leadNotificationEmail": settings.lead_notification_email,
+        "customAiInstructions": settings.custom_ai_instructions,
         "fringesPercent": str(settings.fringes_percent),
         "handlingPercent": str(settings.handling_percent),
         "markupPercent": str(settings.markup_percent),
