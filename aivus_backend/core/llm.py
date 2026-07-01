@@ -169,6 +169,27 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(**client_kwargs)
 
 
+def warm_up_gemini() -> None:
+    """Import google.genai in a background thread, off the boot critical path.
+
+    google.genai is imported lazily (see the module-top note), so the first real
+    Gemini call would otherwise pay the full ~13s pydantic schema build. Kicking
+    the import off in a daemon thread at worker start hides it: the worker serves
+    /healthz immediately while genai loads in the background, and by the time a
+    Gemini call arrives the module is cached. Best-effort and idempotent — a
+    second call is a cheap no-op and any failure is logged, not raised.
+    """
+    import threading  # noqa: PLC0415
+
+    def _load() -> None:
+        try:
+            import google.genai  # noqa: F401, PLC0415
+        except Exception:
+            logger.exception("Gemini warm-up import failed")
+
+    threading.Thread(target=_load, name="gemini-warmup", daemon=True).start()
+
+
 def _gemini_parts(content: Any) -> list[genai_types.Part]:  # noqa: C901
     """Convert our content representation to list of genai Parts."""
     from google.genai import types as genai_types  # noqa: PLC0415
