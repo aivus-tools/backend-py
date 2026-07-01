@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -5,16 +7,24 @@ import re as _re
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import cast
 
 import anthropic
 import openai
-from google import genai
-from google.genai import types as genai_types
-from google.oauth2 import service_account
+
+if TYPE_CHECKING:
+    from google import genai
+    from google.genai import types as genai_types
 
 logger = logging.getLogger(__name__)
+
+# google.genai is imported lazily inside the Gemini call paths below: importing
+# it builds large pydantic schemas (~13s) which, on a --preload gunicorn boot,
+# blocks the WSGI app load and starves the /healthz probe during rolling
+# deploys. Deferring it keeps process start fast; the cost is paid once on the
+# first real Gemini call instead.
 
 
 def _part_summary(part: dict) -> dict:
@@ -133,6 +143,9 @@ def _get_anthropic_client() -> anthropic.Anthropic:
 
 
 def _get_gemini_client() -> genai.Client:
+    from google import genai  # noqa: PLC0415
+    from google.oauth2 import service_account  # noqa: PLC0415
+
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
     if not project:
         msg = "GOOGLE_CLOUD_PROJECT is not set"
@@ -158,6 +171,8 @@ def _get_gemini_client() -> genai.Client:
 
 def _gemini_parts(content: Any) -> list[genai_types.Part]:  # noqa: C901
     """Convert our content representation to list of genai Parts."""
+    from google.genai import types as genai_types  # noqa: PLC0415
+
     if isinstance(content, str):
         return [genai_types.Part.from_text(text=content)]
     if not isinstance(content, list):
@@ -196,6 +211,8 @@ def _call_gemini(
     max_tokens: int,
     json_mode: bool,  # noqa: FBT001
 ) -> LLMResponse:
+    from google.genai import types as genai_types  # noqa: PLC0415
+
     client = _get_gemini_client()
     start = time.monotonic()
 
