@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.conf import settings
 from django.test import Client as DjangoTestClient
 from django.urls import reverse
 from django.utils import timezone
@@ -11,6 +12,7 @@ from aivus_backend.core.enums import BriefSource
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects.models import Brief
 from aivus_backend.projects.models import Project
+from aivus_backend.users.models import Client as ClientModel
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
 from aivus_backend.users.models import VendorSettings
@@ -200,3 +202,116 @@ def test_slug_drafts_vendor_rate_limit_disabled_in_tests_by_default(vendor_with_
         "/service/public/briefs/ai/by-slug/acme-films/drafts"
     )
     assert _slug_drafts_vendor_ratelimited(request, vendor_with_slug) is False
+
+
+# --- client (authenticated) by-slug draft ------------------------------------
+
+
+@pytest.fixture
+def client_user(db) -> User:
+    return User.objects.create_user(
+        email="branded-client@example.com",
+        password="p@ssw0rd",
+        name="Branded Client",
+        group="CLIENT",
+    )
+
+
+@pytest.fixture
+def client_profile(client_user) -> ClientModel:
+    return ClientModel.objects.create(name="Client Corp", owner=client_user)
+
+
+def _auth_headers(user) -> dict:
+    return {
+        "HTTP_X_API_KEY": settings.API_KEY,
+        "HTTP_X_USER_ID": str(user.id),
+        "HTTP_X_USER_GROUP": user.group,
+    }
+
+
+@pytest.mark.django_db
+def test_client_by_slug_draft_creates_brief_and_project(
+    api_client, vendor_with_slug, client_user, client_profile
+):
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_by_slug_drafts", args=["acme-films"]),
+        **_auth_headers(client_user),
+    )
+    assert response.status_code == 201
+    brief = Brief.objects.get(id=response.json()["briefId"])
+    assert brief.source == BriefSource.PERSONAL_LINK
+    assert brief.client_id == client_profile.id
+    assert brief.anonymous_token is None
+
+    project = Project.objects.get(brief=brief, vendor=vendor_with_slug)
+    assert project.status == ProjectStatus.DRAFT
+    assert project.client_id == client_profile.id
+
+
+@pytest.mark.django_db
+def test_client_by_slug_draft_requires_client_profile(
+    api_client, vendor_with_slug, client_user
+):
+    """A CLIENT user without a Client profile gets 403, no brief created."""
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_by_slug_drafts", args=["acme-films"]),
+        **_auth_headers(client_user),
+    )
+    assert response.status_code == 403
+    assert Brief.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_client_by_slug_draft_unknown_vendor_404(
+    api_client, client_user, client_profile
+):
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_by_slug_drafts", args=["ghost-slug"]),
+        **_auth_headers(client_user),
+    )
+    assert response.status_code == 404
+    assert Brief.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_client_by_slug_draft_requires_auth(api_client, vendor_with_slug):
+    """Without CLIENT auth the endpoint is rejected and creates nothing."""
+    response = api_client.post(
+        reverse("projects_api:client_brief_ai_by_slug_drafts", args=["acme-films"])
+    )
+    assert response.status_code in (401, 403)
+    assert Brief.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_client_and_anon_slug_drafts_use_separate_rate_buckets(vendor_with_slug):
+    """The authenticated by-slug cap must not share a bucket with the anonymous
+    one, so an anonymous flood on a vendor's link cannot 429 its logged-in
+    clients (and vice versa)."""
+    from django.core.cache import cache
+    from django.test import RequestFactory
+    from django.test import override_settings
+
+    from aivus_backend.projects.api.views_brief_v3 import (
+        _client_slug_drafts_vendor_ratelimited,
+    )
+    from aivus_backend.projects.api.views_brief_v3 import (
+        _slug_drafts_vendor_ratelimited,
+    )
+
+    cache.clear()
+    factory = RequestFactory()
+
+    with override_settings(RATELIMIT_ENABLE=True):
+        for _ in range(100):
+            _slug_drafts_vendor_ratelimited(factory.post("/x"), vendor_with_slug)
+        anon_limited = _slug_drafts_vendor_ratelimited(
+            factory.post("/x"), vendor_with_slug
+        )
+        client_limited = _client_slug_drafts_vendor_ratelimited(
+            factory.post("/x"), vendor_with_slug
+        )
+    # Anonymous bucket exhausted; the client bucket is independent and still open.
+    assert anon_limited is True
+    assert client_limited is False

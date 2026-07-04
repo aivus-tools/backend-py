@@ -490,6 +490,53 @@ def test_client_send_creates_project_at_rfp(api_client, vendor, client_user):
     chain_mock.assert_called_once()
 
 
+@pytest.mark.django_db
+def test_client_send_to_second_vendor_not_blocked_by_existing_project(
+    api_client, vendor, client_user
+):
+    """Regression: a client may distribute one brief to multiple vendors (offer
+    comparison). An existing project for vendor A must NOT block Send to vendor B
+    — the authenticated Send has no slug-swap guard, and the early DRAFT project
+    from the personal-link flow must not turn cross-vendor resend into a 400."""
+    user, client_profile = client_user
+
+    other_user = User.objects.create_user(
+        email="first-vendor@example.com",
+        password="p@ssw0rd",
+        name="First Vendor",
+        group="VENDOR",
+    )
+    vendor_a = Vendor.objects.create(name="First Studio", owner=other_user)
+
+    brief = Brief.objects.create(
+        client=client_profile,
+        conversation_status="finalized",
+    )
+    BriefFinalDocument.objects.create(
+        brief=brief, kind="production_brief", html="<p>doc</p>"
+    )
+    Project.objects.create(
+        vendor=vendor_a, brief=brief, name="lead A", status=ProjectStatus.RFP
+    )
+
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:client_brief_ai_send", args=[brief.id]),
+            data=json.dumps({"slug": "send-studio"}),
+            content_type="application/json",
+            **_client_auth(user),
+        )
+
+    assert response.status_code == 200
+    chain_mock.assert_called_once()
+
+
 # --- SF-8: pending stays set until promotion ---------------------------------
 
 

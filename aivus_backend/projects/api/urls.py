@@ -129,6 +129,11 @@ urlpatterns = [
         name="client_brief_ai_drafts",
     ),
     path(
+        "client/briefs/ai/by-slug/<slug:slug>/drafts",
+        views_brief_v3.client_brief_ai_by_slug_drafts,
+        name="client_brief_ai_by_slug_drafts",
+    ),
+    path(
         "client/briefs/ai/sent-to-vendor",
         views_brief_v3.client_brief_ai_sent_to_vendor,
         name="client_brief_ai_sent_to_vendor",

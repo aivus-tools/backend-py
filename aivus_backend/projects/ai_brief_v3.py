@@ -408,12 +408,14 @@ def _build_vendor_instructions_rule(brief: Brief) -> str:
     """Build a low-trust guidance block from the vendor's custom AI instructions.
 
     The block is emitted whenever the brief has an active project tied to a
-    vendor whose settings carry instructions. At chat time that means briefs from
-    a personal link or webhook form (both attach a vendor project on creation); a
-    direct brief has no project yet, so the block is omitted. The vendor text is
-    untrusted: it is sanitized to neutralize fence-forging lines and wrapped as
-    lowest-priority guidance that must never override safety, the no-leak rule,
-    output language or JSON format.
+    vendor whose settings carry instructions — a personal-link or webhook brief
+    attaches the vendor project on creation, a direct brief has no project so the
+    block is omitted. It is injected into the live chat and the post-finalization
+    edits, but NOT into final-document generation — those documents (production
+    brief and vendor email) can reach other vendors and the client, so a private
+    instruction must not bleed into them. The vendor text is untrusted: it is
+    sanitized to neutralize fence-forging lines and wrapped as lowest-priority
+    guidance that must never override safety, the no-leak rule, language or JSON.
     """
     project = (
         brief.projects.filter(deleted_at__isnull=True)
@@ -446,7 +448,7 @@ def _build_vendor_instructions_rule(brief: Brief) -> str:
 
 
 _VENDOR_FENCE_LINE_RE = re.compile(
-    r"^\s*(?:={3,}.*={3,}|(?:begin|end)\s+vendor\s+preferences.*)$",
+    r"^\s*(?:={3,}|(?:begin|end)\s+vendor\s+preferences).*$",
     re.IGNORECASE,
 )
 
@@ -455,9 +457,9 @@ def _sanitize_vendor_instructions(text: str) -> str:
     """Strip lines that could forge the containment fence or a system section.
 
     The vendor text is untrusted and lands inside BEGIN/END VENDOR PREFERENCES.
-    Dropping any line that reproduces those markers or a '=== ... ===' header
-    stops the vendor from breaking out of the fence and impersonating a
-    higher-priority system block.
+    Dropping any line that starts a '===' rule (single- or multi-line forged
+    section headers) or reproduces the BEGIN/END markers stops the vendor from
+    breaking out of the fence and impersonating a higher-priority system block.
     """
     kept = [line for line in text.splitlines() if not _VENDOR_FENCE_LINE_RE.match(line)]
     return "\n".join(kept).strip()
@@ -1127,6 +1129,11 @@ def process_finalized_turn(
     )
     edit_rule = _build_finalized_edit_rule(doc_language)
     system_prompt = f"{base_system_prompt}\n\n{edit_rule}"
+    # Vendor guidance stays the last, lowest-priority block: appended after the
+    # edit rule so its "follow the rules above" fence still covers the edit rule.
+    vendor_rule = _build_vendor_instructions_rule(brief)
+    if vendor_rule.strip():
+        system_prompt = f"{system_prompt}\n\n{vendor_rule}"
 
     editable_kinds = _editable_kinds_for_brief(brief)
     document_qs = BriefFinalDocument.objects.filter(

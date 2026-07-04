@@ -652,6 +652,48 @@ def client_brief_ai_drafts(request):
 @require_http_methods(["POST"])
 @require_groups("CLIENT")
 @conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
+def client_brief_ai_by_slug_drafts(request, slug):
+    """Start a brief for a logged-in client on a vendor's personal link.
+
+    Mirrors the anonymous public_brief_ai_by_slug_drafts but the brief is owned by
+    the client instead of an anonymous token: it creates the draft
+    (source=personal_link) and attaches a DRAFT project to the vendor so the lead
+    shows in the vendor's dashboard from the start (and the vendor's AI
+    instructions apply from the first message). The per-vendor cap is layered on
+    top of the per-user one so the shared vendor inbox cannot be flooded.
+    """
+    client = _get_client_safe(request)
+    if not client:
+        return JsonResponse({"error": "Client profile not found"}, status=403)
+
+    vendor = _resolve_vendor_by_slug(slug)
+    if not vendor:
+        return JsonResponse({"error": "Link not found"}, status=404)
+
+    if _client_slug_drafts_vendor_ratelimited(request, vendor):
+        return JsonResponse({"error": "Rate limit exceeded"}, status=429)
+
+    with transaction.atomic():
+        brief = Brief.objects.create(
+            client=client,
+            source=BriefSource.PERSONAL_LINK,
+        )
+        Project.objects.get_or_create(
+            vendor=vendor,
+            brief=brief,
+            defaults={
+                "name": _project_name_for_brief(brief),
+                "status": ProjectStatus.DRAFT,
+                "client": client,
+            },
+        )
+    return JsonResponse({"briefId": str(brief.id)}, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("CLIENT")
+@conditional_ratelimit(key=user_ratelimit_key, rate="20/m", method="POST")
 def client_brief_ai_start(request, brief_id):
     brief = _get_brief_for_client(brief_id, request)
     if not brief:
@@ -1886,6 +1928,16 @@ def _slug_drafts_vendor_ratelimited(request, vendor) -> bool:
     single legitimate visitor is throttled by IP first.
     """
     return _vendor_ratelimited(request, vendor, "slug_drafts_vendor", "100/h")
+
+
+def _client_slug_drafts_vendor_ratelimited(request, vendor) -> bool:
+    """Per-vendor cap for the authenticated by-slug draft endpoint.
+
+    A bucket separate from the anonymous slug-drafts cap so an anonymous flood on
+    a vendor's link cannot exhaust the limit for that vendor's logged-in clients
+    (and vice versa) — the two endpoints have independent abuse profiles.
+    """
+    return _vendor_ratelimited(request, vendor, "client_slug_drafts_vendor", "100/h")
 
 
 @csrf_exempt
