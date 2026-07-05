@@ -12,20 +12,23 @@ Two layers, defence in depth:
      attack signatures (ignore previous instructions, reveal system prompt,
      override safety, jailbreak, forged fences/role markers). High precision so
      legitimate tone/persona/business guidance is never blocked.
-  2. LLM judge. It prefers a DIFFERENT model family than the brief pipeline
-     (which is Gemini): Anthropic first, then OpenAI. Using a different family is
-     a deliberate OWASP recommendation — a guard LLM from the same family shares
-     the primary model's bypasses. When no non-Gemini key is configured the
-     judge falls back to Gemini so it still runs; that reintroduces the
-     shared-family caveat, accepted as a temporary default until an Anthropic or
-     OpenAI key is added. The vendor text is isolated behind a nonce-delimited
-     fence with spotlighting so the judge classifies it as data rather than
-     obeying it.
+  2. LLM judge over an ordered list of candidates. It prefers a DIFFERENT model
+     family than the brief pipeline (which is Gemini): Anthropic first, then
+     OpenAI. Using a different family is a deliberate OWASP recommendation — a
+     guard LLM from the same family shares the primary model's bypasses. Gemini
+     is ALWAYS the final candidate, so an invalid or misconfigured non-Gemini key
+     degrades to a working Gemini judge instead of silently failing the judge
+     open (a stale OPENAI_API_KEY once did exactly that in production). Until a
+     valid non-Gemini key is added the judge runs on Gemini, which reintroduces
+     the shared-family caveat, accepted as a temporary default. The vendor text
+     is isolated behind a nonce-delimited fence with spotlighting so the judge
+     classifies it as data rather than obeying it.
 
-Fail-open by design: if the judge is disabled or the judge call errors,
-screening allows the save. Blocking a paying vendor because an LLM transiently
-failed is worse than relying on the heuristics plus runtime containment that
-always apply.
+Fail-open by design: if the judge is disabled or EVERY candidate fails, screening
+allows the save. Blocking a paying vendor because all LLMs transiently failed is
+worse than relying on the heuristics plus runtime containment that always apply.
+Heuristics are English-only, so for non-English text the judge is the sole
+save-time layer — keeping it reliable (hence the Gemini fallback) matters.
 """
 
 from __future__ import annotations
@@ -49,20 +52,20 @@ _GEMINI_JUDGE_MODEL = "gemini-3.1-flash-lite-preview"
 _INJECTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"\b(?:ignore|disregard|forget|override|bypass)\b[^.\n]{0,40}?"
-        r"\b(?:previous|prior|above|earlier|preceding|all|any|these|the)\b"
-        r"[^.\n]{0,40}?\b(?:instruction|rule|prompt|direction|guideline|"
-        r"guardrail|restriction|filter|policy)s?\b",
+        r"\b(?:ignore|disregard|forget|override|bypass|skip|discard)\b"
+        r"[^.\n]{0,40}?\b(?:previous|prior|above|earlier|preceding|foregoing|"
+        r"aforementioned)\b",
+        r"\b(?:ignore|disregard|override|bypass|violate)\b[^.\n]{0,15}?\byour\b"
+        r"[^.\n]{0,20}?\b(?:instruction|prompt|guardrail|directive)s?\b",
         r"\bforget\s+(?:everything|all)\b[^.\n]{0,30}?"
         r"\b(?:told|said|above|previous|prior|learned|context|memory)\b",
         r"\b(?:reveal|show|print|repeat|output|display|leak|reproduce|share|"
         r"expose|disclose)\b[^.\n]{0,40}?\b(?:system\s+prompt|system\s+"
         r"message|hidden\s+(?:instruction|prompt)|your\s+(?:instruction|"
-        r"prompt)|the\s+prompt)s?\b",
+        r"prompt))s?\b",
         r"\bsystem\s+prompt\b",
         r"\b(?:override|disable|turn\s+off|bypass|ignore)\b[^.\n]{0,30}?"
-        r"\b(?:safety|guardrail|restriction|filter|moderation|content\s+"
-        r"polic)\w*",
+        r"\b(?:safety|guardrail|moderation|content\s+polic)\w*",
         r"\bjailbreak\b",
         r"\bdo\s+anything\s+now\b",
     )
@@ -74,7 +77,7 @@ _FENCE_PATTERNS = tuple(
         r"^\s*={3,}.*$",
         r"^\s*(?:begin|end)\s+vendor\s+preferences",
         r"^\s*vendor\s+guidance",
-        r"^\s*(?:system|assistant|developer)\s*:",
+        r"^\s*system\s*:",
     )
 )
 
@@ -151,24 +154,26 @@ def _heuristic_hit(value: str) -> str:
     return ""
 
 
-def _judge_model() -> str:
-    """Pick the judge model. Prefer a non-Gemini family (different attack surface
-    than the Gemini brief pipeline); fall back to Gemini so the judge still runs
-    before any non-Gemini key is configured."""
+def _judge_models() -> list[str]:
+    """Ordered judge candidates. Prefer a non-Gemini family (different attack
+    surface than the Gemini brief pipeline), but ALWAYS keep Gemini as the final
+    candidate: a misconfigured or invalid non-Gemini key must degrade to a
+    working Gemini judge, not silently fail the whole judge open."""
+    models: list[str] = []
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return _ANTHROPIC_JUDGE_MODEL
+        models.append(_ANTHROPIC_JUDGE_MODEL)
     if os.environ.get("OPENAI_API_KEY"):
-        return _OPENAI_JUDGE_MODEL
-    return _GEMINI_JUDGE_MODEL
+        models.append(_OPENAI_JUDGE_MODEL)
+    models.append(_GEMINI_JUDGE_MODEL)
+    return models
 
 
 def _llm_judge(value: str) -> GuardVerdict | None:
-    """Classify the text with the judge model. None means fail-open (judge
-    disabled or the call failed); the caller then relies on heuristics plus
-    runtime containment."""
+    """Classify the text, trying each judge candidate until one answers. None
+    means fail-open (judge disabled or every candidate failed); the caller then
+    relies on heuristics plus runtime containment."""
     if not getattr(settings, "CUSTOM_AI_INSTRUCTIONS_JUDGE_ENABLED", True):
         return None
-    model = _judge_model()
 
     nonce = secrets.token_hex(8)
     user_content = (
@@ -179,21 +184,39 @@ def _llm_judge(value: str) -> GuardVerdict | None:
         {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
-    try:
-        parsed, _response = call_llm_json(
-            model=model,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=300,
+    for model in _judge_models():
+        try:
+            parsed, _response = call_llm_json(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=400,
+            )
+        except Exception:
+            logger.warning("Custom AI instruction judge model failed: %s", model)
+            continue
+        if not isinstance(parsed, dict) or not _judge_says_unsafe(parsed.get("safe")):
+            return GuardVerdict(safe=True)
+        return GuardVerdict(
+            safe=False,
+            category=_clean_log_value(parsed.get("category") or "unsafe"),
+            reason=str(parsed.get("reason") or "")[:200],
         )
-    except Exception:
-        logger.exception("Custom AI instruction judge failed; allowing save")
-        return None
+    logger.error("Custom AI instruction judge exhausted all models; allowing save")
+    return None
 
-    if not isinstance(parsed, dict) or parsed.get("safe", True):
-        return GuardVerdict(safe=True)
-    return GuardVerdict(
-        safe=False,
-        category=str(parsed.get("category") or "unsafe")[:40],
-        reason=str(parsed.get("reason") or "")[:200],
-    )
+
+def _judge_says_unsafe(value: object) -> bool:
+    """True only when the judge clearly signalled unsafe. A boolean False, or a
+    string that plainly means false, blocks. Null / missing / ambiguous shapes
+    carry no signal and fail open (allow), per the module's fail-open contract;
+    a stringified boolean like "false" is a clear unsafe signal, not ambiguous."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "no", "0", "unsafe"}
+    return value is False
+
+
+def _clean_log_value(value: object) -> str:
+    """Collapse whitespace and cap length: `category` is LLM output derived from
+    attacker-controlled text and must not forge log lines."""
+    return re.sub(r"\s+", " ", str(value)).strip()[:40]
