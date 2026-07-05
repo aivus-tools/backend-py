@@ -74,6 +74,13 @@ E2E_CONFIRMATION_TOKEN_SECRET = env("E2E_CONFIRMATION_TOKEN_SECRET", default="")
 # or only to staff. Staff can always see it regardless of this flag.
 SHOW_BRIEF_COST_TO_ALL = env.bool("SHOW_BRIEF_COST_TO_ALL", default=False)
 
+# Toggle the save-time LLM judge that screens vendor custom AI instructions for
+# prompt-injection. Heuristics and runtime containment always apply; this flag
+# only gates the extra LLM call. Off in tests to keep them offline.
+CUSTOM_AI_INSTRUCTIONS_JUDGE_ENABLED = env.bool(
+    "CUSTOM_AI_INSTRUCTIONS_JUDGE_ENABLED", default=True
+)
+
 # URLS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#root-urlconf

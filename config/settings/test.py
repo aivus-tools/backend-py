@@ -45,5 +45,10 @@ API_KEY = env("API_KEY", default="test-api-key")
 # Disable rate limiting in tests to prevent test interference
 RATELIMIT_ENABLE = False
 
+# CUSTOM AI INSTRUCTIONS GUARD
+# ------------------------------------------------------------------------------
+# Keep the save-time LLM judge off so tests stay offline; heuristics still run.
+CUSTOM_AI_INSTRUCTIONS_JUDGE_ENABLED = False
+
 # Your stuff...
 # ------------------------------------------------------------------------------

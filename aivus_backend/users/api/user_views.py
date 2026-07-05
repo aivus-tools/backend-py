@@ -14,6 +14,7 @@ from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.core.enums import UserGroup
+from aivus_backend.core.prompt_guard import screen_custom_ai_instructions
 from aivus_backend.core.slugs import normalize_slug
 from aivus_backend.core.slugs import validate_slug
 from aivus_backend.users.models import Client
@@ -740,6 +741,20 @@ def _apply_custom_ai_instructions(settings, data):
             },
             status=400,
         )
+    if value and value != settings.custom_ai_instructions:
+        verdict = screen_custom_ai_instructions(value)
+        if not verdict.safe:
+            return JsonResponse(
+                {
+                    "error": (
+                        "These instructions look unsafe (a possible attempt to "
+                        "override or extract the assistant's rules) and were not "
+                        "saved. Please rephrase them as tone, style, or business "
+                        "guidance."
+                    )
+                },
+                status=400,
+            )
     settings.custom_ai_instructions = value
     return None
 
