@@ -105,6 +105,30 @@ def test_public_send_requires_email(api_client, vendor, anon_brief):
 
 
 @pytest.mark.django_db
+def test_public_send_falls_back_to_stored_contact_email(api_client, vendor, anon_brief):
+    """The email is collected in chat and stored on the brief, so a Send without
+    an explicit email in the body dispatches using the stored contact_email."""
+    Brief.objects.filter(id=anon_brief.id).update(contact_email="chat@example.com")
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    chain_mock.assert_called_once()
+
+
+@pytest.mark.django_db
 def test_public_send_rejects_malformed_email(api_client, vendor, anon_brief):
     """SF-2: a syntactically invalid email is rejected with 400 before dispatch."""
     response = api_client.post(
@@ -116,6 +140,119 @@ def test_public_send_rejects_malformed_email(api_client, vendor, anon_brief):
     assert response.status_code == 400
     anon_brief.refresh_from_db()
     assert anon_brief.contact_email == ""
+
+
+@pytest.mark.django_db
+def test_public_send_body_email_overrides_stored_contact_email(
+    api_client, vendor, anon_brief
+):
+    """Case #2: an explicit body email wins over a DIFFERENT already-stored
+    contact_email and is persisted, exercising the recipient_email !=
+    brief.contact_email update branch. test_public_send_dispatches_chain only
+    covers empty->set, never overriding a pre-existing non-empty value."""
+    Brief.objects.filter(id=anon_brief.id).update(contact_email="stored@example.com")
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "typed@example.com"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    chain_mock.assert_called_once()
+    anon_brief.refresh_from_db()
+    # Body won AND overwrote the stored value: the fallback did not shadow it.
+    assert anon_brief.contact_email == "typed@example.com"
+
+
+@pytest.mark.django_db
+def test_public_send_malformed_body_email_rejected_over_valid_stored(
+    api_client, vendor, anon_brief
+):
+    """Case #4: a malformed body email is rejected with 400 invalid_email even
+    when a valid stored contact_email exists (body wins, so the garbage body is
+    what gets validated), and the garbage must NOT clobber the valid stored value
+    because the endpoint returns before the persist branch. Distinct from
+    test_public_send_rejects_malformed_email, which uses an empty stored email."""
+    Brief.objects.filter(id=anon_brief.id).update(contact_email="valid@example.com")
+    with patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock:
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "not-an-email"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_email"
+    chain_mock.assert_not_called()
+    anon_brief.refresh_from_db()
+    # Valid stored value preserved, not overwritten by the rejected garbage body.
+    assert anon_brief.contact_email == "valid@example.com"
+
+
+@pytest.mark.django_db
+def test_public_send_falls_back_to_malformed_stored_email_returns_invalid(
+    api_client, vendor, anon_brief
+):
+    """Real gap exposed by the change: _process_chat persists a model-extracted
+    contact_email with only _normalize_contact_email and no validity check, so a
+    malformed stored email is possible. A Send with no body email falls back to it
+    and must return 400 invalid_email (a non-empty-but-invalid recipient), NOT
+    email_required. This pins the email_required-vs-invalid_email boundary on the
+    fallback path, which the frontend uses to decide whether to reveal the field."""
+    Brief.objects.filter(id=anon_brief.id).update(contact_email="not-an-email")
+    with patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock:
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio"}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 400
+    # Explicitly invalid_email, NOT email_required: the recipient is non-empty.
+    assert response.json()["code"] == "invalid_email"
+    chain_mock.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_public_send_body_email_normalizes_over_equal_stored(
+    api_client, vendor, anon_brief
+):
+    """Boundary: a body email that differs from the stored value only by case and
+    surrounding whitespace normalizes to the stored value, so the send accepts it
+    and dispatches (equal after normalization, no redundant rewrite). Existing send
+    tests pass only already-clean emails, leaving the normalize path in recipient
+    resolution unexercised."""
+    Brief.objects.filter(id=anon_brief.id).update(contact_email="client@example.com")
+    with (
+        patch(
+            "aivus_backend.projects.api.views_brief_v3.transaction.on_commit",
+            side_effect=_run_on_commit,
+        ),
+        patch("aivus_backend.projects.api.views_brief_v3.chain") as chain_mock,
+    ):
+        response = api_client.post(
+            reverse("projects_api:public_brief_ai_send", args=[anon_brief.id]),
+            data=json.dumps({"slug": "send-studio", "email": "  CLIENT@Example.com  "}),
+            content_type="application/json",
+            HTTP_X_BRIEF_TOKEN="send-token",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    chain_mock.assert_called_once()
+    anon_brief.refresh_from_db()
+    assert anon_brief.contact_email == "client@example.com"
 
 
 @pytest.mark.django_db

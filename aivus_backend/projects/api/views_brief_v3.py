@@ -425,6 +425,22 @@ def _process_chat(
         elif not brief.document_language and result.get("freeze_language"):
             updates["document_language"] = result["freeze_language"]
 
+        # Personal-link briefs collect the client's contact details in chat (no
+        # separate form), so capture whatever the model extracted this turn. The
+        # email is validated before storing: a hallucinated/garbled address must
+        # not become the Send fallback and break the first Send.
+        if brief.source == BriefSource.PERSONAL_LINK:
+            new_email = _normalize_contact_email(result.get("contact_email") or "")
+            new_name = _normalize_contact_name(result.get("contact_name") or "")
+            if (
+                new_email
+                and _is_valid_email(new_email)
+                and new_email != brief.contact_email
+            ):
+                updates["contact_email"] = new_email
+            if new_name and new_name != brief.contact_name:
+                updates["contact_name"] = new_name
+
         Brief.objects.filter(id=brief.id).update(**updates)
 
         assistant_message = ChatMessage.objects.create(
@@ -2039,7 +2055,13 @@ def public_brief_ai_send(request, brief_id):
             status=409,
         )
 
-    recipient_email = _normalize_contact_email(body.get("email") or "")
+    # The email is collected in chat and stored on the brief, so a Send without an
+    # explicit email falls back to it. An email in the body still wins (lets the
+    # client correct it) but is no longer required on the wire.
+    recipient_email = (
+        _normalize_contact_email(body.get("email") or "")
+        or (brief.contact_email or "").strip()
+    )
     if not recipient_email:
         return JsonResponse(
             {"error": "email is required", "code": "email_required"}, status=400
