@@ -8,5 +8,11 @@
 .readthedocs.yml
 .travis.yml
 venv
+.venv
 .git
 .envs/
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+db.sqlite3

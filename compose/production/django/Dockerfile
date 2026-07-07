@@ -1,8 +1,10 @@
-
 # define an alias for the specific python version used in this file.
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS python-build-stage
 
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
+# The virtualenv lives outside the app dir (/venv, not /app/.venv) so the run
+# stage can copy it as its own layer, separate from the frequently-changing
+# source tree.
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0 UV_PROJECT_ENVIRONMENT=/venv
 
 ARG APP_HOME=/app
 
@@ -80,14 +82,19 @@ COPY --chown=django:django ./compose/production/django/celery/flower/start /star
 RUN sed -i 's/\r$//g' /start-flower
 RUN chmod +x /start-flower
 
-# Copy the application from the builder
+# Copy the app from the builder in two layers so the large virtualenv stays
+# cache-stable across code-only deploys. The project is a non-packaged uv project
+# (no [build-system]), so /venv holds dependencies only and changes only when
+# uv.lock changes; keeping it separate from the source means most deploys pull
+# just the thin code layer and never re-unpack the big, slow /venv layer.
+COPY --from=python-build-stage --chown=django:django /venv /venv
 COPY --from=python-build-stage --chown=django:django ${APP_HOME} ${APP_HOME}
 
 # make django owner of the WORKDIR directory as well.
 RUN chown django:django ${APP_HOME}
 
 # Place executables in the environment at the front of the path
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/venv/bin:$PATH"
 
 USER django
 
