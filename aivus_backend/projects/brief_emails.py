@@ -1,14 +1,15 @@
 """Email dispatch for the personal-vendor-link send flow (Stage 2 S2-8).
 
-Builds the client lead email (register CTA, public share link, PDF attachment)
-and the vendor notification email. Account matching decides whether the client
+Builds the client lead email (register/login CTA that routes into the cabinet)
+and the vendor notification email. The client email carries no brief copy: the
+brief is downloaded and shared from the cabinet, so following the CTA doubles as
+email confirmation and registration. Account matching decides whether the client
 is invited to register or to log in; the dispatch is uniform in timing so the
 Send response cannot be used to enumerate which emails already have accounts.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
 from urllib.parse import urlencode
@@ -16,8 +17,6 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.core.cache import cache
 
-from aivus_backend.core.enums import CLIENT_FACING_DOCUMENT_KINDS
-from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.users.i18n import resolve_language
 from aivus_backend.users.models import User
 
@@ -114,54 +113,24 @@ def _client_register_url(brief, recipient_email: str, token: str) -> str:
     return f"{frontend}/app/brief/claim/{brief.id}?{urlencode(params)}"
 
 
-def _share_url(token: str) -> str:
-    return f"{_frontend_url()}/shared-brief/{token}"
-
-
 def _project_url(project) -> str:
-    return f"{_frontend_url()}/app/dashboard/{project.id}/details"
-
-
-def _brief_pdf_attachment(brief) -> tuple[str, str, str] | None:
-    from aivus_backend.projects import brief_pdf  # noqa: PLC0415
-
-    # The client-facing email must never attach the vendor outreach email
-    # (kind=vendor_email) — it carries the vendor's PII and is owner-only (PRD §5).
-    # Prefer the production brief, and fall back only within the client-facing
-    # kinds; a bare .first() would surface vendor_email for a brief that somehow
-    # has only that document, because the kind ordering sorts it last.
-    document = (
-        brief.final_documents.filter(kind=FinalDocumentKind.PRODUCTION_BRIEF).first()
-        or brief.final_documents.filter(kind__in=CLIENT_FACING_DOCUMENT_KINDS).first()
-    )
-    if not document:
-        return None
-    try:
-        pdf_bytes = brief_pdf.render_final_document_pdf(document)
-    except Exception:
-        logger.exception("brief pdf render failed for email: brief=%s", brief.id)
-        return None
-    label = brief_pdf.document_title_for(document.kind, brief.document_language)
-    base_name = (brief.title or "Brief").strip()
-    safe = "".join(c for c in base_name if c.isalnum() or c in " _-").strip()[:60]
-    filename = f"{safe or 'Brief'} - {label}.pdf"
-    return filename, base64.b64encode(pdf_bytes).decode("ascii"), "application/pdf"
+    return f"{_frontend_url()}/app/dashboard/{project.id}/brief"
 
 
 def send_client_lead_email(
     brief,
     recipient_email: str,
-    share_token: str,
     language: str,
     project=None,
 ) -> None:
-    """Send the client their copy: register/login CTA, share link, PDF.
+    """Send the client a register/login CTA that routes into their cabinet.
 
-    The PDF is attached in both branches (new lead and existing account) so the
-    recipient always gets a downloadable copy; only the CTA text differs. We
-    deliver through the bare-address task because the client template carries no
-    {user} context, and that task is the only path that supports attachments.
-    The project is passed so the email names the actual vendor rather than the
+    The email carries no brief copy (no PDF, no public share link): the brief is
+    downloaded and shared with vendors from the cabinet, so following the CTA
+    doubles as email confirmation and registration. Only the CTA text differs
+    between a new lead and an existing account. We deliver through the
+    bare-address task because the client template carries no {user} context. The
+    project is passed so the email names the actual vendor rather than the
     generic "your agency".
     """
     from aivus_backend.users.tasks import send_to_recipient_email  # noqa: PLC0415
@@ -180,11 +149,9 @@ def send_client_lead_email(
         "register_url": _client_register_url(
             brief, recipient_email, brief.anonymous_token or ""
         ),
-        "share_url": _share_url(share_token),
         "frontend_url": _frontend_url(),
         "is_existing_account": bool(existing),
     }
-    attachments = [a for a in [_brief_pdf_attachment(brief)] if a]
 
     # BE-3: the dedup key was claimed in _client_lead_email_allowed BEFORE this
     # enqueue. If .delay() fails (broker hiccup), the email never goes out yet the
@@ -197,7 +164,6 @@ def send_client_lead_email(
             template=template,
             subject=subject,
             context=context,
-            attachments=attachments,
         )
     except Exception:
         cache.delete(_dedup_cache_key(recipient_email, brief.id))

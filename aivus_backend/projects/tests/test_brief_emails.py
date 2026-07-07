@@ -8,11 +8,9 @@ import pytest
 from django.core import mail
 from django.test import override_settings
 
-from aivus_backend.core.enums import FinalDocumentKind
 from aivus_backend.core.enums import ProjectStatus
 from aivus_backend.projects import brief_emails
 from aivus_backend.projects.models import Brief
-from aivus_backend.projects.models import BriefFinalDocument
 from aivus_backend.projects.models import Project
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
@@ -32,7 +30,6 @@ def test_send_to_recipient_email_renders_and_attaches():
             "vendor_name": "Acme",
             "recipient_email": "lead@example.com",
             "register_url": "https://go.aivus.co/app/brief/claim/x",
-            "share_url": "https://go.aivus.co/shared-brief/tok",
             "frontend_url": "https://go.aivus.co",
             "is_existing_account": False,
         },
@@ -78,82 +75,26 @@ def test_resolve_email_language_default_en():
 
 
 @pytest.mark.django_db
-def test_brief_pdf_attachment_never_attaches_vendor_email():
-    """MF-3: a brief whose only document is vendor_email must yield no attachment.
-
-    vendor_email is vendor PII (owner-only, PRD §5). The fallback used to be a
-    bare .first(), which — given the kind ordering sorts vendor_email last —
-    would surface it for a brief that only has that document, leaking vendor PII
-    into the client's email. The fallback is now scoped to client-facing kinds,
-    so this returns None rather than the vendor_email PDF.
-    """
-    brief = Brief.objects.create(
-        client=None, anonymous_token="tok-vendor-only", document_language="en"
-    )
-    BriefFinalDocument.objects.create(
-        brief=brief, kind=FinalDocumentKind.VENDOR_EMAIL, html="<p>secret outreach</p>"
-    )
-
-    assert brief_emails._brief_pdf_attachment(brief) is None  # noqa: SLF001
-
-
-@pytest.mark.django_db
-def test_brief_pdf_attachment_falls_back_to_client_facing_kind():
-    """MF-3: with no production_brief the fallback still serves a client-facing
-    document (deliverables_checklist), not vendor_email."""
-    brief = Brief.objects.create(
-        client=None, anonymous_token="tok-checklist", document_language="en"
-    )
-    BriefFinalDocument.objects.create(
-        brief=brief,
-        kind=FinalDocumentKind.DELIVERABLES_CHECKLIST,
-        html="<p>checklist</p>",
-    )
-    # A vendor_email present alongside must not be chosen.
-    BriefFinalDocument.objects.create(
-        brief=brief, kind=FinalDocumentKind.VENDOR_EMAIL, html="<p>secret</p>"
-    )
-
-    with patch(
-        "aivus_backend.projects.brief_pdf.render_final_document_pdf",
-        return_value=b"%PDF-fake",
-    ):
-        attachment = brief_emails._brief_pdf_attachment(brief)  # noqa: SLF001
-
-    assert attachment is not None
-    filename = attachment[0]
-    assert "Checklist" in filename
-
-
-@pytest.mark.django_db
 def test_client_email_new_account_uses_recipient_task():
     brief = Brief.objects.create(
         client=None, anonymous_token="tok-new", document_language="en"
-    )
-    BriefFinalDocument.objects.create(
-        brief=brief, kind=FinalDocumentKind.PRODUCTION_BRIEF, html="<p>hi</p>"
     )
 
     with (
         patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
         patch("aivus_backend.users.tasks.send_templated_email.delay") as auth_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=("Brief.pdf", "JVBERi0=", "application/pdf"),
-        ),
     ):
-        brief_emails.send_client_lead_email(
-            brief, "fresh@example.com", "share-tok", "en"
-        )
+        brief_emails.send_client_lead_email(brief, "fresh@example.com", "en")
 
     anon_mock.assert_called_once()
     auth_mock.assert_not_called()
-    assert anon_mock.call_args.kwargs["attachments"]
+    # The client email no longer carries a brief copy: it routes into the cabinet.
+    assert not anon_mock.call_args.kwargs.get("attachments")
 
 
 @pytest.mark.django_db
 @override_settings(FRONTEND_URL="https://go.aivus.co")
-def test_vendor_lead_email_links_to_dashboard_project():
+def test_vendor_lead_email_links_to_brief():
     owner = User.objects.create_user(
         email="vendor-owner@example.com",
         password="p@ssw0rd",
@@ -173,8 +114,8 @@ def test_vendor_lead_email_links_to_dashboard_project():
 
     send_mock.assert_called_once()
     project_url = send_mock.call_args.kwargs["context"]["project_url"]
-    assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}/details"
-    assert "/app/projects/" not in project_url
+    assert project_url == f"https://go.aivus.co/app/dashboard/{project.id}/brief"
+    assert "/details" not in project_url
 
 
 @pytest.mark.django_db
@@ -238,15 +179,9 @@ def test_client_email_names_real_vendor_when_project_passed():
         vendor=vendor, brief=brief, name="lead", status=ProjectStatus.RFP
     )
 
-    with (
-        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
-        ),
-    ):
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock:
         brief_emails.send_client_lead_email(
-            brief, "fresh@example.com", "share-tok", "en", project=project
+            brief, "fresh@example.com", "en", project=project
         )
 
     anon_mock.assert_called_once()
@@ -259,23 +194,15 @@ def test_client_email_falls_back_to_generic_without_project():
     brief = Brief.objects.create(
         client=None, anonymous_token="tok-no-project", document_language="en"
     )
-    with (
-        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
-        ),
-    ):
-        brief_emails.send_client_lead_email(
-            brief, "fresh@example.com", "share-tok", "en"
-        )
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock:
+        brief_emails.send_client_lead_email(brief, "fresh@example.com", "en")
 
     anon_mock.assert_called_once()
     assert anon_mock.call_args.kwargs["context"]["vendor_name"] == "your agency"
 
 
 @pytest.mark.django_db
-def test_client_email_existing_account_uses_login_template_with_pdf():
+def test_client_email_existing_account_uses_login_template():
     User.objects.create_user(
         email="known@example.com",
         password="p@ssw0rd",
@@ -289,20 +216,14 @@ def test_client_email_existing_account_uses_login_template_with_pdf():
     with (
         patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
         patch("aivus_backend.users.tasks.send_templated_email.delay") as auth_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=("Brief.pdf", "JVBERi0=", "application/pdf"),
-        ),
     ):
-        brief_emails.send_client_lead_email(
-            brief, "known@example.com", "share-tok", "en"
-        )
+        brief_emails.send_client_lead_email(brief, "known@example.com", "en")
 
     anon_mock.assert_called_once()
     auth_mock.assert_not_called()
     assert anon_mock.call_args.kwargs["context"]["is_existing_account"] is True
     assert anon_mock.call_args.kwargs["recipient_email"] == "known@example.com"
-    assert anon_mock.call_args.kwargs["attachments"]
+    assert not anon_mock.call_args.kwargs.get("attachments")
 
 
 @pytest.mark.django_db
@@ -313,15 +234,9 @@ def test_client_email_not_resent_to_same_recipient_for_same_brief():
         client=None, anonymous_token="tok-dedup", document_language="en"
     )
 
-    with (
-        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
-        ),
-    ):
-        brief_emails.send_client_lead_email(brief, "victim@example.com", "tok", "en")
-        brief_emails.send_client_lead_email(brief, "victim@example.com", "tok", "en")
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock:
+        brief_emails.send_client_lead_email(brief, "victim@example.com", "en")
+        brief_emails.send_client_lead_email(brief, "victim@example.com", "en")
 
     anon_mock.assert_called_once()
 
@@ -335,20 +250,14 @@ def test_client_email_dedup_released_when_enqueue_fails():
         client=None, anonymous_token="tok-enqueue-fail", document_language="en"
     )
 
-    with (
-        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
-        ),
-    ):
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock:
         anon_mock.side_effect = [RuntimeError("broker down"), None]
         # First attempt: enqueue blows up after the dedup key is claimed. The
         # failure must propagate (so the caller logs it) but release the key.
         with pytest.raises(RuntimeError):
-            brief_emails.send_client_lead_email(brief, "retry@example.com", "tok", "en")
+            brief_emails.send_client_lead_email(brief, "retry@example.com", "en")
         # Second attempt: the released key lets the email re-enqueue.
-        brief_emails.send_client_lead_email(brief, "retry@example.com", "tok", "en")
+        brief_emails.send_client_lead_email(brief, "retry@example.com", "en")
 
     assert anon_mock.call_count == 2
 
@@ -357,19 +266,11 @@ def test_client_email_dedup_released_when_enqueue_fails():
 def test_client_email_throttled_per_recipient_across_briefs():
     """H4: one recipient address cannot be bombed with branded mail from many
     different briefs. After the per-recipient ceiling the dispatch is suppressed."""
-    with (
-        patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock,
-        patch(
-            "aivus_backend.projects.brief_emails._brief_pdf_attachment",
-            return_value=None,
-        ),
-    ):
+    with patch("aivus_backend.users.tasks.send_to_recipient_email.delay") as anon_mock:
         for i in range(brief_emails.CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX + 3):
             brief = Brief.objects.create(
                 client=None, anonymous_token=f"tok-bomb-{i}", document_language="en"
             )
-            brief_emails.send_client_lead_email(
-                brief, "target@example.com", "tok", "en"
-            )
+            brief_emails.send_client_lead_email(brief, "target@example.com", "en")
 
     assert anon_mock.call_count == brief_emails.CLIENT_LEAD_EMAIL_PER_RECIPIENT_MAX

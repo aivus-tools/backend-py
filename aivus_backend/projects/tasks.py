@@ -530,7 +530,7 @@ def send_emails_task(
     if send_client:
         try:
             brief_emails.send_client_lead_email(
-                brief, recipient_email, share.token, language, project=project
+                brief, recipient_email, language, project=project
             )
         except Exception:
             # The client enqueue failed: release the marker so a redelivered task

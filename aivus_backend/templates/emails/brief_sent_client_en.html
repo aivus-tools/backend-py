@@ -43,11 +43,6 @@
         margin: 20px 0;
       }
 
-      .link {
-        color: #2563eb;
-        word-break: break-all;
-      }
-
       .footer {
         margin-top: 40px;
         padding-top: 20px;
@@ -60,22 +55,18 @@
   <body>
     <div class="container">
       <h1>Your brief is on its way to {{ vendor_name }}</h1>
-      <p>
-        Thanks for putting together your brief. We have sent it to {{ vendor_name }} and attached a PDF copy to this email.
-      </p>
+      <p>Thanks for putting together your brief. We have sent it to {{ vendor_name }}.</p>
       {% if is_existing_account %}
-        <p>You already have an Aivus account with this email. Log in to open and manage your brief with all features.</p>
+        <p>
+          You already have an Aivus account with this email. Log in to open your brief in your dashboard, where you can download it and share it with other vendors.
+        </p>
         <a href="{{ register_url }}" class="button">Log in to open your brief</a>
       {% else %}
         <p>
-          Want to keep your brief and edit it any time? Create an account with this exact email ({{ recipient_email }}) and your brief stays saved with every feature.
+          Open your dashboard to download your brief and share it with other vendors. Use this exact email ({{ recipient_email }}) — following the link confirms your address and finishes your registration, and your brief stays saved with every feature.
         </p>
-        <a href="{{ register_url }}" class="button">Save my brief</a>
+        <a href="{{ register_url }}" class="button">Open my dashboard</a>
       {% endif %}
-      <p>You can also view and download your brief here:</p>
-      <p>
-        <a href="{{ share_url }}" class="link">{{ share_url }}</a>
-      </p>
       <div class="footer">
         <p>
           <strong>Aivus</strong>

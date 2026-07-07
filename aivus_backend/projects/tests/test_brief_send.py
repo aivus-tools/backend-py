@@ -1233,14 +1233,12 @@ def test_send_emails_task_creates_share_and_emails(vendor, anon_brief):
 @pytest.mark.django_db
 def test_send_emails_task_share_token_matches_persisted_share(vendor, anon_brief):
     """SF-9/SF-10: the BriefShare is created in the same transaction that stamps
-    emails_sent_at, and the token handed to the client email is the persisted
-    share's token (no orphaned marker without a share)."""
+    emails_sent_at, and its token is the one returned to the caller (no orphaned
+    marker without a share)."""
     from aivus_backend.projects.models import BriefShare
 
     with (
-        patch(
-            "aivus_backend.projects.brief_emails.send_client_lead_email"
-        ) as client_mock,
+        patch("aivus_backend.projects.brief_emails.send_client_lead_email"),
         patch("aivus_backend.projects.brief_emails.send_vendor_lead_email"),
     ):
         result = send_emails_task.run(
@@ -1251,8 +1249,6 @@ def test_send_emails_task_share_token_matches_persisted_share(vendor, anon_brief
     project = Project.objects.get(brief=anon_brief, vendor=vendor)
     assert project.emails_sent_at is not None
     assert result["shareToken"] == share.token
-    # The client email got the same token that is persisted.
-    assert client_mock.call_args.args[2] == share.token
 
 
 @pytest.mark.django_db
