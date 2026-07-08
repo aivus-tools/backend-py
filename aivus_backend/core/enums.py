@@ -47,6 +47,7 @@ class BriefSource(models.TextChoices):
     PERSONAL_LINK = "personal_link", "Personal vendor link"
     WEBHOOK = "webhook", "Vendor webhook"
     WIX = "wix", "Wix landing form"
+    EMAIL = "email", "Inbound email"
 
 
 class AuthType(models.TextChoices):
@@ -119,6 +120,10 @@ class BriefPromptSlug(models.TextChoices):
     MASTER_BRIEF_TEMPLATE = "master_brief_template", "Master brief template"
     ARCHETYPES_REFERENCE = "archetypes_reference", "Archetypes reference"
     STT_INDUSTRY_TERMS = "stt_industry_terms", "STT industry terms"
+    EMAIL_CLASSIFICATION = "email_classification", "Email classification"
+    EMAIL_REPLY = "email_reply", "Email reply"
+    EMAIL_FOLLOWUP = "email_followup", "Email follow-up"
+    AGENT_ONBOARDING = "agent_onboarding", "Agent onboarding"
 
 
 class UnitDimension(models.TextChoices):

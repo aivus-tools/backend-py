@@ -1702,6 +1702,10 @@ def _create_inbound_brief(  # noqa: PLR0913
     file_specs = file_specs or []
     token = secrets.token_urlsafe(48)
     task_id = str(uuid.uuid4())
+    # An inbound email lead is answered by the Stage 3 email agent, not by the
+    # brief-chat first-reply task: it never enqueues that task and stays out of
+    # the "pending AI reply" state.
+    is_email = source == BriefSource.EMAIL
 
     with transaction.atomic():
         brief = Brief.objects.create(
@@ -1720,7 +1724,7 @@ def _create_inbound_brief(  # noqa: PLR0913
         )
         Brief.objects.filter(id=brief.id).update(
             message_count=F("message_count") + 1,
-            pending_task_id=task_id,
+            pending_task_id="" if is_email else task_id,
         )
         if vendor is not None:
             Project.objects.get_or_create(
@@ -1732,7 +1736,14 @@ def _create_inbound_brief(  # noqa: PLR0913
                 },
             )
 
-    brief_id_str = str(brief.id)
+    if not is_email:
+        _enqueue_first_reply(str(brief.id), task_id, file_specs)
+    return brief, task_id, token
+
+
+def _enqueue_first_reply(
+    brief_id_str: str, task_id: str, file_specs: list[dict]
+) -> None:
     if file_specs:
         signature = chain(
             import_wix_attachments_task.s(brief_id_str, file_specs),
@@ -1751,7 +1762,6 @@ def _create_inbound_brief(  # noqa: PLR0913
             link_error=clear_brief_pending_task.si(brief_id_str)
         )
     )
-    return brief, task_id, token
 
 
 @csrf_exempt

@@ -217,4 +217,9 @@ dependencies = [
     "nh3>=0.2.0",
     "weasyprint>=62.0",
     "python-magic>=0.4.27",
+    "cryptography>=44.0.0",
+    "google-api-python-client>=2.190.0",
+    "google-auth-oauthlib>=1.2.0",
+    "mail-parser-reply>=1.36",
+    "quotequail>=0.3.0",
 ]
