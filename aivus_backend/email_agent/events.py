@@ -20,6 +20,7 @@ from django.db import models
 
 class NotificationEvent(models.TextChoices):
     DRAFT_CREATED = "draft_created", "Draft created"
+    DRAFT_OVERDUE = "draft_overdue", "Draft overdue"
     URGENT_LEAD = "urgent_lead", "Urgent lead"
     ESCALATION = "escalation", "Escalation"
     MAILBOX_DISCONNECTED = "mailbox_disconnected", "Mailbox disconnected"
@@ -40,6 +41,7 @@ DEFAULT_DEDUP_WINDOW = timedelta(hours=6)
 
 DEDUP_WINDOWS: dict[str, timedelta] = {
     NotificationEvent.DRAFT_CREATED: timedelta(hours=24),
+    NotificationEvent.DRAFT_OVERDUE: timedelta(hours=24),
     NotificationEvent.URGENT_LEAD: timedelta(hours=24),
     NotificationEvent.ESCALATION: timedelta(hours=24),
     NotificationEvent.MAILBOX_DISCONNECTED: timedelta(hours=24),

@@ -231,3 +231,30 @@ def test_process_out_of_office_pauses_without_llm(account, vendor):
     classify.assert_not_called()
     message.refresh_from_db()
     assert message.intent == MessageIntent.AUTO_REPLY
+
+
+def test_producer_reply_triggers_human_takeover(account, vendor):
+    from aivus_backend.email_agent.models import OutboundDraft
+    from aivus_backend.email_agent.models import ThreadState
+    from aivus_backend.email_agent.models import VendorAgentProfile
+
+    VendorAgentProfile.objects.create(vendor=vendor, producer_email="prod@vendor.com")
+    thread = _thread(vendor)
+    message = _inbound(account, thread, from_email="prod@vendor.com")
+    result = classification.coerce_classification({**_ORDER_RAW, "intent": "question"})
+
+    with (
+        patch.object(
+            classification, "classify_message", return_value=(result, {})
+        ) as classify,
+        patch.object(tasks.reply, "handle_reply") as handle,
+    ):
+        outcome = tasks.process_inbound_message(str(message.id))
+
+    assert outcome == "silent"
+    classify.assert_called_once()
+    handle.assert_not_called()
+    thread.refresh_from_db()
+    assert thread.state == ThreadState.HUMAN_TAKEOVER
+    assert AgentLog.objects.filter(thread=thread, event="human_takeover").exists()
+    assert not OutboundDraft.objects.filter(thread=thread).exists()

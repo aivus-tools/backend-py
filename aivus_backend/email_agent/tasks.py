@@ -11,6 +11,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from aivus_backend.email_agent import classification
+from aivus_backend.email_agent import drafts
 from aivus_backend.email_agent import mailbox
 from aivus_backend.email_agent import notifications
 from aivus_backend.email_agent import reply
@@ -22,6 +23,8 @@ from aivus_backend.email_agent.models import EmailAccount
 from aivus_backend.email_agent.models import EmailAccountStatus
 from aivus_backend.email_agent.models import EmailDirection
 from aivus_backend.email_agent.models import EmailMessage
+from aivus_backend.email_agent.models import ThreadState
+from aivus_backend.email_agent.models import VendorAgentProfile
 
 POLL_INTERVAL_SECONDS = 60
 LOCK_TTL_SECONDS = 300
@@ -60,6 +63,21 @@ def process_inbound_message(message_id: str) -> str:
             thread=thread, event="ignored", payload={"reason": gate.reason}
         )
         return f"ignored:{gate.reason}"
+
+    profile = VendorAgentProfile.objects.filter(vendor=vendor).first()
+    producer_email = profile.producer_email if profile is not None else ""
+    if (
+        triage.is_producer_reply(message, producer_email)
+        and thread.state != ThreadState.HUMAN_TAKEOVER
+    ):
+        thread.state = ThreadState.HUMAN_TAKEOVER
+        thread.save(update_fields=["state", "updated_at"])
+        AgentLog.objects.create(
+            thread=thread,
+            project=thread.project,
+            event="human_takeover",
+            payload={"from_email": message.from_email},
+        )
 
     try:
         result, trace = classification.classify_message(message)
@@ -131,6 +149,12 @@ def flush_deferred_notifications() -> int:
 def send_daily_digests() -> int:
     """Beat entry: send each vendor its daily digest at their local digest hour."""
     return notifications.dispatch_due_digests(timezone.now())
+
+
+@shared_task
+def expire_drafts() -> int:
+    """Beat entry: expire stale drafts; re-notify on overdue first-reply."""
+    return drafts.expire_stale_drafts(timezone.now())
 
 
 @shared_task

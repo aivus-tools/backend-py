@@ -53,6 +53,10 @@ _TITLES: dict[str, dict[str, str]] = {
         "en": "Draft ready for review",
         "ru": "Черновик готов к проверке",
     },
+    NotificationEvent.DRAFT_OVERDUE: {
+        "en": "Draft expired without a reply",
+        "ru": "Черновик протух без ответа",
+    },
     NotificationEvent.URGENT_LEAD: {
         "en": "Urgent lead needs you",
         "ru": "Срочный лид требует внимания",
@@ -83,6 +87,10 @@ _INTROS: dict[str, dict[str, str]] = {
     NotificationEvent.DRAFT_CREATED: {
         "en": "The agent drafted a reply and is waiting for your approval.",
         "ru": "Агент подготовил ответ и ждет вашего одобрения.",
+    },
+    NotificationEvent.DRAFT_OVERDUE: {
+        "en": "A first-reply draft expired before approval. The lead is waiting.",
+        "ru": "Черновик первого ответа протух без одобрения. Лид ждет ответа.",
     },
     NotificationEvent.URGENT_LEAD: {
         "en": "A client email looks time-sensitive and may need a fast answer.",

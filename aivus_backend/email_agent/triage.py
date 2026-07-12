@@ -62,6 +62,16 @@ def known_out_message_ids(
     return set(query.values_list("message_id_header", flat=True)[:_KNOWN_OUT_CAP])
 
 
+def is_producer_reply(message: EmailMessage, producer_email: str) -> bool:
+    """Whether this inbound is the producer replying into the thread.
+
+    Self mail (our own agent sends, marked X-Aivus-Agent) is already filtered by
+    the pre-gate, so a match on the producer address means a real human takeover.
+    """
+    producer = (producer_email or "").strip().lower()
+    return bool(producer) and message.from_email.strip().lower() == producer
+
+
 def is_out_of_office(raw_headers: dict) -> bool:
     headers = safety.normalize_headers(raw_headers)
     if "auto-replied" in headers.get("auto-submitted", "").lower():

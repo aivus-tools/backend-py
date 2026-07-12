@@ -14,4 +14,8 @@ urlpatterns = [
         views.disconnect_mailbox,
         name="disconnect-mailbox",
     ),
+    path("drafts", views.list_drafts, name="list-drafts"),
+    path("drafts/<uuid:draft_id>/approve", views.approve_draft, name="approve-draft"),
+    path("drafts/<uuid:draft_id>/edit", views.edit_draft, name="edit-draft"),
+    path("drafts/<uuid:draft_id>/reject", views.reject_draft, name="reject-draft"),
 ]

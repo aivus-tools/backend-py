@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import json
 
+from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.email_agent import drafts as drafts_service
 from aivus_backend.email_agent import mailbox
 from aivus_backend.email_agent.api.serializers import serialize_account
+from aivus_backend.email_agent.api.serializers import serialize_draft
 from aivus_backend.email_agent.models import EmailAccount
 from aivus_backend.email_agent.models import EmailAccountRole
 from aivus_backend.email_agent.models import EmailAccountStatus
+from aivus_backend.email_agent.models import OutboundDraft
+from aivus_backend.email_agent.models import OutboundDraftStatus
 from aivus_backend.users.models import User
 from aivus_backend.users.models import Vendor
 
@@ -112,3 +117,100 @@ def disconnect_mailbox(request, account_id):
         ]
     )
     return JsonResponse({"status": "disconnected"})
+
+
+def _draft_for_request(request, draft_id):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return None, None
+    draft = (
+        OutboundDraft.objects.select_related("thread", "thread__vendor")
+        .filter(id=draft_id, thread__vendor=vendor)
+        .first()
+    )
+    return vendor, draft
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def list_drafts(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    queryset = (
+        OutboundDraft.objects.filter(thread__vendor=vendor)
+        .filter(Q(status=OutboundDraftStatus.PENDING) | Q(metadata__overdue=True))
+        .select_related("thread")
+        .order_by("-created_at")
+    )
+    return JsonResponse({"drafts": [serialize_draft(d) for d in queryset]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def approve_draft(request, draft_id):
+    vendor, draft = _draft_for_request(request, draft_id)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    if draft is None:
+        return JsonResponse({"error": "Draft not found"}, status=404)
+
+    # The optional edit-then-send body arrives as JSON; a bodyless approve is
+    # valid, so a missing or non-JSON body is treated as "send as drafted".
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (ValueError, TypeError):
+        payload = {}
+    edited_body = payload.get("body") if isinstance(payload, dict) else None
+
+    try:
+        sent = drafts_service.approve_draft(draft, edited_body=edited_body)
+    except drafts_service.DraftError as error:
+        return JsonResponse({"error": str(error)}, status=409)
+    return JsonResponse(
+        {"draft": serialize_draft(draft), "messageId": sent.provider_message_id}
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def edit_draft(request, draft_id):
+    vendor, draft = _draft_for_request(request, draft_id)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    if draft is None:
+        return JsonResponse({"error": "Draft not found"}, status=404)
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid payload"}, status=400)
+    body = (payload.get("body") or "").strip()
+    if not body:
+        return JsonResponse({"error": "body is required"}, status=400)
+
+    try:
+        drafts_service.edit_draft(draft, body)
+    except drafts_service.DraftError as error:
+        return JsonResponse({"error": str(error)}, status=409)
+    return JsonResponse({"draft": serialize_draft(draft)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def reject_draft(request, draft_id):
+    vendor, draft = _draft_for_request(request, draft_id)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    if draft is None:
+        return JsonResponse({"error": "Draft not found"}, status=404)
+
+    try:
+        drafts_service.reject_draft(draft)
+    except drafts_service.DraftError as error:
+        return JsonResponse({"error": str(error)}, status=409)
+    return JsonResponse({"draft": serialize_draft(draft)})
