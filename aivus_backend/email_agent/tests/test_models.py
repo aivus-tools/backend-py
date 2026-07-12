@@ -16,27 +16,27 @@ from aivus_backend.email_agent.models import VendorAgentProfile
 pytestmark = pytest.mark.django_db
 
 
-def test_refresh_token_encrypted_at_rest(vendor):
+def test_credential_encrypted_at_rest(vendor):
     crypto.get_multifernet.cache_clear()
     account = EmailAccount.objects.create(
         vendor=vendor,
         role=EmailAccountRole.AGENT,
         email="agent@example.com",
-        oauth_refresh_token="refresh-abc",
+        credential="app-password-abc",
     )
 
     account.refresh_from_db()
-    assert account.oauth_refresh_token == "refresh-abc"
+    assert account.credential == "app-password-abc"
 
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT oauth_refresh_token FROM email_agent_emailaccount WHERE id = %s",
+            "SELECT credential FROM email_agent_emailaccount WHERE id = %s",
             [str(account.id)],
         )
         raw = cursor.fetchone()[0]
 
-    assert raw != "refresh-abc"
-    assert crypto.decrypt(raw) == "refresh-abc"
+    assert raw != "app-password-abc"
+    assert crypto.decrypt(raw) == "app-password-abc"
 
 
 def test_autonomy_mode_defaults_to_draft(vendor):

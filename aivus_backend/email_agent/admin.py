@@ -19,7 +19,7 @@ class EmailAccountAdmin(ModelAdmin):
     list_display = ("email", "role", "provider", "status", "vendor", "last_synced_at")
     list_filter = ("role", "provider", "status")
     search_fields = ("email",)
-    readonly_fields = ("oauth_refresh_token",)
+    readonly_fields = ("credential",)
 
 
 @admin.register(EmailThread)

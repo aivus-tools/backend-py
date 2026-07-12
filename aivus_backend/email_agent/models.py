@@ -104,10 +104,10 @@ class EmailAccount(models.Model):
     )
     role = models.CharField(max_length=16, choices=EmailAccountRole.choices)
     email = models.EmailField()
-    oauth_refresh_token = EncryptedTextField(blank=True, default="")
+    credential = EncryptedTextField(blank=True, default="")
     scopes = models.JSONField(default=list, blank=True)
-    history_id = models.CharField(max_length=64, blank=True, default="")
-    watch_expires_at = models.DateTimeField(null=True, blank=True)
+    uid_validity = models.CharField(max_length=64, blank=True, default="")
+    last_seen_uid = models.BigIntegerField(default=0)
     status = models.CharField(
         max_length=16,
         choices=EmailAccountStatus.choices,
