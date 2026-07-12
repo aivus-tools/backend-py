@@ -372,13 +372,16 @@ class NotificationLog(models.Model):
     )
     event = models.CharField(max_length=64)
     payload = models.JSONField(default=dict, blank=True)
+    dedup_key = models.CharField(max_length=128, blank=True, default="")
     delivered = models.BooleanField(default=False)
     error = models.TextField(blank=True, default="")
+    send_after = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["vendor", "event", "created_at"]),
+            models.Index(fields=["delivered", "send_after"]),
         ]
 
     def __str__(self) -> str:
@@ -413,6 +416,7 @@ class OutboundDraft(models.Model):
         default=OutboundDraftStatus.PENDING,
     )
     provider_draft_id = models.CharField(max_length=128, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -420,6 +424,13 @@ class OutboundDraft(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=["status", "expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["in_reply_to_message"],
+                condition=models.Q(status=OutboundDraftStatus.PENDING),
+                name="uniq_pending_draft_per_inbound",
+            ),
         ]
 
     def __str__(self) -> str:

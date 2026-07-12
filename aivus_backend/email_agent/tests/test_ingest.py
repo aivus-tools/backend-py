@@ -99,10 +99,12 @@ def test_poll_account_ingests_and_advances_cursor(account):
     with (
         patch("aivus_backend.email_agent.mailbox.open_imap", return_value=MagicMock()),
         patch("aivus_backend.email_agent.mailbox.plan_sync", return_value=result),
+        patch("aivus_backend.email_agent.tasks.process_inbound_message.delay") as proc,
     ):
         ingested = tasks.poll_account(str(account.id))
 
     assert ingested == 2
+    assert proc.call_count == 2
     account.refresh_from_db()
     assert account.last_seen_uid == 7
     assert account.uid_validity == "200"
@@ -113,14 +115,20 @@ def test_poll_account_ingests_and_advances_cursor(account):
 def test_poll_account_auth_error_marks_expired(account):
     from aivus_backend.email_agent.mailbox import MailboxAuthError
 
-    with patch(
-        "aivus_backend.email_agent.mailbox.open_imap",
-        side_effect=MailboxAuthError("bad"),
+    with (
+        patch(
+            "aivus_backend.email_agent.mailbox.open_imap",
+            side_effect=MailboxAuthError("bad"),
+        ),
+        patch("aivus_backend.email_agent.tasks.notifications.notify") as notify,
     ):
         tasks.poll_account(str(account.id))
 
     account.refresh_from_db()
     assert account.status == EmailAccountStatus.EXPIRED
+    notify.assert_called_once()
+    assert notify.call_args.args[1] == "mailbox_disconnected"
+    assert notify.call_args.kwargs["urgent"] is True
 
 
 def test_dispatch_enqueues_due_accounts(account):
