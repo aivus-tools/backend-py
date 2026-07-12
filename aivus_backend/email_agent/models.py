@@ -162,6 +162,7 @@ class EmailThread(models.Model):
     )
     paused_until = models.DateTimeField(null=True, blank=True)
     participants = models.JSONField(default=list, blank=True)
+    memory = models.JSONField(default=dict, blank=True)
     last_history_id = models.CharField(max_length=64, blank=True, default="")
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

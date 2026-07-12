@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from aivus_backend.core.decorators import require_groups
+from aivus_backend.email_agent import activity
 from aivus_backend.email_agent import drafts as drafts_service
 from aivus_backend.email_agent import mailbox
 from aivus_backend.email_agent.api.serializers import serialize_account
@@ -18,6 +19,7 @@ from aivus_backend.email_agent.api.serializers import serialize_draft
 from aivus_backend.email_agent.models import EmailAccount
 from aivus_backend.email_agent.models import EmailAccountRole
 from aivus_backend.email_agent.models import EmailAccountStatus
+from aivus_backend.email_agent.models import EmailThread
 from aivus_backend.email_agent.models import OutboundDraft
 from aivus_backend.email_agent.models import OutboundDraftStatus
 from aivus_backend.users.models import User
@@ -214,3 +216,18 @@ def reject_draft(request, draft_id):
     except drafts_service.DraftError as error:
         return JsonResponse({"error": str(error)}, status=409)
     return JsonResponse({"draft": serialize_draft(draft)})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def thread_activity(request, thread_id):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    thread = EmailThread.objects.filter(
+        id=thread_id, vendor=vendor, deleted_at__isnull=True
+    ).first()
+    if thread is None:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+    return JsonResponse(activity.serialize_activity(thread))

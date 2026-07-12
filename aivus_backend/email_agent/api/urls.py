@@ -18,4 +18,9 @@ urlpatterns = [
     path("drafts/<uuid:draft_id>/approve", views.approve_draft, name="approve-draft"),
     path("drafts/<uuid:draft_id>/edit", views.edit_draft, name="edit-draft"),
     path("drafts/<uuid:draft_id>/reject", views.reject_draft, name="reject-draft"),
+    path(
+        "threads/<uuid:thread_id>/activity",
+        views.thread_activity,
+        name="thread-activity",
+    ),
 ]

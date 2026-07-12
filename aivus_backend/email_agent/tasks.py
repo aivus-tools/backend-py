@@ -13,6 +13,7 @@ from django.utils import timezone
 from aivus_backend.email_agent import classification
 from aivus_backend.email_agent import drafts
 from aivus_backend.email_agent import mailbox
+from aivus_backend.email_agent import memory
 from aivus_backend.email_agent import notifications
 from aivus_backend.email_agent import reply
 from aivus_backend.email_agent import triage
@@ -94,6 +95,9 @@ def process_inbound_message(message_id: str) -> str:
         return "classify_failed"
 
     classification.apply_classification(message, result, trace)
+    memory.close_fulfilled_items(message)
+    memory.update_thread_memory(thread, result)
+    memory.persist_action_items(message, result)
     classification.wire_lead(message, result)
 
     decision = classification.reply_decision(message, result)
@@ -155,6 +159,12 @@ def send_daily_digests() -> int:
 def expire_drafts() -> int:
     """Beat entry: expire stale drafts; re-notify on overdue first-reply."""
     return drafts.expire_stale_drafts(timezone.now())
+
+
+@shared_task
+def mark_overdue_action_items() -> int:
+    """Beat entry: flag open action items past their deadline as overdue."""
+    return memory.mark_overdue_items(timezone.now())
 
 
 @shared_task

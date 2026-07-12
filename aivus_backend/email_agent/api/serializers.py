@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from aivus_backend.email_agent.models import ActionItem
     from aivus_backend.email_agent.models import EmailAccount
     from aivus_backend.email_agent.models import OutboundDraft
 
@@ -38,4 +39,16 @@ def serialize_draft(draft: OutboundDraft) -> dict:
         "overdue": bool(metadata.get("overdue", False)),
         "expiresAt": draft.expires_at.isoformat() if draft.expires_at else None,
         "createdAt": draft.created_at.isoformat(),
+    }
+
+
+def serialize_action_item(item: ActionItem) -> dict:
+    """Vendor-facing view of a tracked promise."""
+    return {
+        "id": str(item.id),
+        "assignee": item.assignee,
+        "text": item.text,
+        "status": item.status,
+        "dueAt": item.due_at.isoformat() if item.due_at else None,
+        "createdAt": item.created_at.isoformat(),
     }
