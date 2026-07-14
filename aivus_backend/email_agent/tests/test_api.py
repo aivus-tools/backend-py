@@ -175,3 +175,70 @@ def test_patch_agent_profile_rejects_bad_timezone(api_client, vendor_user):
         **_auth(user),
     )
     assert response.status_code == 400
+
+
+def test_list_threads_endpoint_returns_feed(api_client, vendor_user):
+    user, vendor = vendor_user
+    from aivus_backend.email_agent.models import EmailThread
+
+    EmailThread.objects.create(
+        vendor=vendor, provider_thread_id="t1", client_email="jane@client.com"
+    )
+    response = api_client.get(reverse("email_agent_api:list-threads"), **_auth(user))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["threads"][0]["clientEmail"] == "jane@client.com"
+
+
+def test_list_followups_endpoint(api_client, vendor_user):
+    user, vendor = vendor_user
+    from aivus_backend.email_agent.models import ActionAssignee
+    from aivus_backend.email_agent.models import ActionItem
+    from aivus_backend.email_agent.models import ActionItemStatus
+    from aivus_backend.email_agent.models import EmailThread
+
+    thread = EmailThread.objects.create(
+        vendor=vendor, provider_thread_id="t1", client_email="jane@client.com"
+    )
+    ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.CLIENT,
+        text="send footage",
+        status=ActionItemStatus.OVERDUE,
+    )
+    response = api_client.get(reverse("email_agent_api:list-followups"), **_auth(user))
+    assert response.status_code == 200
+    assert response.json()["total"] >= 1
+
+
+def test_prepare_followup_endpoint_rejects_when_empty(api_client, vendor_user):
+    user, vendor = vendor_user
+    from aivus_backend.email_agent.models import EmailThread
+
+    thread = EmailThread.objects.create(
+        vendor=vendor, provider_thread_id="t1", client_email="jane@client.com"
+    )
+    response = api_client.post(
+        reverse("email_agent_api:prepare-followup", args=[thread.id]),
+        **_auth(user),
+    )
+    assert response.status_code == 409
+
+
+def test_feed_endpoints_scope_to_vendor(api_client, vendor_user, db):
+    user, _vendor = vendor_user
+    other = User.objects.create_user(
+        email="stranger@x.io", password="p@ss", name="Stranger", group="VENDOR"
+    )
+    other_vendor = Vendor.objects.create(name="Stranger Co", owner=other)
+    from aivus_backend.email_agent.models import EmailThread
+
+    foreign = EmailThread.objects.create(
+        vendor=other_vendor, provider_thread_id="t1", client_email="x@x.io"
+    )
+    response = api_client.post(
+        reverse("email_agent_api:prepare-followup", args=[foreign.id]),
+        **_auth(user),
+    )
+    assert response.status_code == 404

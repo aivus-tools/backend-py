@@ -13,6 +13,7 @@ from django.views.decorators.http import require_http_methods
 from aivus_backend.core.decorators import require_groups
 from aivus_backend.email_agent import activity
 from aivus_backend.email_agent import drafts as drafts_service
+from aivus_backend.email_agent import feed
 from aivus_backend.email_agent import mailbox
 from aivus_backend.email_agent import onboarding
 from aivus_backend.email_agent.api.serializers import serialize_account
@@ -248,6 +249,27 @@ def agent_profile(request):
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("VENDOR", "SYSTEM")
+def list_threads(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    limit, offset = feed.clamp_page(request.GET.get("limit"), request.GET.get("offset"))
+    return JsonResponse(feed.list_threads(vendor, limit=limit, offset=offset))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
+def list_followups(request):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    return JsonResponse(feed.list_followups(vendor))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_groups("VENDOR", "SYSTEM")
 def thread_activity(request, thread_id):
     vendor = _vendor_for_request(request)
     if vendor is None:
@@ -258,3 +280,22 @@ def thread_activity(request, thread_id):
     if thread is None:
         return JsonResponse({"error": "Thread not found"}, status=404)
     return JsonResponse(activity.serialize_activity(thread))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_groups("VENDOR", "SYSTEM")
+def prepare_followup(request, thread_id):
+    vendor = _vendor_for_request(request)
+    if vendor is None:
+        return JsonResponse({"error": "Vendor not found"}, status=404)
+    thread = EmailThread.objects.filter(
+        id=thread_id, vendor=vendor, deleted_at__isnull=True
+    ).first()
+    if thread is None:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+    try:
+        draft = feed.prepare_followup(thread)
+    except feed.FollowupError as error:
+        return JsonResponse({"error": str(error)}, status=409)
+    return JsonResponse({"draft": serialize_draft(draft)}, status=201)
