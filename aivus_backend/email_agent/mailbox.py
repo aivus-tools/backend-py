@@ -166,10 +166,31 @@ def plan_sync(account: EmailAccount, client: imapclient.IMAPClient) -> dict:
     }
 
 
+def _collect_headers(message: Message) -> dict:
+    """Header map that keeps every occurrence of a repeated header, in order.
+
+    A flat ``dict(message.items())`` silently keeps the LAST duplicate, which is
+    the attacker-controlled one: our own MX prepends its Authentication-Results
+    at the top, so a forged copy pasted lower down would win. Repeats are kept as
+    a list so trust decisions can read the topmost value.
+    """
+    collected: dict[str, str | list[str]] = {}
+    for name, value in message.items():
+        key = name.lower()
+        existing = collected.get(key)
+        if existing is None:
+            collected[key] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            collected[key] = [existing, value]
+    return collected
+
+
 def parse_raw_message(raw: bytes) -> dict:
     """Parse a raw RFC822 message into the fields EmailMessage stores."""
     message = message_from_bytes(raw)
-    headers = dict(message.items())
+    headers = _collect_headers(message)
 
     text_body, html_body, attachments = _walk_parts(message)
     body_clean = parsing.clean_body(text=text_body, html=html_body)

@@ -160,6 +160,12 @@ class EmailThread(models.Model):
         choices=ThreadState.choices,
         default=ThreadState.MONITORING,
     )
+    state_before_pause = models.CharField(
+        max_length=16,
+        choices=ThreadState.choices,
+        blank=True,
+        default="",
+    )
     paused_until = models.DateTimeField(null=True, blank=True)
     participants = models.JSONField(default=list, blank=True)
     memory = models.JSONField(default=dict, blank=True)
@@ -261,12 +267,15 @@ class ActionItem(models.Model):
         blank=True,
         related_name="action_items",
     )
+    followup_count = models.PositiveSmallIntegerField(default=0)
+    last_followup_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["status", "due_at"]),
+            models.Index(fields=["assignee", "status", "due_at"]),
         ]
 
     def __str__(self) -> str:

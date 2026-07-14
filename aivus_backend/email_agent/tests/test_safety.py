@@ -124,3 +124,116 @@ def test_within_thread_rate_cap(vendor):
             direction=EmailDirection.OUT,
         )
     assert safety.within_thread_rate_cap(thread, daily_cap=2) is False
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("Pay at https://evil.example/x", "[link removed]"),
+        ("Pay at www.evil.example/x", "[link removed]"),
+        ("Pay at //evil.example/x", "[link removed]"),
+        ("Pay at HTTPS://EVIL.EXAMPLE/x", "[link removed]"),
+    ],
+)
+def test_sanitize_outbound_neutralizes_every_link_shape(body, expected):
+    cleaned = safety.sanitize_outbound(body)
+    assert expected in cleaned
+    assert "evil.example" not in cleaned
+
+
+def test_sanitize_outbound_keeps_an_allowed_url():
+    allowed = "https://go.aivus.co/brief/acme?b=1"
+    assert safety.sanitize_outbound(f"Fill it in: {allowed}", (allowed,)) == (
+        f"Fill it in: {allowed}"
+    )
+
+
+def test_authenticated_sender_accepts_a_dmarc_pass():
+    headers = {
+        "authentication-results": (
+            "mx.google.com; dkim=pass header.i=@vendor.com; "
+            "dmarc=pass (p=NONE) header.from=vendor.com"
+        )
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is True
+
+
+def test_authenticated_sender_rejects_a_dmarc_fail():
+    headers = {
+        "authentication-results": "mx.google.com; dmarc=fail header.from=vendor.com"
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
+
+
+def test_authenticated_sender_rejects_a_pass_for_another_domain():
+    headers = {
+        "authentication-results": "mx.google.com; dmarc=pass header.from=attacker.com"
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
+
+
+def test_authenticated_sender_fails_open_without_the_header():
+    assert safety.is_authenticated_sender(
+        {"from": "prod@vendor.com"}, "prod@vendor.com"
+    )
+
+
+def test_only_the_topmost_authentication_results_is_trusted():
+    headers = {
+        "authentication-results": [
+            "mx.google.com; dmarc=fail header.from=vendor.com",
+            "attacker-forged; dmarc=pass header.from=vendor.com",
+        ]
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
+
+
+def test_dmarc_pass_planted_in_the_spf_clause_is_ignored():
+    # MAIL FROM:<dmarc=pass@evil.com> echoes into smtp.mailfrom BEFORE the real
+    # dmarc clause; only a clause that actually starts with dmarc= must be read.
+    headers = {
+        "authentication-results": (
+            "mx.google.com; spf=pass (google.com: domain of dmarc=pass@evil.com "
+            "designates 1.2.3.4) smtp.mailfrom=dmarc=pass@evil.com; "
+            "dmarc=fail (p=REJECT) header.from=vendor.com"
+        )
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
+
+
+def test_dmarc_clause_without_header_from_still_passes():
+    headers = {"authentication-results": "mx.google.com; dmarc=pass"}
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is True
+
+
+def test_missing_dmarc_clause_fails_open():
+    headers = {"authentication-results": "mx.google.com; spf=pass; dkim=pass"}
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Confirm at https://evil.example/pay",
+        "Confirm at www.evil.example/pay",
+        "Confirm at //evil.example/pay",
+        "Confirm at pay.evil.example/invoice?id=1",
+        "Reach me at mailto:attacker@evil.example",
+    ],
+)
+def test_redact_for_notification_strips_every_link_shape(text):
+    cleaned = safety.redact_for_notification(text)
+    assert "evil.example" not in cleaned
+    assert "[link removed]" in cleaned
+
+
+def test_redact_for_notification_caps_length():
+    cleaned = safety.redact_for_notification("x" * 5000)
+    assert len(cleaned) <= 300
+    assert cleaned.endswith("...")
+
+
+def test_redact_for_notification_keeps_plain_text():
+    assert safety.redact_for_notification("Budget: 50k, deadline end of July") == (
+        "Budget: 50k, deadline end of July"
+    )

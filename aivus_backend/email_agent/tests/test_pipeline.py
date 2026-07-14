@@ -1,12 +1,17 @@
 """Tests for lead wiring and the inbound orchestrator (S3-25)."""
 
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from aivus_backend.core.enums import BriefSource
 from aivus_backend.email_agent import classification
 from aivus_backend.email_agent import tasks
+from aivus_backend.email_agent.models import ActionAssignee
+from aivus_backend.email_agent.models import ActionItem
+from aivus_backend.email_agent.models import ActionItemStatus
 from aivus_backend.email_agent.models import AgentLog
 from aivus_backend.email_agent.models import EmailAccount
 from aivus_backend.email_agent.models import EmailAccountRole
@@ -14,6 +19,9 @@ from aivus_backend.email_agent.models import EmailDirection
 from aivus_backend.email_agent.models import EmailMessage
 from aivus_backend.email_agent.models import EmailThread
 from aivus_backend.email_agent.models import MessageIntent
+from aivus_backend.email_agent.models import OutboundDraft
+from aivus_backend.email_agent.models import ThreadState
+from aivus_backend.email_agent.models import VendorAgentProfile
 from aivus_backend.projects.models import Brief
 
 pytestmark = pytest.mark.django_db
@@ -233,11 +241,186 @@ def test_process_out_of_office_pauses_without_llm(account, vendor):
     assert message.intent == MessageIntent.AUTO_REPLY
 
 
-def test_producer_reply_triggers_human_takeover(account, vendor):
-    from aivus_backend.email_agent.models import OutboundDraft
-    from aivus_backend.email_agent.models import ThreadState
-    from aivus_backend.email_agent.models import VendorAgentProfile
+def test_a_re_promised_item_survives_the_orchestrator_close(account, vendor):
+    thread = _thread(vendor)
+    item = ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.CLIENT,
+        text="send the raw footage",
+        status=ActionItemStatus.OVERDUE,
+    )
+    message = _inbound(account, thread)
+    result = classification.coerce_classification(
+        {
+            **_ORDER_RAW,
+            "intent": "question",
+            "action_items": [
+                {"assignee": "client", "text": "send the raw footage", "due_at": ""}
+            ],
+            "fulfilled": [str(item.id)],
+        }
+    )
 
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply"),
+    ):
+        tasks.process_inbound_message(str(message.id))
+
+    item.refresh_from_db()
+    assert item.status == ActionItemStatus.OVERDUE
+    assert ActionItem.objects.filter(thread=thread).count() == 1
+
+
+def test_a_tangential_client_reply_leaves_the_promise_open(account, vendor):
+    thread = _thread(vendor)
+    item = ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.CLIENT,
+        text="send the raw footage",
+        status=ActionItemStatus.OVERDUE,
+    )
+    message = _inbound(account, thread, body_clean="What format do you need?")
+    result = classification.coerce_classification(
+        {**_ORDER_RAW, "intent": "question", "whos_ball": "producer", "fulfilled": []}
+    )
+
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply"),
+    ):
+        tasks.process_inbound_message(str(message.id))
+
+    item.refresh_from_db()
+    assert item.status == ActionItemStatus.OVERDUE
+
+
+def test_delivered_promise_is_closed_by_the_orchestrator(account, vendor):
+    thread = _thread(vendor)
+    item = ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.CLIENT,
+        text="send the raw footage",
+        status=ActionItemStatus.OVERDUE,
+    )
+    message = _inbound(account, thread, body_clean="Footage attached.")
+    result = classification.coerce_classification(
+        {**_ORDER_RAW, "intent": "follow_up", "fulfilled": [str(item.id)]}
+    )
+
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply"),
+    ):
+        tasks.process_inbound_message(str(message.id))
+
+    item.refresh_from_db()
+    assert item.status == ActionItemStatus.DONE
+
+
+def test_pause_never_unblocks_drafting_on_a_taken_over_thread(account, vendor):
+    VendorAgentProfile.objects.create(vendor=vendor, producer_email="prod@vendor.com")
+    thread = _thread(vendor)
+    message = _inbound(account, thread, from_email="prod@vendor.com")
+    result = classification.coerce_classification(
+        {**_ORDER_RAW, "intent": "question", "pause_until": "2099-01-01"}
+    )
+
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply") as handle,
+    ):
+        outcome = tasks.process_inbound_message(str(message.id))
+
+    assert outcome == "silent"
+    handle.assert_not_called()
+    thread.refresh_from_db()
+    assert thread.state == ThreadState.HUMAN_TAKEOVER
+    assert thread.paused_until is not None
+
+
+def test_spoofed_producer_address_does_not_take_over_the_thread(account, vendor):
+    VendorAgentProfile.objects.create(vendor=vendor, producer_email="prod@vendor.com")
+    thread = _thread(vendor)
+    message = _inbound(
+        account,
+        thread,
+        from_email="prod@vendor.com",
+        headers={
+            "from": "prod@vendor.com",
+            "authentication-results": "mx.google.com; dmarc=fail header.from=x.com",
+        },
+    )
+    result = classification.coerce_classification({**_ORDER_RAW, "intent": "question"})
+
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply"),
+    ):
+        tasks.process_inbound_message(str(message.id))
+
+    thread.refresh_from_db()
+    assert thread.state != ThreadState.HUMAN_TAKEOVER
+    assert not AgentLog.objects.filter(thread=thread, event="human_takeover").exists()
+
+
+def test_genuine_client_email_resumes_a_paused_thread(account, vendor):
+    thread = _thread(
+        vendor,
+        state=ThreadState.PAUSED,
+        state_before_pause=ThreadState.ENGAGED,
+        paused_until=timezone.now() + timedelta(days=5),
+    )
+    message = _inbound(account, thread)
+    result = classification.coerce_classification({**_ORDER_RAW, "intent": "question"})
+
+    with (
+        patch.object(classification, "classify_message", return_value=(result, {})),
+        patch.object(tasks.reply, "handle_reply"),
+    ):
+        tasks.process_inbound_message(str(message.id))
+
+    thread.refresh_from_db()
+    assert thread.state == ThreadState.ENGAGED
+    assert thread.paused_until is None
+    assert AgentLog.objects.filter(thread=thread, event="thread_resumed").exists()
+
+
+def test_repeat_out_of_office_does_not_resume_the_thread(account, vendor):
+    thread = _thread(
+        vendor,
+        state=ThreadState.PAUSED,
+        paused_until=timezone.now() + timedelta(days=5),
+    )
+    message = _inbound(account, thread, headers={"auto-submitted": "auto-replied"})
+
+    with patch.object(tasks.triage.notifications, "notify"):
+        outcome = tasks.process_inbound_message(str(message.id))
+
+    assert outcome == "ooo"
+    thread.refresh_from_db()
+    assert thread.state == ThreadState.PAUSED
+    assert thread.paused_until is not None
+
+
+def test_producer_reply_does_not_lift_the_client_pause(account, vendor):
+    VendorAgentProfile.objects.create(vendor=vendor, producer_email="prod@vendor.com")
+    thread = _thread(
+        vendor,
+        state=ThreadState.PAUSED,
+        paused_until=timezone.now() + timedelta(days=5),
+    )
+    message = _inbound(account, thread, from_email="prod@vendor.com")
+    result = classification.coerce_classification({**_ORDER_RAW, "intent": "question"})
+
+    with patch.object(classification, "classify_message", return_value=(result, {})):
+        tasks.process_inbound_message(str(message.id))
+
+    thread.refresh_from_db()
+    assert not AgentLog.objects.filter(thread=thread, event="thread_resumed").exists()
+
+
+def test_producer_reply_triggers_human_takeover(account, vendor):
     VendorAgentProfile.objects.create(vendor=vendor, producer_email="prod@vendor.com")
     thread = _thread(vendor)
     message = _inbound(account, thread, from_email="prod@vendor.com")

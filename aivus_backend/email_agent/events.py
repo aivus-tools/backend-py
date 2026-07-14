@@ -2,13 +2,17 @@
 
 Events are transport-independent: the dispatcher in ``notifications.py`` decides
 which channel delivers them and whether a vendor's rules or working hours defer a
-non-urgent one. Delivery classes decide that policy:
+non-urgent one. Two independent policies decide that:
 
-- non-deferrable events (drafts, urgent leads, escalations, mailbox loss) always
-  go out immediately, regardless of notification mode or working hours;
-- INFO events (a plain useful inbound, an out-of-office pause) can be suppressed
-  by ``urgent_and_digest`` mode and deferred outside working hours;
-- the daily digest has its own schedule.
+- INFO events (a plain useful inbound, an out-of-office pause) are the only ones
+  ``urgent_and_digest`` mode may drop entirely — they are pure awareness;
+- DEFERRABLE events wait for the next working-hours window instead of arriving at
+  night. That is a superset of INFO: a promise deadline must always reach the
+  producer, but it does not have to wake them.
+
+Everything else (drafts, urgent leads, escalations, mailbox loss) goes out
+immediately, regardless of mode or working hours. The daily digest has its own
+schedule.
 """
 
 from __future__ import annotations
@@ -37,6 +41,12 @@ INFO_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+DEFERRABLE_EVENTS: frozenset[str] = INFO_EVENTS | frozenset(
+    {
+        NotificationEvent.PROMISE_DUE,
+    }
+)
+
 DEFAULT_DEDUP_WINDOW = timedelta(hours=6)
 
 DEDUP_WINDOWS: dict[str, timedelta] = {
@@ -46,6 +56,7 @@ DEDUP_WINDOWS: dict[str, timedelta] = {
     NotificationEvent.ESCALATION: timedelta(hours=24),
     NotificationEvent.MAILBOX_DISCONNECTED: timedelta(hours=24),
     NotificationEvent.OOO_PAUSED: timedelta(hours=24),
+    NotificationEvent.PROMISE_DUE: timedelta(hours=24),
     NotificationEvent.DAILY_DIGEST: timedelta(hours=20),
 }
 
@@ -55,4 +66,8 @@ def dedup_window(event: str) -> timedelta:
 
 
 def is_deferrable(event: str) -> bool:
+    return event in DEFERRABLE_EVENTS
+
+
+def is_suppressible_by_mode(event: str) -> bool:
     return event in INFO_EVENTS

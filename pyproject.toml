@@ -142,6 +142,7 @@ ignore = [
     "FBT002",
     "B017",
     "PT011",
+    "SLF001",
 ]
 "conftest.py" = ["PLR2004", "S106"]
 "aivus_backend/projects/ai_brief_v2.py" = ["E501", "S608"]

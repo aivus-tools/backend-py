@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from aivus_backend.email_agent import classification
 from aivus_backend.email_agent import drafts
+from aivus_backend.email_agent import followup
 from aivus_backend.email_agent import mailbox
 from aivus_backend.email_agent import memory
 from aivus_backend.email_agent import notifications
@@ -67,18 +68,19 @@ def process_inbound_message(message_id: str) -> str:
 
     profile = VendorAgentProfile.objects.filter(vendor=vendor).first()
     producer_email = profile.producer_email if profile is not None else ""
-    if (
-        triage.is_producer_reply(message, producer_email)
-        and thread.state != ThreadState.HUMAN_TAKEOVER
-    ):
-        thread.state = ThreadState.HUMAN_TAKEOVER
-        thread.save(update_fields=["state", "updated_at"])
-        AgentLog.objects.create(
-            thread=thread,
-            project=thread.project,
-            event="human_takeover",
-            payload={"from_email": message.from_email},
-        )
+    from_producer = triage.is_producer_reply(message, producer_email)
+    if from_producer:
+        if thread.state != ThreadState.HUMAN_TAKEOVER:
+            thread.state = ThreadState.HUMAN_TAKEOVER
+            thread.save(update_fields=["state", "updated_at"])
+            AgentLog.objects.create(
+                thread=thread,
+                project=thread.project,
+                event="human_takeover",
+                payload={"from_email": message.from_email},
+            )
+    else:
+        triage.resume_thread(thread)
 
     try:
         result, trace = classification.classify_message(message)
@@ -95,9 +97,11 @@ def process_inbound_message(message_id: str) -> str:
         return "classify_failed"
 
     classification.apply_classification(message, result, trace)
-    memory.close_fulfilled_items(message)
+    tracked = memory.persist_action_items(message, result)
+    memory.close_fulfilled_items(
+        message, result, exclude_ids=[item.id for item in tracked]
+    )
     memory.update_thread_memory(thread, result)
-    memory.persist_action_items(message, result)
     classification.wire_lead(message, result)
 
     decision = classification.reply_decision(message, result)
@@ -165,6 +169,16 @@ def expire_drafts() -> int:
 def mark_overdue_action_items() -> int:
     """Beat entry: flag open action items past their deadline as overdue."""
     return memory.mark_overdue_items(timezone.now())
+
+
+@shared_task
+def sweep_followups() -> int:
+    """Beat entry: chase due promises and lift elapsed pauses.
+
+    Subsumes ``mark_overdue_action_items``: it flags deadlines itself so a single
+    pass sees them, and running both beats is harmless (each step is idempotent).
+    """
+    return followup.run_sweep(timezone.now())
 
 
 @shared_task

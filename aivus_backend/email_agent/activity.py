@@ -31,9 +31,18 @@ _LABELS: dict[str, Callable[[dict], str]] = {
     "reply_blocked": lambda p: "Reply blocked; escalated",
     "human_takeover": lambda p: "Producer took over the thread",
     "ooo_paused": lambda p: "Client is out of office; follow-ups paused",
+    "thread_resumed": lambda p: "Out-of-office over; the thread is active again",
     "promise_tracked": (
         lambda p: f"{str(p.get('assignee', 'someone')).capitalize()} promised: "
         f"{p.get('text', '')}"
+    ),
+    "followup_drafted": lambda p: "Follow-up reminder prepared for the client",
+    "followup_blocked": lambda p: "Follow-up could not be written; escalated",
+    "followup_failed": lambda p: "Follow-up generation failed; escalated",
+    "promise_due_ping": (
+        lambda p: "Producer reminded about overdue promises"
+        if p.get("stage") == "overdue"
+        else "Producer reminded about an approaching deadline"
     ),
 }
 

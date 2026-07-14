@@ -57,12 +57,23 @@ ALLOWED_ACTIONS = frozenset(
 
 DEFAULT_THREAD_DAILY_CAP = 5
 
-_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_URL_RE = re.compile(
+    r"(?:https?://|//|\bwww\.)\S+",
+    re.IGNORECASE,
+)
 _REMOTE_IMG_RE = re.compile(
     r"<img\b[^>]*\bsrc\s*=\s*['\"]https?://[^>]*>",
     re.IGNORECASE,
 )
 _ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_DMARC_RE = re.compile(r"^dmarc\s*=\s*(\w+)", re.IGNORECASE)
+_HEADER_FROM_RE = re.compile(r"header\.from\s*=\s*([^\s;]+)", re.IGNORECASE)
+_BARE_DOMAIN_RE = re.compile(
+    r"\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)+/\S*",
+    re.IGNORECASE,
+)
+_MAILTO_RE = re.compile(r"\bmailto:\S+", re.IGNORECASE)
+_LINK_PLACEHOLDER = "[link removed]"
 
 
 def normalize_headers(raw: dict) -> dict[str, str]:
@@ -109,6 +120,60 @@ def is_auto_or_bulk(raw_headers: dict) -> bool:
         _local_part(headers.get(field, "")) in NO_REPLY_LOCAL_PARTS
         for field in ("from", "sender", "return-path")
     )
+
+
+def first_header(raw_headers: dict, name: str) -> str:
+    """The topmost occurrence of a header, which is the one our own MX added."""
+    for key, value in (raw_headers or {}).items():
+        if str(key).strip().lower() != name:
+            continue
+        if isinstance(value, (list, tuple)):
+            return str(value[0]) if value else ""
+        return str(value)
+    return ""
+
+
+def _dmarc_clause(results: str) -> str | None:
+    """The dmarc clause of an Authentication-Results value, or None if absent.
+
+    Clauses are ``;``-separated and the method token leads each one, so the dmarc
+    verdict is only read from a clause that actually starts with ``dmarc=``. A
+    bare first-match search would be spoofable: an MX echoes the envelope sender
+    into the spf clause ahead of dmarc, and ``=`` is legal in a local part, so
+    ``MAIL FROM:<dmarc=pass@evil>`` plants a fake ``dmarc=pass`` earlier in the
+    string.
+    """
+    for clause in results.split(";"):
+        stripped = clause.strip()
+        if _DMARC_RE.match(stripped):
+            return stripped
+    return None
+
+
+def is_authenticated_sender(raw_headers: dict, address: str) -> bool:
+    """Whether the receiving MX vouched for the From domain (DMARC).
+
+    Only the topmost Authentication-Results counts: it is the one our provider
+    stamped on delivery, and anything below it can be forged by the sender.
+    Fail-open when the header is missing or carries no dmarc clause — some
+    transports do not stamp one, and dropping a real producer reply is worse than
+    the alternative. Never used to authorize an action, only to decide whether an
+    address may be trusted as an identity.
+    """
+    results = first_header(raw_headers, "authentication-results")
+    if not results:
+        return True
+    clause = _dmarc_clause(results)
+    if clause is None:
+        return True
+    verdict = _DMARC_RE.match(clause)
+    if verdict is None or verdict.group(1).lower() != "pass":
+        return False
+    domain = (address or "").strip().lower().rpartition("@")[2]
+    header_from = _HEADER_FROM_RE.search(clause)
+    if header_from is None or not domain:
+        return True
+    return header_from.group(1).strip().lower().strip("<>") == domain
 
 
 def is_self_message(
@@ -192,6 +257,9 @@ def sanitize_outbound(body: str, allowed_urls: tuple[str, ...] = ()) -> str:
 
     Removes remote images and neutralizes any URL not on the allowlist (the only
     legitimate link, the brief link, is inserted by code, not by the model).
+    Scheme-less ("www.pay-here.example") and protocol-relative ("//evil.example")
+    links count: a mail client renders both as clickable, so matching only on
+    http(s):// would wave the interesting half of them straight through.
     """
     cleaned = _REMOTE_IMG_RE.sub("", body or "")
 
@@ -202,6 +270,26 @@ def sanitize_outbound(body: str, allowed_urls: tuple[str, ...] = ()) -> str:
         return "[link removed]"
 
     return _URL_RE.sub(_replace, cleaned)
+
+
+def redact_for_notification(text: str, max_length: int = 300) -> str:
+    """Strip every link shape and cap the length of client-derived preview text.
+
+    Producer notifications quote the client's subject, promise text and extracted
+    fields, all of which trace back to an untrusted email and go out over Aivus's
+    own authenticated domain — so a planted link would arrive looking like Aivus
+    asking the producer to click it. Notification lines never carry a legitimate
+    link (the only real one is the code-built CTA button), so this is stricter
+    than ``sanitize_outbound``: bare domains and ``mailto:`` go too.
+    """
+    collapsed = " ".join((text or "").split())
+    cleaned = _REMOTE_IMG_RE.sub("", collapsed)
+    cleaned = _URL_RE.sub(_LINK_PLACEHOLDER, cleaned)
+    cleaned = _BARE_DOMAIN_RE.sub(_LINK_PLACEHOLDER, cleaned)
+    cleaned = _MAILTO_RE.sub(_LINK_PLACEHOLDER, cleaned)
+    if len(cleaned) > max_length:
+        cleaned = cleaned[: max_length - 3].rstrip() + "..."
+    return cleaned
 
 
 def outbound_count_since(thread: EmailThread, window: timedelta) -> int:

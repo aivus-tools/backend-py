@@ -24,9 +24,11 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.utils import timezone
 
+from aivus_backend.email_agent import safety
 from aivus_backend.email_agent.events import NotificationEvent
 from aivus_backend.email_agent.events import dedup_window
 from aivus_backend.email_agent.events import is_deferrable
+from aivus_backend.email_agent.events import is_suppressible_by_mode
 from aivus_backend.email_agent.models import NotificationChannel
 from aivus_backend.email_agent.models import NotificationChannelType
 from aivus_backend.email_agent.models import NotificationLog
@@ -73,6 +75,10 @@ _TITLES: dict[str, dict[str, str]] = {
         "en": "Client is out of office",
         "ru": "Клиент в отпуске",
     },
+    NotificationEvent.PROMISE_DUE: {
+        "en": "Your promise needs attention",
+        "ru": "Ваше обещание требует внимания",
+    },
     NotificationEvent.INBOUND_EMAIL: {
         "en": "New client email",
         "ru": "Новое письмо клиента",
@@ -107,6 +113,10 @@ _INTROS: dict[str, dict[str, str]] = {
     NotificationEvent.OOO_PAUSED: {
         "en": "The client sent an out-of-office reply, so follow-ups are paused.",
         "ru": "Клиент прислал автоответ об отсутствии, напоминания приостановлены.",
+    },
+    NotificationEvent.PROMISE_DUE: {
+        "en": "You promised the client something that is due now or already late.",
+        "ru": "Вы обещали клиенту то, что уже пора сделать или что просрочено.",
     },
     NotificationEvent.INBOUND_EMAIL: {
         "en": "A new client email arrived.",
@@ -150,7 +160,10 @@ def _render_context(event: str, payload: dict, language: str) -> dict:
     return {
         "title": _localized(_TITLES, event, language),
         "intro": _localized(_INTROS, event, language),
-        "lines": [str(line) for line in payload.get("lines", [])],
+        "lines": [
+            safety.redact_for_notification(str(line))
+            for line in payload.get("lines", [])
+        ],
         "cta_url": payload.get("cta_url") or _frontend_url(),
         "cta_label": _CTA_LABELS.get(language, _CTA_LABELS[_DEFAULT_LANGUAGE]),
         "hint": payload.get("hint", ""),
@@ -332,7 +345,7 @@ def is_duplicate(vendor: Vendor, event: str, dedup_key: str) -> bool:
 
 
 def _is_suppressed_by_mode(vendor: Vendor, event: str, *, urgent: bool) -> bool:
-    if urgent or not is_deferrable(event):
+    if urgent or not is_suppressible_by_mode(event):
         return False
     return notification_mode(vendor) == NOTIFICATION_MODE_URGENT_AND_DIGEST
 

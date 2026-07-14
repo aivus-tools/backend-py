@@ -67,6 +67,24 @@ def test_fetch_raw_maps_uid_to_bytes():
     assert mailbox.fetch_raw(client, []) == {}
 
 
+def test_parse_raw_message_keeps_repeated_headers_in_order():
+    message = EmailMessage()
+    message["From"] = "jane@client.com"
+    message["Subject"] = "Hi"
+    message["Authentication-Results"] = (
+        "mx.google.com; dmarc=fail header.from=vendor.com"
+    )
+    message["Authentication-Results"] = "forged; dmarc=pass header.from=vendor.com"
+    message.set_content("hello")
+
+    parsed = mailbox.parse_raw_message(message.as_bytes())
+
+    results = parsed["headers"]["authentication-results"]
+    assert isinstance(results, list)
+    assert results[0].startswith("mx.google.com")
+    assert parsed["headers"]["subject"] == "Hi"
+
+
 def test_parse_raw_message_extracts_fields_and_attachment():
     message = EmailMessage()
     message["From"] = "Jane <jane@client.com>"

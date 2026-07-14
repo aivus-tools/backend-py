@@ -116,7 +116,8 @@ def has_forbidden_commitments(text: str) -> bool:
     return any(pattern.search(text) for pattern in FORBIDDEN_PATTERNS)
 
 
-def _render_skeleton(slots: dict, brief_link: str) -> str:
+def render_skeleton(slots: dict, brief_link: str = "") -> str:
+    """Assemble the model's prose slots into a letter; code owns the structure."""
     greeting = str(slots.get("greeting", "")).strip()
     main = str(slots.get("main", "")).strip()
     next_step = str(slots.get("next_step", "")).strip()
@@ -174,7 +175,7 @@ def propose_reply(
         return None, trace
 
     link_for_body = brief_link if variant == VARIANT_B else ""
-    rendered = _render_skeleton(slots, link_for_body)
+    rendered = render_skeleton(slots, link_for_body)
     if not rendered.strip():
         return None, trace
     if has_forbidden_commitments(rendered):

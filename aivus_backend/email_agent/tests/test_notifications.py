@@ -36,6 +36,42 @@ def test_email_channel_enqueues_platform_mailer_in_english(vendor):
     assert log.error == ""
 
 
+def test_notification_lines_are_stripped_of_planted_links(vendor):
+    with patch.object(notifications, "send_to_recipient_email") as mailer:
+        notifications.notify(
+            vendor,
+            NotificationEvent.URGENT_LEAD,
+            {"lines": ["Budget: $50k confirm at http://evil.example/pay"]},
+            urgent=True,
+        )
+
+    lines = mailer.delay.call_args.kwargs["context"]["lines"]
+    assert not any("evil.example" in line for line in lines)
+    assert any("[link removed]" in line for line in lines)
+
+
+def test_deferred_notification_is_sanitized_on_flush(vendor):
+    from django.utils import timezone
+
+    VendorAgentProfile.objects.create(
+        vendor=vendor,
+        working_hours={"timezone": "UTC", "start": "09:00", "end": "18:00"},
+    )
+    NotificationLog.objects.create(
+        vendor=vendor,
+        event=NotificationEvent.INBOUND_EMAIL,
+        payload={"lines": ["From www.evil.example/x"]},
+        delivered=False,
+        send_after=timezone.now(),
+    )
+
+    with patch.object(notifications, "send_to_recipient_email") as mailer:
+        notifications.flush_due_notifications(timezone.now())
+
+    lines = mailer.delay.call_args.kwargs["context"]["lines"]
+    assert not any("evil.example" in line for line in lines)
+
+
 def test_ru_vendor_gets_russian_template(vendor):
     UserSettings.objects.create(user=vendor.owner, language="ru")
 

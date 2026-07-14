@@ -5,6 +5,10 @@ bounces, autoresponders and our own outbound mail never cost an LLM call. Two
 cases are treated apart from plain junk: our own mail (self-detection) and a
 client's out-of-office reply, which pauses the thread from code without an LLM.
 A per-thread daily cap on LLM calls is the last cost backstop.
+
+This module also owns the pause lifecycle (S3-35), since both entry points into
+it live here or next door: the header-detected out-of-office and the classifier's
+``pause_until``.
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from aivus_backend.email_agent.models import MessageIntent
 from aivus_backend.email_agent.models import ThreadState
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from aivus_backend.email_agent.models import EmailThread
     from aivus_backend.users.models import Vendor
 
@@ -67,9 +73,15 @@ def is_producer_reply(message: EmailMessage, producer_email: str) -> bool:
 
     Self mail (our own agent sends, marked X-Aivus-Agent) is already filtered by
     the pre-gate, so a match on the producer address means a real human takeover.
+    The From address is checked against DMARC first: a bare From match is
+    trivially spoofable, and this identity hands the sender the producer's
+    powers — freezing the thread into a takeover the agent never leaves, and
+    settling the producer's own promises.
     """
     producer = (producer_email or "").strip().lower()
-    return bool(producer) and message.from_email.strip().lower() == producer
+    if not producer or message.from_email.strip().lower() != producer:
+        return False
+    return safety.is_authenticated_sender(message.headers, producer)
 
 
 def is_out_of_office(raw_headers: dict) -> bool:
@@ -105,6 +117,54 @@ def pre_gate(message: EmailMessage) -> TriageResult:
     return TriageResult(proceed=True, reason="")
 
 
+def pause_thread(thread: EmailThread, until: datetime) -> None:
+    """Pause a thread until ``until``, remembering the state to come back to.
+
+    An existing pause is only ever extended, never shortened: a second
+    out-of-office (a header one carries no date and falls back to the default
+    window) must not cut short a longer return date the classifier already read
+    out of the first one.
+
+    A human takeover outranks a pause and keeps the state: the takeover state is
+    what silences the agent, and overwriting it with PAUSED would let the
+    drafting guard stop matching and put the agent back on a thread its owner
+    took over. The deadline is still recorded, so follow-ups stay off.
+    """
+    fields = ["paused_until", "updated_at"]
+    if thread.state not in (ThreadState.PAUSED, ThreadState.HUMAN_TAKEOVER):
+        thread.state_before_pause = thread.state
+        thread.state = ThreadState.PAUSED
+        fields.extend(["state", "state_before_pause"])
+    if thread.paused_until is None or until > thread.paused_until:
+        thread.paused_until = until
+    thread.save(update_fields=fields)
+
+
+def resume_thread(thread: EmailThread) -> bool:
+    """Lift a pause and restore the state the thread was in before it.
+
+    Called both when the pause window elapses and when a genuine inbound arrives:
+    a real message means the client is back, whatever the return date said. The
+    pre-gate filters auto-replies before this runs, so an out-of-office extension
+    can never cancel its own pause.
+    """
+    if thread.state != ThreadState.PAUSED:
+        return False
+    thread.state = thread.state_before_pause or ThreadState.MONITORING
+    thread.state_before_pause = ""
+    thread.paused_until = None
+    thread.save(
+        update_fields=["state", "state_before_pause", "paused_until", "updated_at"]
+    )
+    AgentLog.objects.create(
+        thread=thread,
+        project=thread.project,
+        event="thread_resumed",
+        payload={"state": thread.state},
+    )
+    return True
+
+
 def apply_ooo_pause(message: EmailMessage) -> None:
     """Pause the thread on a header-detected out-of-office reply, without an LLM."""
     thread = message.thread
@@ -113,9 +173,7 @@ def apply_ooo_pause(message: EmailMessage) -> None:
     message.processed_at = timezone.now()
     message.save(update_fields=["intent", "is_auto_reply", "processed_at"])
 
-    thread.state = ThreadState.PAUSED
-    thread.paused_until = timezone.now() + DEFAULT_OOO_PAUSE
-    thread.save(update_fields=["state", "paused_until", "updated_at"])
+    pause_thread(thread, timezone.now() + DEFAULT_OOO_PAUSE)
 
     AgentLog.objects.create(
         thread=thread,
