@@ -201,9 +201,23 @@ def test_dmarc_pass_planted_in_the_spf_clause_is_ignored():
     assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
 
 
-def test_dmarc_clause_without_header_from_still_passes():
+def test_dmarc_pass_without_header_from_fails_closed():
+    # A dmarc=pass we cannot bind to a header.from is an injected or malformed
+    # clause, not proof of identity; refuse it for the producer decision.
     headers = {"authentication-results": "mx.google.com; dmarc=pass"}
-    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is True
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
+
+
+def test_quoted_semicolon_injected_dmarc_clause_is_rejected():
+    # MAIL FROM:<"x;dmarc=pass"@evil.com> could split into an earlier clause with
+    # no header.from; the fail-closed binding blocks it.
+    headers = {
+        "authentication-results": (
+            'mx.google.com; spf=pass smtp.mailfrom="x;dmarc=pass"@evil.com; '
+            "dmarc=fail header.from=vendor.com"
+        )
+    }
+    assert safety.is_authenticated_sender(headers, "prod@vendor.com") is False
 
 
 def test_missing_dmarc_clause_fails_open():
@@ -219,6 +233,8 @@ def test_missing_dmarc_clause_fails_open():
         "Confirm at //evil.example/pay",
         "Confirm at pay.evil.example/invoice?id=1",
         "Reach me at mailto:attacker@evil.example",
+        "Just visit evil.example now",
+        "Reach pay-me-now.co today",
     ],
 )
 def test_redact_for_notification_strips_every_link_shape(text):

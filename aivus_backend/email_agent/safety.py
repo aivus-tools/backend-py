@@ -69,7 +69,7 @@ _ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _DMARC_RE = re.compile(r"^dmarc\s*=\s*(\w+)", re.IGNORECASE)
 _HEADER_FROM_RE = re.compile(r"header\.from\s*=\s*([^\s;]+)", re.IGNORECASE)
 _BARE_DOMAIN_RE = re.compile(
-    r"\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)+/\S*",
+    r"\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)+(?:/\S*)?",
     re.IGNORECASE,
 )
 _MAILTO_RE = re.compile(r"\bmailto:\S+", re.IGNORECASE)
@@ -171,8 +171,13 @@ def is_authenticated_sender(raw_headers: dict, address: str) -> bool:
         return False
     domain = (address or "").strip().lower().rpartition("@")[2]
     header_from = _HEADER_FROM_RE.search(clause)
+    # A dmarc=pass we cannot bind to a header.from is not proof of anything: a real
+    # MX always stamps header.from alongside the verdict, so its absence means an
+    # injected or malformed clause. Fail closed here (unlike a wholly missing AR
+    # header, which fails open) — this is an identity decision that grants the
+    # producer's powers.
     if header_from is None or not domain:
-        return True
+        return False
     return header_from.group(1).strip().lower().strip("<>") == domain
 
 

@@ -172,6 +172,7 @@ def due_client_items(now: datetime) -> list[ActionItem]:
             thread__deleted_at__isnull=True,
         )
         .exclude(thread__state__in=_SILENT_STATES)
+        .exclude(thread__drafts__status=OutboundDraftStatus.PENDING)
         .filter(
             Q(last_followup_at__isnull=True)
             | Q(last_followup_at__lte=now - CLIENT_FOLLOWUP_GAP)

@@ -351,6 +351,20 @@ def test_thread_with_a_pending_draft_gets_no_followup(account, vendor, profile):
         assert followup.sweep_client_followups(NOW) == 0
 
 
+def test_pending_draft_thread_never_enters_the_batch(account, vendor, profile):
+    blocked = _thread(vendor, provider_thread_id="blocked")
+    _inbound(account, blocked)
+    _item(blocked, due_at=PAST - timedelta(days=5))
+    OutboundDraft.objects.create(
+        thread=blocked,
+        kind=OutboundDraftKind.FIRST_REPLY,
+        body="already waiting",
+        status=OutboundDraftStatus.PENDING,
+    )
+
+    assert followup.due_client_items(NOW) == []
+
+
 def _spend_followup_budget(vendor, count, *, created_at):
     for index in range(count):
         spent = _thread(vendor, provider_thread_id=f"spent-{index}-{created_at:%s}")

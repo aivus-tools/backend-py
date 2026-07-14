@@ -22,6 +22,15 @@ DEFAULT_MODEL = "gemini-3.1-pro-preview"
 
 _INSTRUCTIONS_PLACEHOLDER = "{vendor_instructions}"
 
+DEFAULT_AGENT_INSTRUCTION = (
+    "You represent a video production vendor and speak on their behalf to their "
+    "clients. You have not been briefed on this vendor's services, tone, or rules "
+    "yet, so stay cautious: be warm and professional, acknowledge the client, and "
+    "never state prices, timelines, estimates, availability, or any commitment. "
+    "When anything is unclear or would require a commitment, hand off to the "
+    "producer rather than guessing."
+)
+
 
 def load_prompt_body(slug: str) -> str:
     return BriefPrompt.get_active_body(slug=slug, default="")
@@ -35,11 +44,18 @@ def model_for_prompt(slug: str) -> str:
 
 
 def compile_vendor_instructions(profile: VendorAgentProfile | None) -> str:
+    """Compile the vendor's own instruction, falling back to a cautious default.
+
+    A vendor who has not written an instruction yet must not leave the agent with
+    an empty persona — an unconstrained model is the dangerous case — so the
+    cautious default stands in until they onboard.
+    """
     if profile is None:
-        return ""
+        return DEFAULT_AGENT_INSTRUCTION
     parts = [profile.system_prompt, profile.tone, profile.business_context]
     parts.extend(f"- {rule}" for rule in profile.special_rules or [])
-    return "\n".join(part for part in parts if part).strip()
+    compiled = "\n".join(part for part in parts if part).strip()
+    return compiled or DEFAULT_AGENT_INSTRUCTION
 
 
 def fill_instructions(body: str, instructions: str) -> str:
