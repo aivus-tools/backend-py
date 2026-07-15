@@ -97,6 +97,32 @@ def test_wire_lead_creates_lead_for_order(account, vendor):
     enqueue.assert_not_called()
 
 
+def test_wire_lead_links_thread_attachments(account, vendor):
+    from aivus_backend.email_agent import attachments
+    from aivus_backend.email_agent.models import EmailAttachment
+
+    thread = _thread(vendor)
+    message = _inbound(account, thread)
+    attachments.store_attachments(
+        message,
+        [
+            {
+                "filename": "brief.pdf",
+                "content_type": "application/pdf",
+                "payload": b"%PDF-1.4\ntrailer\n%%EOF\n",
+            }
+        ],
+    )
+    result = classification.coerce_classification(_ORDER_RAW)
+
+    with patch("aivus_backend.projects.api.views_brief_v3._enqueue_first_reply"):
+        brief = classification.wire_lead(message, result)
+
+    assert brief is not None
+    linked = EmailAttachment.objects.get(message=message)
+    assert linked.brief_id == brief.id
+
+
 def test_wire_lead_no_duplicate_on_existing_project(account, vendor):
     thread = _thread(vendor)
     message = _inbound(account, thread)

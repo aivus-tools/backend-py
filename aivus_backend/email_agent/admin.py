@@ -6,6 +6,7 @@ from unfold.admin import ModelAdmin
 from aivus_backend.email_agent.models import ActionItem
 from aivus_backend.email_agent.models import AgentLog
 from aivus_backend.email_agent.models import EmailAccount
+from aivus_backend.email_agent.models import EmailAttachment
 from aivus_backend.email_agent.models import EmailMessage
 from aivus_backend.email_agent.models import EmailThread
 from aivus_backend.email_agent.models import NotificationChannel
@@ -40,6 +41,13 @@ class EmailMessageAdmin(ModelAdmin):
     )
     list_filter = ("direction", "intent", "is_auto_reply")
     search_fields = ("provider_message_id", "from_email", "subject")
+
+
+@admin.register(EmailAttachment)
+class EmailAttachmentAdmin(ModelAdmin):
+    list_display = ("filename", "mime_type", "size_bytes", "thread", "brief")
+    list_filter = ("mime_type",)
+    search_fields = ("filename",)
 
 
 @admin.register(ActionItem)

@@ -282,6 +282,51 @@ class ActionItem(models.Model):
         return f"{self.assignee}: {self.text[:40]}"
 
 
+def _email_attachment_upload_to(instance: EmailAttachment, filename: str) -> str:
+    return f"email_agent/{instance.thread_id}/{instance.id}/{filename}"
+
+
+class EmailAttachment(models.Model):
+    """An inbound attachment, anchored to its message and thread.
+
+    Stored on receipt even before a lead brief exists, so an attachment on a
+    thread that has no project yet is not lost. When the thread becomes a lead,
+    ``brief`` is linked so the brief pipeline can reach the files.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    message = models.ForeignKey(
+        EmailMessage,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    thread = models.ForeignKey(
+        EmailThread,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    brief = models.ForeignKey(
+        "projects.Brief",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="email_attachments",
+    )
+    file = models.FileField(upload_to=_email_attachment_upload_to)
+    filename = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=128)
+    size_bytes = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["thread", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.filename} ({self.mime_type})"
+
+
 class AgentLog(models.Model):
     """Human-readable log of agent actions per thread/project."""
 

@@ -22,6 +22,7 @@ from django.utils import timezone
 
 from aivus_backend.core.enums import BriefPromptSlug
 from aivus_backend.core.llm import call_llm_json
+from aivus_backend.email_agent import attachments
 from aivus_backend.email_agent import prompts
 from aivus_backend.email_agent import safety
 from aivus_backend.email_agent import triage
@@ -264,6 +265,7 @@ def wire_lead(message: EmailMessage, classification: Classification) -> Brief | 
                 document_language=classification.language
             )
             brief.document_language = classification.language
+        attachments.link_thread_attachments(thread.id, brief)
         AgentLog.objects.create(
             thread=thread,
             project=project,

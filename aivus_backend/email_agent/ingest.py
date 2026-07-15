@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from aivus_backend.email_agent import attachments
 from aivus_backend.email_agent.models import EmailDirection
 from aivus_backend.email_agent.models import EmailMessage
 from aivus_backend.email_agent.models import EmailThread
@@ -110,7 +111,7 @@ def store_inbound_message(
 ) -> EmailMessage | None:
     """Store an inbound message, deduped per account. Returns None on duplicate."""
     provider_message_id = parsed.get("message_id_header") or f"uid-{uid}"
-    _obj, created = EmailMessage.objects.get_or_create(
+    obj, created = EmailMessage.objects.get_or_create(
         account=account,
         provider_message_id=provider_message_id,
         defaults={
@@ -127,7 +128,10 @@ def store_inbound_message(
             "references": parsed.get("references", ""),
         },
     )
-    return _obj if created else None
+    if not created:
+        return None
+    attachments.store_attachments(obj, parsed.get("attachments") or [])
+    return obj
 
 
 def ingest_parsed(

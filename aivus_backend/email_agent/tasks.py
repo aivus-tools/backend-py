@@ -31,6 +31,7 @@ from aivus_backend.email_agent.models import VendorAgentProfile
 POLL_INTERVAL_SECONDS = 60
 LOCK_TTL_SECONDS = 300
 UNPROCESSED_SWEEP_LAG = timedelta(minutes=10)
+EMAIL_RETENTION_DAYS = 180
 
 
 @shared_task
@@ -179,6 +180,19 @@ def sweep_followups() -> int:
     pass sees them, and running both beats is harmless (each step is idempotent).
     """
     return followup.run_sweep(timezone.now())
+
+
+@shared_task
+def purge_old_messages() -> int:
+    """Beat entry: delete messages past the retention window (privacy, S3-13).
+
+    Client email is retained only as long as it is useful; a rolling window keeps
+    the store minimal. Deleting the message cascades its attachments. Threads and
+    their extracted memory/action items are kept — they are the durable record.
+    """
+    cutoff = timezone.now() - timedelta(days=EMAIL_RETENTION_DAYS)
+    deleted, _ = EmailMessage.objects.filter(created_at__lt=cutoff).delete()
+    return deleted
 
 
 @shared_task
