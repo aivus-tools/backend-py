@@ -83,6 +83,13 @@ def test_producer_email_is_validated(profile):
     assert profile.producer_email == "prod@vendor.com"
 
 
+def test_producer_email_over_column_width_is_rejected(profile):
+    long_email = f"{'a' * 250}@vendor.com"
+    assert len(long_email) > 254
+    with pytest.raises(onboarding.ProfileValidationError):
+        onboarding.apply_profile_update(profile, {"producerEmail": long_email})
+
+
 def test_working_hours_are_validated(profile):
     with pytest.raises(onboarding.ProfileValidationError):
         onboarding.apply_profile_update(

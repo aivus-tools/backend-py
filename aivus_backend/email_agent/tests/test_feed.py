@@ -153,6 +153,43 @@ def test_dashboard_surfaces_overdue_promise(account, vendor):
     assert feed.FOLLOWUP_OVERDUE_PROMISE in kinds
 
 
+def test_dashboard_overdue_promise_is_client_only(account, vendor):
+    thread = _thread(vendor)
+    ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.PRODUCER,
+        text="share estimate",
+        status=ActionItemStatus.OVERDUE,
+    )
+
+    result = feed.list_followups(vendor)
+
+    kinds = {item["kind"] for item in result["followups"]}
+    assert feed.FOLLOWUP_OVERDUE_PROMISE not in kinds
+
+
+def test_dashboard_overdue_promise_excludes_threads_with_pending_draft(account, vendor):
+    thread = _thread(vendor)
+    ActionItem.objects.create(
+        thread=thread,
+        assignee=ActionAssignee.CLIENT,
+        text="send footage",
+        status=ActionItemStatus.OVERDUE,
+    )
+    OutboundDraft.objects.create(
+        thread=thread,
+        kind=OutboundDraftKind.FOLLOW_UP,
+        body="already drafted",
+        status=OutboundDraftStatus.PENDING,
+    )
+
+    result = feed.list_followups(vendor)
+
+    kinds = [item["kind"] for item in result["followups"]]
+    assert feed.FOLLOWUP_OVERDUE_PROMISE not in kinds
+    assert feed.FOLLOWUP_STUCK_APPROVAL in kinds
+
+
 def test_dashboard_surfaces_stuck_approval(account, vendor):
     thread = _thread(vendor)
     draft = OutboundDraft.objects.create(

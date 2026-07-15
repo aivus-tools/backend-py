@@ -87,6 +87,30 @@ def test_list_drafts_returns_pending(api_client, vendor_user):
     assert body["drafts"][0]["variant"] == "A"
 
 
+def test_list_drafts_excludes_expired_overdue_drafts(api_client, vendor_user):
+    from aivus_backend.email_agent.models import EmailThread
+    from aivus_backend.email_agent.models import OutboundDraft
+    from aivus_backend.email_agent.models import OutboundDraftKind
+    from aivus_backend.email_agent.models import OutboundDraftStatus
+
+    user, vendor = vendor_user
+    thread = EmailThread.objects.create(
+        vendor=vendor, provider_thread_id="t-exp", client_email="jane@client.com"
+    )
+    OutboundDraft.objects.create(
+        thread=thread,
+        kind=OutboundDraftKind.FIRST_REPLY,
+        body="expired",
+        status=OutboundDraftStatus.EXPIRED,
+        metadata={"overdue": True},
+    )
+
+    response = api_client.get(reverse("email_agent_api:list-drafts"), **_auth(user))
+
+    assert response.status_code == 200
+    assert response.json()["drafts"] == []
+
+
 def test_approve_draft_sends(api_client, vendor_user):
     user, vendor = vendor_user
     draft = _draft(vendor)

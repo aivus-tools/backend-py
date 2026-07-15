@@ -19,6 +19,7 @@ from django.db.models import Max
 from django.db.models import Q
 from django.utils import timezone
 
+from aivus_backend.email_agent.models import ActionAssignee
 from aivus_backend.email_agent.models import ActionItemStatus
 from aivus_backend.email_agent.models import EmailDirection
 from aivus_backend.email_agent.models import EmailThread
@@ -137,13 +138,20 @@ def clamp_page(limit: str | None, offset: str | None) -> tuple[int, int]:
 
 
 def _overdue_promise_followups(vendor: Vendor, now: datetime) -> list[dict]:
+    # Only a CLIENT-owed overdue promise belongs here: the card is labelled as the
+    # client's and the "prepare follow-up" action only chases client promises, so a
+    # producer-owed overdue item would mislabel and offer an action that always
+    # 409s. A thread that already has a pending draft is dropped, mirroring the
+    # sweep's guard, so the card and its action disappear once a follow-up exists.
     threads = (
         EmailThread.objects.filter(
             vendor=vendor,
             deleted_at__isnull=True,
             action_items__status=ActionItemStatus.OVERDUE,
+            action_items__assignee=ActionAssignee.CLIENT,
         )
         .exclude(state__in=(ThreadState.PAUSED, ThreadState.HUMAN_TAKEOVER))
+        .exclude(drafts__status=OutboundDraftStatus.PENDING)
         .distinct()[:DASHBOARD_LIMIT]
     )
     return [

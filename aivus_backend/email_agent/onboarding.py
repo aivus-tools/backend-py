@@ -38,7 +38,9 @@ _HHMM_LENGTH = 5
 _MAX_HOUR = 23
 _MAX_MINUTE = 59
 _DAY_RANGE = range(1, 8)
-_PRODUCER_EMAIL_MAX_LENGTH = 320
+# Matches the EmailField column width; a longer-but-valid address would pass
+# Django's validator (it caps at 320) and then 500 on save into varchar(254).
+_PRODUCER_EMAIL_MAX_LENGTH = 254
 
 _INJECTION_ERROR = (
     "These instructions look unsafe (a possible attempt to override or extract "

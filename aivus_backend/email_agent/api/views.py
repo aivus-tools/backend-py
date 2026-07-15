@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -144,9 +143,15 @@ def list_drafts(request):
     vendor = _vendor_for_request(request)
     if vendor is None:
         return JsonResponse({"error": "Vendor not found"}, status=404)
+    # Only pending drafts are actionable; approve/edit/reject all reject a
+    # non-pending draft with a 409. An expired-overdue first reply is surfaced
+    # instead as its own follow-up dashboard bucket, so it never becomes a dead
+    # card here with buttons that can only fail.
     queryset = (
-        OutboundDraft.objects.filter(thread__vendor=vendor)
-        .filter(Q(status=OutboundDraftStatus.PENDING) | Q(metadata__overdue=True))
+        OutboundDraft.objects.filter(
+            thread__vendor=vendor,
+            status=OutboundDraftStatus.PENDING,
+        )
         .select_related("thread")
         .order_by("-created_at")
     )
