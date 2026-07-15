@@ -20,11 +20,16 @@ from aivus_backend.email_agent import reply
 from aivus_backend.email_agent import triage
 from aivus_backend.email_agent.events import NotificationEvent
 from aivus_backend.email_agent.ingest import ingest_parsed
+from aivus_backend.email_agent.models import ActionItem
+from aivus_backend.email_agent.models import ActionItemStatus
 from aivus_backend.email_agent.models import AgentLog
 from aivus_backend.email_agent.models import EmailAccount
 from aivus_backend.email_agent.models import EmailAccountStatus
+from aivus_backend.email_agent.models import EmailAttachment
 from aivus_backend.email_agent.models import EmailDirection
 from aivus_backend.email_agent.models import EmailMessage
+from aivus_backend.email_agent.models import OutboundDraft
+from aivus_backend.email_agent.models import OutboundDraftStatus
 from aivus_backend.email_agent.models import ThreadState
 from aivus_backend.email_agent.models import VendorAgentProfile
 
@@ -187,11 +192,33 @@ def purge_old_messages() -> int:
     """Beat entry: delete messages past the retention window (privacy, S3-13).
 
     Client email is retained only as long as it is useful; a rolling window keeps
-    the store minimal. Deleting the message cascades its attachments. Threads and
-    their extracted memory/action items are kept — they are the durable record.
+    the store minimal. Threads and their extracted memory/action items are kept —
+    they are the durable record. Messages still referenced by an open promise or a
+    non-terminal draft stay: cascading them ``SET_NULL``'s the source and the
+    vendor loses trace of what a live obligation came from. GCS blobs are removed
+    explicitly per attachment — ``FileField.delete()`` does not fire on cascade,
+    so a plain ``EmailMessage.delete()`` orphans the object storage forever.
     """
     cutoff = timezone.now() - timedelta(days=EMAIL_RETENTION_DAYS)
-    deleted, _ = EmailMessage.objects.filter(created_at__lt=cutoff).delete()
+    referenced_by_action = ActionItem.objects.filter(
+        status__in=(ActionItemStatus.OPEN, ActionItemStatus.OVERDUE),
+        source_message__isnull=False,
+    ).values_list("source_message_id", flat=True)
+    referenced_by_draft = OutboundDraft.objects.filter(
+        status__in=(OutboundDraftStatus.PENDING, OutboundDraftStatus.APPROVED),
+        in_reply_to_message__isnull=False,
+    ).values_list("in_reply_to_message_id", flat=True)
+    candidates = (
+        EmailMessage.objects.filter(created_at__lt=cutoff)
+        .exclude(id__in=referenced_by_action)
+        .exclude(id__in=referenced_by_draft)
+    )
+    attachments = EmailAttachment.objects.filter(message__in=candidates)
+    for attachment in attachments.iterator():
+        if attachment.file:
+            attachment.file.delete(save=False)
+    attachments.delete()
+    deleted, _ = candidates.delete()
     return deleted
 
 

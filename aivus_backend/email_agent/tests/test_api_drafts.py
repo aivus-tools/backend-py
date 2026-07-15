@@ -87,6 +87,49 @@ def test_list_drafts_returns_pending(api_client, vendor_user):
     assert body["drafts"][0]["variant"] == "A"
 
 
+def test_list_drafts_exposes_recipients_subject_and_preview(api_client, vendor_user):
+    from aivus_backend.email_agent.models import EmailDirection
+    from aivus_backend.email_agent.models import EmailMessage
+    from aivus_backend.email_agent.models import VendorAgentProfile
+
+    user, vendor = vendor_user
+    VendorAgentProfile.objects.create(vendor=vendor, producer_email="pm@vendor.com")
+    thread = EmailThread.objects.create(
+        vendor=vendor,
+        provider_thread_id="t-preview",
+        client_email="jane@client.com",
+        canonical_subject="Re: Re: Brand video",
+        participants=["jane@client.com", "boss@client.com", "agent@vendor.com"],
+    )
+    account = EmailAccount.objects.get(vendor=vendor, role=EmailAccountRole.AGENT)
+    inbound = EmailMessage.objects.create(
+        account=account,
+        thread=thread,
+        provider_message_id="<inbound@client>",
+        direction=EmailDirection.IN,
+        from_email="jane@client.com",
+        body_clean="Hi, can you send me a quote by Friday?",
+    )
+    OutboundDraft.objects.create(
+        thread=thread,
+        in_reply_to_message=inbound,
+        kind=OutboundDraftKind.FIRST_REPLY,
+        body="Sure thing.",
+        status=OutboundDraftStatus.PENDING,
+        metadata={"variant": "A"},
+    )
+
+    response = api_client.get(reverse("email_agent_api:list-drafts"), **_auth(user))
+
+    assert response.status_code == 200
+    draft = response.json()["drafts"][0]
+    assert draft["to"] == ["jane@client.com", "boss@client.com"]
+    assert draft["cc"] == ["pm@vendor.com"]
+    assert draft["subject"] == "Re: Brand video"
+    assert draft["inReplyToPreview"].startswith("Hi, can you send me a quote")
+    assert draft["inReplyToFrom"] == "jane@client.com"
+
+
 def test_list_drafts_excludes_expired_overdue_drafts(api_client, vendor_user):
     from aivus_backend.email_agent.models import EmailThread
     from aivus_backend.email_agent.models import OutboundDraft

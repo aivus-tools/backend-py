@@ -39,6 +39,24 @@ def _vendor_for_request(request):
     return Vendor.objects.filter(owner=user, deleted_at__isnull=True).first()
 
 
+def _agent_context(vendor: Vendor) -> tuple[str, str]:
+    """Resolve (producer_email, agent_email) for draft-view recipient pinning.
+
+    Kept on the view boundary so the whole draft page uses the same identity;
+    the sender pins the same pair at send time, so the preview cannot drift
+    from what actually gets sent.
+    """
+    profile = VendorAgentProfile.objects.filter(vendor=vendor).first()
+    producer_email = profile.producer_email if profile is not None else ""
+    agent_account = EmailAccount.objects.filter(
+        vendor=vendor,
+        role=EmailAccountRole.AGENT,
+        deleted_at__isnull=True,
+    ).first()
+    agent_email = agent_account.email if agent_account is not None else ""
+    return producer_email, agent_email
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_groups("VENDOR", "SYSTEM")
@@ -129,7 +147,9 @@ def _draft_for_request(request, draft_id):
     if vendor is None:
         return None, None
     draft = (
-        OutboundDraft.objects.select_related("thread", "thread__vendor")
+        OutboundDraft.objects.select_related(
+            "thread", "thread__vendor", "in_reply_to_message"
+        )
         .filter(id=draft_id, thread__vendor=vendor)
         .first()
     )
@@ -152,10 +172,20 @@ def list_drafts(request):
             thread__vendor=vendor,
             status=OutboundDraftStatus.PENDING,
         )
-        .select_related("thread")
+        .select_related("thread", "in_reply_to_message")
         .order_by("-created_at")
     )
-    return JsonResponse({"drafts": [serialize_draft(d) for d in queryset]})
+    producer_email, agent_email = _agent_context(vendor)
+    return JsonResponse(
+        {
+            "drafts": [
+                serialize_draft(
+                    d, producer_email=producer_email, agent_email=agent_email
+                )
+                for d in queryset
+            ]
+        }
+    )
 
 
 @csrf_exempt
@@ -180,8 +210,14 @@ def approve_draft(request, draft_id):
         sent = drafts_service.approve_draft(draft, edited_body=edited_body)
     except drafts_service.DraftError as error:
         return JsonResponse({"error": str(error)}, status=409)
+    producer_email, agent_email = _agent_context(vendor)
     return JsonResponse(
-        {"draft": serialize_draft(draft), "messageId": sent.provider_message_id}
+        {
+            "draft": serialize_draft(
+                draft, producer_email=producer_email, agent_email=agent_email
+            ),
+            "messageId": sent.provider_message_id,
+        }
     )
 
 
@@ -207,7 +243,14 @@ def edit_draft(request, draft_id):
         drafts_service.edit_draft(draft, body)
     except drafts_service.DraftError as error:
         return JsonResponse({"error": str(error)}, status=409)
-    return JsonResponse({"draft": serialize_draft(draft)})
+    producer_email, agent_email = _agent_context(vendor)
+    return JsonResponse(
+        {
+            "draft": serialize_draft(
+                draft, producer_email=producer_email, agent_email=agent_email
+            )
+        }
+    )
 
 
 @csrf_exempt
@@ -224,7 +267,14 @@ def reject_draft(request, draft_id):
         drafts_service.reject_draft(draft)
     except drafts_service.DraftError as error:
         return JsonResponse({"error": str(error)}, status=409)
-    return JsonResponse({"draft": serialize_draft(draft)})
+    producer_email, agent_email = _agent_context(vendor)
+    return JsonResponse(
+        {
+            "draft": serialize_draft(
+                draft, producer_email=producer_email, agent_email=agent_email
+            )
+        }
+    )
 
 
 @csrf_exempt
@@ -303,4 +353,12 @@ def prepare_followup(request, thread_id):
         draft = feed.prepare_followup(thread)
     except feed.FollowupError as error:
         return JsonResponse({"error": str(error)}, status=409)
-    return JsonResponse({"draft": serialize_draft(draft)}, status=201)
+    producer_email, agent_email = _agent_context(vendor)
+    return JsonResponse(
+        {
+            "draft": serialize_draft(
+                draft, producer_email=producer_email, agent_email=agent_email
+            )
+        },
+        status=201,
+    )
