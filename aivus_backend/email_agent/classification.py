@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from aivus_backend.users.models import Vendor
 
 CLASSIFY_TEMPERATURE = 0.2
-CLASSIFY_MAX_TOKENS = 1024
+CLASSIFY_MAX_TOKENS = 2048
 CONFIDENCE_THRESHOLD = 0.6
 
 _MAX_PROMISES_SHOWN = 20
@@ -238,15 +238,35 @@ def apply_classification(
     )
 
 
-def wire_lead(message: EmailMessage, classification: Classification) -> Brief | None:
-    """Create a canonical lead for a new order, once per thread, without a dup.
+_LEAD_INTENTS = frozenset({MessageIntent.ORDER, MessageIntent.FOLLOW_UP})
 
-    Only an ``order`` on a thread that has no project yet becomes a lead. The
-    thread row is locked and re-checked so a crashed retry or a second order on
-    the same thread cannot spawn a second lead. A question/follow-up/edits rides
-    the already-stitched thread and never creates one.
+
+def _signals_project(classification: Classification) -> bool:
+    """True when the classification body describes a project the vendor could work on.
+
+    The client can commit to a project inside a follow_up thread (a chase becomes
+    an order the moment they say what they want made), so intent alone is not
+    enough. ``wants`` is filled by the model with a one-line project description
+    exactly when there is one, so it is the canonical signal for lead creation.
     """
-    if classification.intent != MessageIntent.ORDER:
+    wants = (classification.extracted or {}).get("wants") or ""
+    return bool(str(wants).strip())
+
+
+def wire_lead(message: EmailMessage, classification: Classification) -> Brief | None:
+    """Create a canonical lead once the thread first signals a project.
+
+    Anything that names a project — a fresh order, or a follow_up where the
+    client finally states what they want made — becomes a lead. The thread row
+    is locked and re-checked so a crashed retry or a second signal on the same
+    thread cannot spawn a second lead. Pure questions/edits/OOO never create
+    one; they ride the already-stitched thread.
+    """
+    if classification.intent not in _LEAD_INTENTS:
+        return None
+    if classification.intent != MessageIntent.ORDER and not _signals_project(
+        classification
+    ):
         return None
 
     with transaction.atomic():
@@ -283,6 +303,14 @@ def reply_decision(message: EmailMessage, classification: Classification) -> str
     drafting a client reply. Only a confident, safe, actionable email drafts.
     """
     if message.thread.state == ThreadState.HUMAN_TAKEOVER:
+        return DECISION_SILENT
+    # A client that asks to defer the conversation ("come back next week", an
+    # OOO auto-reply, "напишите через неделю") sets pause_until; keep quiet
+    # regardless of intent — a helpful draft here reads as ignoring the ask.
+    # Checked on ``pause_until`` rather than ``thread.state == PAUSED`` because
+    # ``pause_thread`` refuses to overwrite HUMAN_TAKEOVER, so the state can
+    # stay unchanged while the request was legitimate.
+    if classification.pause_until is not None:
         return DECISION_SILENT
     if classification.intent in _SILENT_INTENTS:
         return DECISION_SILENT

@@ -1,6 +1,8 @@
 """Tests for the outbound reply builder and sender."""
 
 import uuid
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -49,6 +51,50 @@ def test_build_reply_mime_pins_recipients_and_headers():
     assert "<root@client>" in mime["References"]
     assert "<p@client>" in mime["References"]
     assert "[link removed]" in mime.get_content()
+
+
+def test_build_reply_mime_appends_quoted_history():
+    account = _agent_account()
+    parent = EmailMessage(
+        message_id_header="<p@client>",
+        from_email="jane@client.com",
+        body_clean=(
+            "Please share the portfolio at https://vilka.co.\nAlso, budget is ~5k."
+        ),
+    )
+    parent.created_at = datetime(2026, 7, 19, 15, 3, tzinfo=UTC)
+
+    mime = sender.build_reply_mime(
+        account,
+        _thread(),
+        "Sure, sending over.",
+        producer_email="ivan@vendor.com",
+        parent=parent,
+    )
+
+    body = mime.get_content()
+    assert "Sure, sending over." in body
+    assert "On 19 Jul 2026 at 15:03 UTC, jane@client.com wrote:" in body
+    assert "> Please share the portfolio at https://vilka.co." in body
+    # Quoted history is NOT run through sanitize_outbound — the client's own
+    # URL is preserved verbatim so the vendor sees exactly what was said.
+    assert "https://vilka.co" in body
+
+
+def test_build_reply_mime_omits_quote_when_no_parent():
+    account = _agent_account()
+
+    mime = sender.build_reply_mime(
+        account,
+        _thread(),
+        "Hi there.",
+        producer_email="ivan@vendor.com",
+        parent=None,
+    )
+
+    body = mime.get_content()
+    assert body.strip() == "Hi there."
+    assert "wrote:" not in body
 
 
 def test_monitor_mailbox_cannot_send():

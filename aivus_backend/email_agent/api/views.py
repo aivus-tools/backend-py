@@ -103,11 +103,8 @@ def connect_mailbox(request):
 
     try:
         mailbox.test_connection(account)
-    except mailbox.MailboxError:
-        return JsonResponse(
-            {"error": "Could not connect to the mailbox with these credentials"},
-            status=400,
-        )
+    except mailbox.MailboxError as error:
+        return JsonResponse({"error": str(error)}, status=400)
 
     account.save()
     return JsonResponse(serialize_account(account), status=201)

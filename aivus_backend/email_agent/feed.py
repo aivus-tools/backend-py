@@ -22,6 +22,7 @@ from django.utils import timezone
 from aivus_backend.email_agent.models import ActionAssignee
 from aivus_backend.email_agent.models import ActionItemStatus
 from aivus_backend.email_agent.models import EmailDirection
+from aivus_backend.email_agent.models import EmailMessage
 from aivus_backend.email_agent.models import EmailThread
 from aivus_backend.email_agent.models import OutboundDraft
 from aivus_backend.email_agent.models import OutboundDraftKind
@@ -37,6 +38,7 @@ DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 STALE_THREAD_AFTER = timedelta(days=2)
 DASHBOARD_LIMIT = 100
+_INBOUND_PREVIEW_MAX = 300
 
 FOLLOWUP_OVERDUE_PROMISE = "overdue_promise"
 FOLLOWUP_STUCK_APPROVAL = "stuck_approval"
@@ -46,6 +48,60 @@ FOLLOWUP_OVERDUE_FIRST_REPLY = "overdue_first_reply"
 
 def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _last_message_snapshot(thread_id) -> dict:
+    """Envelope + preview of the latest message on the thread (any direction).
+
+    Used on the CRM feed row so the vendor sees a Gmail-style preview of the
+    most recent turn without opening the thread. ``lastMessageDirection`` tells
+    the UI whether the preview is from the client (in) or from the agent (out).
+    Returns a stable shape with empty strings when the thread has no messages.
+    """
+    msg = (
+        EmailMessage.objects.filter(thread_id=thread_id).order_by("-created_at").first()
+    )
+    if msg is None:
+        return {
+            "lastMessageFrom": "",
+            "lastMessagePreview": "",
+            "lastMessageAt": None,
+            "lastMessageDirection": "",
+        }
+    preview_source = (msg.body_clean or "").strip()
+    return {
+        "lastMessageFrom": msg.from_email,
+        "lastMessagePreview": preview_source[:_INBOUND_PREVIEW_MAX],
+        "lastMessageAt": msg.created_at.isoformat(),
+        "lastMessageDirection": msg.direction,
+    }
+
+
+def _last_inbound_snapshot(thread_id) -> dict:
+    """Envelope + preview of the latest client-authored message on the thread.
+
+    Used by every follow-up dashboard card so the vendor sees which conversation
+    the card is about without having to open the thread. Returns a stable shape
+    with empty strings when no inbound exists yet, so the frontend can render
+    the block or skip it uniformly.
+    """
+    msg = (
+        EmailMessage.objects.filter(thread_id=thread_id, direction=EmailDirection.IN)
+        .order_by("-created_at")
+        .first()
+    )
+    if msg is None:
+        return {
+            "lastInboundFrom": "",
+            "lastInboundPreview": "",
+            "lastInboundAt": None,
+        }
+    preview_source = (msg.body_clean or "").strip()
+    return {
+        "lastInboundFrom": msg.from_email,
+        "lastInboundPreview": preview_source[:_INBOUND_PREVIEW_MAX],
+        "lastInboundAt": msg.created_at.isoformat(),
+    }
 
 
 def _thread_feed_queryset(vendor: Vendor):
@@ -100,6 +156,7 @@ def serialize_thread_summary(thread: EmailThread) -> dict:
         "overdueItemCount": overdue,
         "openItemCount": open_items,
         "lastActivityAt": last_activity.isoformat(),
+        **_last_message_snapshot(thread.id),
     }
 
 
@@ -161,6 +218,7 @@ def _overdue_promise_followups(vendor: Vendor, now: datetime) -> list[dict]:
             "subject": thread.canonical_subject,
             "clientEmail": thread.client_email,
             "detail": "A client promise is past due.",
+            **_last_inbound_snapshot(thread.id),
         }
         for thread in threads
     ]
@@ -184,6 +242,7 @@ def _stuck_approval_followups(vendor: Vendor, now: datetime) -> list[dict]:
             "clientEmail": draft.thread.client_email,
             "detail": "A drafted reply is waiting for your approval.",
             "since": draft.created_at.isoformat(),
+            **_last_inbound_snapshot(draft.thread_id),
         }
         for draft in drafts
     ]
@@ -207,6 +266,7 @@ def _overdue_first_reply_followups(vendor: Vendor, now: datetime) -> list[dict]:
             "subject": draft.thread.canonical_subject,
             "clientEmail": draft.thread.client_email,
             "detail": "A first-reply draft expired before it was approved.",
+            **_last_inbound_snapshot(draft.thread_id),
         }
         for draft in drafts
     ]
@@ -245,6 +305,7 @@ def _stale_thread_followups(vendor: Vendor, now: datetime) -> list[dict]:
             "clientEmail": thread.client_email,
             "detail": "No reply from the client for two days.",
             "since": _iso_or_none(getattr(thread, "last_at", None)),
+            **_last_inbound_snapshot(thread.id),
         }
         for thread in threads
     ]

@@ -30,6 +30,33 @@ def test_clean_body_empty():
     assert parsing.clean_body() == ""
 
 
+def test_html_to_text_preserves_block_line_breaks():
+    html = (
+        "<div><p>First line.</p><p>Second line.</p>"
+        "<p>Third line with a <br>hard break.</p></div>"
+    )
+    text = parsing.html_to_text(html)
+    assert "First line." in text
+    assert "Second line." in text
+    # Adjacent paragraphs must not collapse into a single word run.
+    assert "First line.Second line." not in text
+    assert "\n" in text
+    # <br> inside a paragraph becomes a newline too.
+    assert "hard break" in text
+    assert "a \nhard break" in text or "a\nhard break" in text
+
+
+def test_html_to_text_strips_scripts_and_styles():
+    html = (
+        "<html><head><style>body{color:red}</style></head>"
+        "<body><p>Hello</p><script>alert(1)</script></body></html>"
+    )
+    text = parsing.html_to_text(html)
+    assert text.strip().startswith("Hello")
+    assert "alert" not in text
+    assert "color:red" not in text
+
+
 def test_canonical_subject_strips_prefixes():
     assert parsing.canonical_subject("Re: Fwd: RE:  New project") == "New project"
     assert parsing.canonical_subject("New project") == "New project"

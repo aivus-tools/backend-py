@@ -14,7 +14,10 @@ pytestmark = pytest.mark.django_db
 ENQUEUE = "aivus_backend.projects.api.views_brief_v3._enqueue_first_reply"
 
 
-def test_email_lead_creates_brief_and_project_without_first_reply(vendor):
+def test_email_lead_creates_brief_and_project_with_first_reply(vendor):
+    # The email agent creates the brief on the same code path as public/wix
+    # leads, so the first AI turn fires here too — otherwise a client clicking
+    # the brief link from the agent's email lands on an empty chat.
     thread = EmailThread.objects.create(vendor=vendor, provider_thread_id="t-lead")
 
     with patch(ENQUEUE) as enqueue:
@@ -26,10 +29,11 @@ def test_email_lead_creates_brief_and_project_without_first_reply(vendor):
             thread=thread,
         )
 
-    enqueue.assert_not_called()
+    enqueue.assert_called_once()
+    brief.refresh_from_db()
     assert brief.source == BriefSource.EMAIL
     assert brief.contact_email == "client@example.com"
-    assert brief.pending_task_id == ""
+    assert brief.pending_task_id != ""
     assert project is not None
     thread.refresh_from_db()
     assert thread.project_id == project.id

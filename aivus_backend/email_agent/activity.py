@@ -72,11 +72,19 @@ def render_log_entry(log: AgentLog) -> str:
     return log.event.replace("_", " ").capitalize()
 
 
+_MESSAGE_PREVIEW_MAX = 300
+
+
 def _message_event(message: EmailMessage) -> dict:
     label = "Received email" if message.direction == EmailDirection.IN else "Reply sent"
+    preview_source = (message.body_clean or "").strip()
     return {
         "kind": "message",
         "text": f"{label}: {message.subject or '(no subject)'}",
+        "direction": message.direction,
+        "from": message.from_email,
+        "subject": message.subject,
+        "preview": preview_source[:_MESSAGE_PREVIEW_MAX],
         "createdAt": message.created_at.isoformat(),
     }
 

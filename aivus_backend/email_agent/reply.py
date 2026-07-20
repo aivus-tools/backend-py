@@ -27,6 +27,7 @@ from aivus_backend.email_agent import prompts
 from aivus_backend.email_agent import safety
 from aivus_backend.email_agent.events import NotificationEvent
 from aivus_backend.email_agent.models import AgentLog
+from aivus_backend.email_agent.models import MessageIntent
 from aivus_backend.email_agent.models import OutboundDraft
 from aivus_backend.email_agent.models import OutboundDraftKind
 from aivus_backend.email_agent.models import OutboundDraftStatus
@@ -105,9 +106,11 @@ def decide_variant(classification: Classification, *, has_brief_link: bool) -> s
     extracted = classification.extracted
     if classification.urgent or (extracted.get("budget") and extracted.get("deadline")):
         return VARIANT_C
-    missing = extracted.get("missing")
-    wants = extracted.get("wants")
-    if (missing or not wants) and has_brief_link:
+    # Only send the brief link on a fresh commitment (intent=order); a follow_up
+    # is a chase or a defer, and edits/questions come with different needs. In
+    # those the client did not ask for a brief and pushing one reads as tone-deaf
+    # — degrade to variant A (deferential ack) instead.
+    if classification.intent == MessageIntent.ORDER and has_brief_link:
         return VARIANT_B
     return VARIANT_A
 
@@ -146,7 +149,13 @@ def propose_reply(
     message: EmailMessage, classification: Classification
 ) -> tuple[ReplyProposal | None, dict]:
     """Draft a reply body, or None when it must escalate instead."""
+    # wire_lead runs earlier in the orchestrator and may have attached a fresh
+    # project/brief to the thread. The FK on ``message`` is cached on the
+    # instance, so refresh it here — otherwise ``build_brief_link`` reads a
+    # stale ``project=None`` and the reply degrades to variant A.
+    message.refresh_from_db(fields=["thread"])
     thread = message.thread
+    thread.refresh_from_db()
     profile = _profile_for(thread)
     instructions = prompts.compile_vendor_instructions(profile)
     body = prompts.load_prompt_body(BriefPromptSlug.EMAIL_REPLY)

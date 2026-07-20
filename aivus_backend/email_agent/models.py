@@ -144,7 +144,7 @@ class EmailThread(models.Model):
         on_delete=models.CASCADE,
         related_name="email_threads",
     )
-    provider_thread_id = models.CharField(max_length=128, db_index=True)
+    provider_thread_id = models.CharField(max_length=998, db_index=True)
     project = models.ForeignKey(
         "projects.Project",
         on_delete=models.SET_NULL,
@@ -154,7 +154,7 @@ class EmailThread(models.Model):
     )
     client_email = models.EmailField(blank=True, default="")
     client_name = models.CharField(max_length=255, blank=True, default="")
-    canonical_subject = models.CharField(max_length=512, blank=True, default="")
+    canonical_subject = models.CharField(max_length=998, blank=True, default="")
     state = models.CharField(
         max_length=16,
         choices=ThreadState.choices,
@@ -200,12 +200,12 @@ class EmailMessage(models.Model):
         on_delete=models.CASCADE,
         related_name="messages",
     )
-    provider_message_id = models.CharField(max_length=128)
+    provider_message_id = models.CharField(max_length=998)
     direction = models.CharField(max_length=8, choices=EmailDirection.choices)
     from_email = models.CharField(max_length=320, blank=True, default="")
     to_emails = models.JSONField(default=list, blank=True)
     cc_emails = models.JSONField(default=list, blank=True)
-    subject = models.CharField(max_length=512, blank=True, default="")
+    subject = models.CharField(max_length=998, blank=True, default="")
     body_clean = models.TextField(blank=True, default="")
     headers = models.JSONField(default=dict, blank=True)
     intent = models.CharField(
@@ -215,8 +215,8 @@ class EmailMessage(models.Model):
         default="",
     )
     is_auto_reply = models.BooleanField(default=False)
-    message_id_header = models.CharField(max_length=512, blank=True, default="")
-    in_reply_to = models.CharField(max_length=512, blank=True, default="")
+    message_id_header = models.CharField(max_length=998, blank=True, default="")
+    in_reply_to = models.CharField(max_length=998, blank=True, default="")
     references = models.TextField(blank=True, default="")
     processed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -312,7 +312,7 @@ class EmailAttachment(models.Model):
         blank=True,
         related_name="email_attachments",
     )
-    file = models.FileField(upload_to=_email_attachment_upload_to)
+    file = models.FileField(upload_to=_email_attachment_upload_to, max_length=500)
     filename = models.CharField(max_length=255)
     mime_type = models.CharField(max_length=128)
     size_bytes = models.BigIntegerField(default=0)
@@ -470,7 +470,7 @@ class OutboundDraft(models.Model):
         choices=OutboundDraftStatus.choices,
         default=OutboundDraftStatus.PENDING,
     )
-    provider_draft_id = models.CharField(max_length=128, blank=True, default="")
+    provider_draft_id = models.CharField(max_length=998, blank=True, default="")
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

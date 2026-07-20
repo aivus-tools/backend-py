@@ -27,6 +27,27 @@ if TYPE_CHECKING:
 
 _REFERENCES_MAX = 2000
 _MONITOR_CANNOT_SEND = "Monitoring mailbox must never send"
+_QUOTED_BODY_MAX_CHARS = 4000
+
+
+def _build_quoted_history(parent: EmailMessage) -> str:
+    """Render an inline quoted-history block for the parent inbound message.
+
+    The quote is client-authored text — a verbatim reproduction of what the
+    recipient already has in their sent folder. Not sanitised: recipients are
+    pinned from ``thread.participants``, so nothing new is ever leaked to a
+    third party, and stripping URLs from the client's own words is confusing
+    (the vendor sees "[link removed]" on links the client themselves sent).
+    Bounded length so a huge inbound cannot balloon the outbound.
+    """
+    body_source = (parent.body_clean or "").strip()
+    if not body_source:
+        return ""
+    truncated = body_source[:_QUOTED_BODY_MAX_CHARS]
+    quoted = "\n".join(f"> {line}" if line else ">" for line in truncated.splitlines())
+    sent_at = parent.created_at.strftime("%d %b %Y at %H:%M UTC")
+    sender = parent.from_email or "the client"
+    return f"On {sent_at}, {sender} wrote:\n{quoted}"
 
 
 def _references(parent: EmailMessage | None) -> str:
@@ -80,7 +101,10 @@ def build_reply_mime(  # noqa: PLR0913
     message["Auto-Submitted"] = "auto-replied"
     message["X-Auto-Response-Suppress"] = "All"
 
-    message.set_content(safety.sanitize_outbound(body, allowed_urls))
+    sanitized = safety.sanitize_outbound(body, allowed_urls)
+    quoted = _build_quoted_history(parent) if parent is not None else ""
+    final_body = f"{sanitized}\n\n{quoted}" if quoted else sanitized
+    message.set_content(final_body)
     return message
 
 

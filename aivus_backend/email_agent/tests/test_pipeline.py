@@ -88,13 +88,14 @@ def test_wire_lead_creates_lead_for_order(account, vendor):
         brief = classification.wire_lead(message, result)
 
     assert brief is not None
+    brief.refresh_from_db()
     assert brief.source == BriefSource.EMAIL
     assert brief.document_language == "ru"
-    assert brief.pending_task_id == ""
+    assert brief.pending_task_id != ""
     thread.refresh_from_db()
     assert thread.project_id is not None
     assert AgentLog.objects.filter(thread=thread, event="lead_created").exists()
-    enqueue.assert_not_called()
+    enqueue.assert_called_once()
 
 
 def test_wire_lead_links_thread_attachments(account, vendor):
@@ -138,14 +139,41 @@ def test_wire_lead_no_duplicate_on_existing_project(account, vendor):
     assert Brief.objects.filter(source=BriefSource.EMAIL).count() == 1
 
 
-@pytest.mark.parametrize("intent", ["question", "follow_up", "edits"])
-def test_wire_lead_skips_non_orders(account, vendor, intent):
+@pytest.mark.parametrize("intent", ["question", "edits"])
+def test_wire_lead_skips_pure_non_project_intents(account, vendor, intent):
     thread = _thread(vendor)
     message = _inbound(account, thread)
     result = classification.coerce_classification({**_ORDER_RAW, "intent": intent})
 
     assert classification.wire_lead(message, result) is None
     assert not Brief.objects.filter(source=BriefSource.EMAIL).exists()
+
+
+def test_wire_lead_creates_on_follow_up_that_signals_project(account, vendor):
+    # A follow_up that finally names a project (the client returns and asks for
+    # the brief) becomes a lead — otherwise the vendor's brief link never gets
+    # attached and every deferred client stays as a chase forever.
+    thread = _thread(vendor)
+    message = _inbound(account, thread)
+    result = classification.coerce_classification({**_ORDER_RAW, "intent": "follow_up"})
+
+    with patch("aivus_backend.projects.api.views_brief_v3._enqueue_first_reply"):
+        brief = classification.wire_lead(message, result)
+
+    assert brief is not None
+    thread.refresh_from_db()
+    assert thread.project_id is not None
+
+
+def test_wire_lead_skips_follow_up_without_wants(account, vendor):
+    thread = _thread(vendor)
+    message = _inbound(account, thread)
+    empty_extracted = {"wants": "", "deadline": "", "budget": "", "missing": ""}
+    result = classification.coerce_classification(
+        {**_ORDER_RAW, "intent": "follow_up", "extracted": empty_extracted}
+    )
+
+    assert classification.wire_lead(message, result) is None
 
 
 def test_process_order_creates_lead_and_drafts(account, vendor):

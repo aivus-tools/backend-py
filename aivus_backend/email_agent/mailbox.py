@@ -14,6 +14,8 @@ import smtplib
 from datetime import date
 from datetime import timedelta
 from email import message_from_bytes
+from email.header import decode_header
+from email.header import make_header
 from email.utils import getaddresses
 from email.utils import parseaddr
 from typing import TYPE_CHECKING
@@ -45,7 +47,15 @@ PROVIDER_HOSTS = {
 
 DEFAULT_FOLDER = "INBOX"
 RESYNC_DAYS = 14
-_AUTH_FAIL = "Mailbox login rejected"
+_IMAP_AUTH_FAIL = (
+    "IMAP login rejected — check the app password "
+    "and that IMAP is enabled in Gmail settings."
+)
+_SMTP_AUTH_FAIL = (
+    "SMTP login rejected — the app password did not work for sending. "
+    "In Google Workspace, admin must allow SMTP AUTH (Apps → Google Workspace → "
+    "Gmail → End User Access), or use a personal Gmail with 2FA + app password."
+)
 _UNKNOWN_PROVIDER = "Unknown mailbox provider"
 
 
@@ -63,7 +73,7 @@ def open_imap(account: EmailAccount) -> imapclient.IMAPClient:
     try:
         client.login(account.email, account.credential)
     except IMAPClientError as error:
-        raise MailboxAuthError(_AUTH_FAIL) from error
+        raise MailboxAuthError(_IMAP_AUTH_FAIL) from error
     return client
 
 
@@ -75,7 +85,7 @@ def open_smtp(account: EmailAccount) -> smtplib.SMTP_SSL:
         server.login(account.email, account.credential)
     except smtplib.SMTPAuthenticationError as error:
         server.close()
-        raise MailboxAuthError(_AUTH_FAIL) from error
+        raise MailboxAuthError(_SMTP_AUTH_FAIL) from error
     return server
 
 
@@ -187,6 +197,22 @@ def _collect_headers(message: Message) -> dict:
     return collected
 
 
+def _decoded(raw: str) -> str:
+    """Decode a MIME-encoded header (``=?utf-8?B?...?=``) to a plain string.
+
+    Real mailboxes deliver non-ASCII subjects and display names as RFC 2047
+    encoded-words. Storing the raw form breaks the LLM prompt (it sees gibberish
+    for the subject), the CRM feed (base64 on the card), and thread stitching by
+    canonical subject (encoded form does not match the decoded form of a reply).
+    """
+    if not raw:
+        return ""
+    try:
+        return str(make_header(decode_header(raw)))
+    except (UnicodeDecodeError, LookupError, ValueError):
+        return raw
+
+
 def parse_raw_message(raw: bytes) -> dict:
     """Parse a raw RFC822 message into the fields EmailMessage stores."""
     message = message_from_bytes(raw)
@@ -194,9 +220,13 @@ def parse_raw_message(raw: bytes) -> dict:
 
     text_body, html_body, attachments = _walk_parts(message)
     body_clean = parsing.clean_body(text=text_body, html=html_body)
-    threading = parsing.threading_fields(headers)
+    subject_decoded = _decoded(message.get("Subject", ""))
+    threading_headers = dict(headers)
+    threading_headers["subject"] = subject_decoded
+    threading = parsing.threading_fields(threading_headers)
 
-    from_name, from_email = parseaddr(message.get("From", ""))
+    from_raw_name, from_email = parseaddr(message.get("From", ""))
+    from_name = _decoded(from_raw_name)
     to_list = [addr for _name, addr in getaddresses(message.get_all("To", []))]
     cc_list = [addr for _name, addr in getaddresses(message.get_all("Cc", []))]
 
@@ -205,7 +235,7 @@ def parse_raw_message(raw: bytes) -> dict:
         "from_name": from_name,
         "to_emails": to_list,
         "cc_emails": cc_list,
-        "subject": message.get("Subject", ""),
+        "subject": subject_decoded,
         "body_clean": body_clean,
         "headers": headers,
         "message_id_header": threading["message_id_header"],

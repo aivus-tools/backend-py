@@ -87,14 +87,19 @@ def stitch_thread(account: EmailAccount, parsed: dict) -> EmailThread:
             _merge_participants(match, parsed)
             return match
 
-    return EmailThread.objects.create(
+    thread, created = EmailThread.objects.get_or_create(
         vendor=vendor,
         provider_thread_id=_thread_id(parsed),
-        client_email=client_email,
-        client_name=parsed.get("from_name", ""),
-        canonical_subject=canonical,
-        participants=_participants(parsed),
+        defaults={
+            "client_email": client_email,
+            "client_name": parsed.get("from_name", ""),
+            "canonical_subject": canonical,
+            "participants": _participants(parsed),
+        },
     )
+    if not created:
+        _merge_participants(thread, parsed)
+    return thread
 
 
 def _thread_id(parsed: dict) -> str:

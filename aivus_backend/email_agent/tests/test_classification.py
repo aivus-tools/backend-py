@@ -296,6 +296,14 @@ def test_reply_decision_escalates_when_reason_set(account, vendor):
     )
 
 
+def test_reply_decision_silent_when_pause_until_set(account, vendor):
+    message = _message(account, vendor)
+    result = _classification(pause_until="2026-08-01")
+    assert classification.reply_decision(message, result) == (
+        classification.DECISION_SILENT
+    )
+
+
 def test_reply_decision_silent_on_human_takeover(account, vendor):
     message = _message(account, vendor)
     message.thread.state = ThreadState.HUMAN_TAKEOVER

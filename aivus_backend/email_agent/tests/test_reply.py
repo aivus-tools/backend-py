@@ -108,9 +108,16 @@ def test_decide_variant_a_when_no_link():
     assert reply.decide_variant(result, has_brief_link=False) == reply.VARIANT_A
 
 
-def test_decide_variant_b_when_missing_and_link():
-    result = _classification(extracted={"wants": "", "missing": "budget"})
+def test_decide_variant_b_when_order_and_link():
+    result = _classification(intent="order", extracted={"wants": "brand video"})
     assert reply.decide_variant(result, has_brief_link=True) == reply.VARIANT_B
+
+
+def test_decide_variant_a_when_follow_up_even_with_link():
+    # A follow-up is a chase or a defer, never a fresh commitment — pushing the
+    # brief link on it reads as tone-deaf, degrade to an acknowledgement.
+    result = _classification(intent="follow_up", extracted={"wants": "brief"})
+    assert reply.decide_variant(result, has_brief_link=True) == reply.VARIANT_A
 
 
 def test_decide_variant_c_when_urgent():
