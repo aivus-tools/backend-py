@@ -77,6 +77,11 @@ urlpatterns = [
     ),
     # Vendors API (pre-vendors)
     path("api/v1/", include("aivus_backend.vendors.api.urls", namespace="vendors_api")),
+    # Email agent API (Stage 3)
+    path(
+        "api/v1/email-agent/",
+        include("aivus_backend.email_agent.api.urls", namespace="email_agent_api"),
+    ),
     # TinyMCE
     path("tinymce/", include("tinymce.urls")),
     # Your stuff: custom urls includes go here

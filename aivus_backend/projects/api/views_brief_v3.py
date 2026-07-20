@@ -1732,7 +1732,13 @@ def _create_inbound_brief(  # noqa: PLR0913
                 },
             )
 
-    brief_id_str = str(brief.id)
+    _enqueue_first_reply(str(brief.id), task_id, file_specs)
+    return brief, task_id, token
+
+
+def _enqueue_first_reply(
+    brief_id_str: str, task_id: str, file_specs: list[dict]
+) -> None:
     if file_specs:
         signature = chain(
             import_wix_attachments_task.s(brief_id_str, file_specs),
@@ -1751,7 +1757,6 @@ def _create_inbound_brief(  # noqa: PLR0913
             link_error=clear_brief_pending_task.si(brief_id_str)
         )
     )
-    return brief, task_id, token
 
 
 @csrf_exempt

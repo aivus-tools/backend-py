@@ -12,6 +12,7 @@ dependencies = [
     { name = "celery" },
     { name = "collectfasta" },
     { name = "crispy-bootstrap5" },
+    { name = "cryptography" },
     { name = "django" },
     { name = "django-allauth", extra = ["mfa"] },
     { name = "django-anymail", extra = ["resend"] },
@@ -29,6 +30,8 @@ dependencies = [
     { name = "google-genai" },
     { name = "gunicorn" },
     { name = "hiredis" },
+    { name = "imapclient" },
+    { name = "mail-parser-reply" },
     { name = "nh3" },
     { name = "openai" },
     { name = "openpyxl" },
@@ -37,6 +40,7 @@ dependencies = [
     { name = "python-docx" },
     { name = "python-magic" },
     { name = "python-slugify" },
+    { name = "quotequail" },
     { name = "redis" },
     { name = "sentry-sdk" },
     { name = "weasyprint" },
@@ -72,6 +76,7 @@ requires-dist = [
     { name = "celery", specifier = "==5.5.3" },
     { name = "collectfasta", specifier = "==3.3.1" },
     { name = "crispy-bootstrap5", specifier = "==2025.6" },
+    { name = "cryptography", specifier = ">=44.0.0" },
     { name = "django", specifier = "==5.2.7" },
     { name = "django-allauth", extras = ["mfa"], specifier = "==65.12.1" },
     { name = "django-anymail", extras = ["resend"], specifier = "==13.1" },
@@ -89,6 +94,8 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "gunicorn", specifier = "==23.0.0" },
     { name = "hiredis", specifier = "==3.3.0" },
+    { name = "imapclient", specifier = ">=3.0.1" },
+    { name = "mail-parser-reply", specifier = ">=1.36" },
     { name = "nh3", specifier = ">=0.2.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "openpyxl", specifier = ">=3.1.0" },
@@ -97,6 +104,7 @@ requires-dist = [
     { name = "python-docx", specifier = ">=1.1.2" },
     { name = "python-magic", specifier = ">=0.4.27" },
     { name = "python-slugify", specifier = "==8.0.4" },
+    { name = "quotequail", specifier = ">=0.3.0" },
     { name = "redis", specifier = "==6.4.0" },
     { name = "sentry-sdk", specifier = "==2.42.1" },
     { name = "weasyprint", specifier = ">=62.0" },
@@ -1310,6 +1318,15 @@ wheels = [
 ]
 
 [[package]]
+name = "imapclient"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/79/8138f8c91e791f49cf4c2269b1eaaaddb93013d162e92ddc249b84d38105/imapclient-3.1.0.tar.gz", hash = "sha256:b0413a516ffcc4b4d69f2c611c0e95da57968edf5a5c78ac82d1bf882305facc", size = 199675, upload-time = "2026-01-17T18:50:12.186Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/a8/a0f86ed51f792d9e6afcc062db2766033be7d1028d1fd5deaf38b075430a/imapclient-3.1.0-py2.py3-none-any.whl", hash = "sha256:34c192ffe82936e940a998ac89c474296942cd7c4f6c208f0fccfcd972946038", size = 182536, upload-time = "2026-01-17T18:49:09.105Z" },
+]
+
+[[package]]
 name = "iniconfig"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1475,6 +1492,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/f2/1a2b9f1b7a49d45495369be7ef9ad05b262930f2eab3e3145706fca8083f/lxml-6.1.1-cp313-cp313-win32.whl", hash = "sha256:3483644525531e1d5762b0c44a8e18b6efba321b6dcf8a8952de10b037618bca", size = 3596903, upload-time = "2026-05-18T19:17:29.863Z" },
     { url = "https://files.pythonhosted.org/packages/e6/99/f4ffb024f238eec2131aaa09f3278fb6129cf892741bf68e1fc1afb8c100/lxml-6.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:a10bd2fd62e8ce916ececb342f348f190724a098c1faa056fdfb2a22ad5e8660", size = 3995869, upload-time = "2026-05-18T19:18:02.596Z" },
     { url = "https://files.pythonhosted.org/packages/d1/53/70eb8c5c6037f27448f1e3c54ebede9545a801ae63f0a7254afca4fe8e45/lxml-6.1.1-cp313-cp313-win_arm64.whl", hash = "sha256:424aa57aca0897eb922aef34395bd1289b3b6f04e6bae20ea123c0c7e333cffc", size = 3658490, upload-time = "2026-05-19T19:22:53.846Z" },
+]
+
+[[package]]
+name = "mail-parser-reply"
+version = "1.36"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/8b/fc0eaa365f9509e3761beb933d5964eec3f133225c3d081290a511395464/mail_parser_reply-1.36.tar.gz", hash = "sha256:7f451c583c6c599bc933531a6f783fe4d1a26447ebd40382678417dbb92e100e", size = 14412, upload-time = "2025-12-01T15:15:40.731Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/5d/99bd9fb9556c54a66860ead493b9d9d77cc8d7a2c52aa76d995c50b73373/mail_parser_reply-1.36-py3-none-any.whl", hash = "sha256:81395a4d8a0858509c875e6bbb7b004d53d70c7cd92204fe34a9926c55e4ef03", size = 12279, upload-time = "2025-12-01T15:15:39.542Z" },
 ]
 
 [[package]]
@@ -2038,6 +2064,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
 ]
+
+[[package]]
+name = "quotequail"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e1/8a/50356e1becb49e78693bb4944916abf500e1dc094062ad2da9b7140a51c4/quotequail-0.5.0.tar.gz", hash = "sha256:560e18872f2a07b6fd2588100bd8b475d9e4fcf3a8c7f2187bb7e29e25683b1c", size = 24008, upload-time = "2026-05-28T12:59:15.299Z" }
 
 [[package]]
 name = "redis"

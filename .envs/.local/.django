@@ -51,3 +51,7 @@ ANTHROPIC_API_KEY=
 # Вставь реальный ключ — письма пойдут через Resend на указанный адрес.
 RESEND_API_KEY=
 DJANGO_DEFAULT_FROM_EMAIL="Aivus <noreply@aivus.co>"
+
+# Email agent (Stage 3): symmetric encryption key ring for stored app-passwords.
+# Newest key first; add a new key at position [0] to rotate.
+FERNET_KEYS=8jrkQPHoIWXFZit3aNO2rt3sMve4M9Or5yXxHa5lcog=

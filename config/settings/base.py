@@ -68,6 +68,14 @@ E2E_CONFIRMATION_TOKEN_ENABLED = env.bool(
 )
 E2E_CONFIRMATION_TOKEN_SECRET = env("E2E_CONFIRMATION_TOKEN_SECRET", default="")
 
+# EMAIL AGENT (Stage 3)
+# ------------------------------------------------------------------------------
+# Fernet keys for encrypting secrets at rest (OAuth refresh tokens), newest key
+# first: the first key encrypts new writes, every key can decrypt. Rotate by
+# prepending a new key, then run `manage.py reencrypt_secrets`. Must be identical
+# across django, celeryworker and celerybeat, and stable across deploys.
+FERNET_KEYS = env.list("FERNET_KEYS", default=[])
+
 # AIVUS BRIEF AI
 # ------------------------------------------------------------------------------
 # Toggle whether the cumulative LLM cost of a brief is visible to every client
@@ -123,6 +131,7 @@ LOCAL_APPS = [
     "aivus_backend.catalog",
     "aivus_backend.projects",
     "aivus_backend.vendors",
+    "aivus_backend.email_agent",
     # Your stuff: custom apps go here
 ]
 # https://docs.djangoproject.com/en/dev/ref/settings/#installed-apps

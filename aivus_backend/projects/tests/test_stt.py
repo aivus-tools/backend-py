@@ -66,12 +66,12 @@ def test_language_to_bcp47_falls_back_to_en_us_for_unknown():
 
 
 def test_strip_mime_params_drops_codecs_segment():
-    assert stt._strip_mime_params("audio/webm;codecs=opus") == "audio/webm"  # noqa: SLF001
-    assert stt._strip_mime_params("AUDIO/MP4") == "audio/mp4"  # noqa: SLF001
+    assert stt._strip_mime_params("audio/webm;codecs=opus") == "audio/webm"
+    assert stt._strip_mime_params("AUDIO/MP4") == "audio/mp4"
 
 
 def test_build_decoding_config_explicit_for_webm():
-    explicit, auto = stt._build_decoding_config("audio/webm;codecs=opus")  # noqa: SLF001
+    explicit, auto = stt._build_decoding_config("audio/webm;codecs=opus")
     assert auto is None
     assert explicit is not None
     assert (
@@ -81,7 +81,7 @@ def test_build_decoding_config_explicit_for_webm():
 
 
 def test_build_decoding_config_explicit_for_ogg():
-    explicit, auto = stt._build_decoding_config("audio/ogg")  # noqa: SLF001
+    explicit, auto = stt._build_decoding_config("audio/ogg")
     assert auto is None
     assert explicit is not None
     assert (
@@ -90,7 +90,7 @@ def test_build_decoding_config_explicit_for_ogg():
 
 
 def test_build_decoding_config_auto_for_mp4():
-    explicit, auto = stt._build_decoding_config("audio/mp4")  # noqa: SLF001
+    explicit, auto = stt._build_decoding_config("audio/mp4")
     assert explicit is None
     assert auto is not None
 
@@ -156,11 +156,11 @@ def test_build_phrase_hints_rejects_overlong_values(client_profile):
 
 
 def test_build_adaptation_returns_none_for_empty():
-    assert stt._build_adaptation([], []) is None  # noqa: SLF001
+    assert stt._build_adaptation([], []) is None
 
 
 def test_build_adaptation_packs_phrases_with_separate_boost():
-    adaptation = stt._build_adaptation(["Acme"], ["RFP"])  # noqa: SLF001
+    adaptation = stt._build_adaptation(["Acme"], ["RFP"])
     assert adaptation is not None
     phrases = adaptation.phrase_sets[0].inline_phrase_set.phrases
     by_value = {p.value: p.boost for p in phrases}
@@ -170,18 +170,15 @@ def test_build_adaptation_packs_phrases_with_separate_boost():
 
 def test_classify_invalid_argument_duration():
     assert (
-        stt._classify_invalid_argument("audio duration exceeds limit")  # noqa: SLF001
+        stt._classify_invalid_argument("audio duration exceeds limit")
         == stt.ERROR_AUDIO_TOO_LONG
     )
-    assert (
-        stt._classify_invalid_argument("longer than 60s")  # noqa: SLF001
-        == stt.ERROR_AUDIO_TOO_LONG
-    )
+    assert stt._classify_invalid_argument("longer than 60s") == stt.ERROR_AUDIO_TOO_LONG
 
 
 def test_classify_invalid_argument_default_to_unsupported():
     assert (
-        stt._classify_invalid_argument("invalid encoding")  # noqa: SLF001
+        stt._classify_invalid_argument("invalid encoding")
         == stt.ERROR_UNSUPPORTED_FORMAT
     )
 

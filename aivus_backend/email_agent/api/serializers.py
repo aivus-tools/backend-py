@@ -1,0 +1,103 @@
+"""Email-agent API serializers (functions returning dict)."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from aivus_backend.email_agent import parsing
+from aivus_backend.email_agent import safety
+
+if TYPE_CHECKING:
+    from aivus_backend.email_agent.models import ActionItem
+    from aivus_backend.email_agent.models import EmailAccount
+    from aivus_backend.email_agent.models import OutboundDraft
+    from aivus_backend.email_agent.models import VendorAgentProfile
+
+_INBOUND_PREVIEW_MAX = 400
+
+
+def serialize_account(account: EmailAccount) -> dict:
+    """Public view of a connected mailbox (never exposes the credential)."""
+    return {
+        "id": str(account.id),
+        "role": account.role,
+        "email": account.email,
+        "provider": account.provider,
+        "status": account.status,
+        "lastSyncedAt": (
+            account.last_synced_at.isoformat() if account.last_synced_at else None
+        ),
+    }
+
+
+def serialize_draft(
+    draft: OutboundDraft,
+    *,
+    producer_email: str = "",
+    agent_email: str = "",
+) -> dict:
+    """Vendor-facing view of an outbound draft awaiting review.
+
+    The reviewer must see who the reply will go to and what the client actually
+    wrote — approve-blind on body alone loses the last human check that the
+    thread has not been reply-all'd into a bogus recipient list. Recipients are
+    pinned from ``thread.participants`` the same way ``sender.build_reply_mime``
+    does at send time, so what the vendor sees is what will be sent.
+    """
+    metadata = draft.metadata or {}
+    thread = draft.thread
+    parent = draft.in_reply_to_message
+    to_addresses, cc_addresses = safety.pin_recipients(
+        list(thread.participants or []),
+        producer_email,
+        agent_email,
+    )
+    canonical = parsing.canonical_subject(thread.canonical_subject or "")
+    subject = f"Re: {canonical}" if canonical else "Re:"
+    return {
+        "id": str(draft.id),
+        "threadId": str(draft.thread_id),
+        "kind": draft.kind,
+        "status": draft.status,
+        "body": draft.body,
+        "to": to_addresses,
+        "cc": cc_addresses,
+        "subject": subject,
+        "inReplyToPreview": (
+            (parent.body_clean or "")[:_INBOUND_PREVIEW_MAX] if parent else ""
+        ),
+        "inReplyToFrom": parent.from_email if parent else "",
+        "inReplyToDate": parent.created_at.isoformat() if parent else None,
+        "variant": metadata.get("variant", ""),
+        "action": metadata.get("action", ""),
+        "edited": bool(metadata.get("edited", False)),
+        "overdue": bool(metadata.get("overdue", False)),
+        "expiresAt": draft.expires_at.isoformat() if draft.expires_at else None,
+        "createdAt": draft.created_at.isoformat(),
+    }
+
+
+def serialize_profile(profile: VendorAgentProfile) -> dict:
+    """Vendor-facing view of the agent's personality and settings."""
+    return {
+        "instruction": profile.system_prompt,
+        "businessContext": profile.business_context,
+        "tone": profile.tone,
+        "specialRules": list(profile.special_rules or []),
+        "producerEmail": profile.producer_email,
+        "workingHours": profile.working_hours or {},
+        "notificationRules": profile.notification_rules or {},
+        "autonomyMode": profile.autonomy_mode,
+    }
+
+
+def serialize_action_item(item: ActionItem) -> dict:
+    """Vendor-facing view of a tracked promise."""
+    return {
+        "id": str(item.id),
+        "assignee": item.assignee,
+        "text": item.text,
+        "status": item.status,
+        "dueAt": item.due_at.isoformat() if item.due_at else None,
+        "createdAt": item.created_at.isoformat(),
+    }

@@ -16,6 +16,12 @@ SECRET_KEY = env(
 # https://docs.djangoproject.com/en/dev/ref/settings/#test-runner
 TEST_RUNNER = "django.test.runner.DiscoverRunner"
 
+# EMAIL AGENT (Stage 3): deterministic Fernet key for encrypted fields in tests
+FERNET_KEYS = env.list(
+    "FERNET_KEYS",
+    default=["Qr0kH-tgQGFEG9t96ad3PtnvA2zeuaMf_3jnTEHbqDg="],
+)
+
 # PASSWORDS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#password-hashers
